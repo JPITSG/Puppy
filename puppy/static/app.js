@@ -5477,6 +5477,9 @@ function backendSupportsSessionTasks(bid) {
 function backendSupportsTaskFold(bid) {
   return nodeHasCapability(bid, "session-task-fold");
 }
+function backendSupportsTaskRefresh(bid) {
+  return nodeHasCapability(bid, "session-task-refresh");
+}
 
 /* The local node advertises its capabilities on /api/state; a paired backend
    carries its own list. */
@@ -14730,7 +14733,7 @@ function sessionTaskUpdateNode(d) {
   // Session-task events carry their action in the existing text field.
   // Only split a known heading; preserve other notices in full.
   const actions = [["Task started", "busy"], ["Task changes applied", "ok"],
-    ["Conflict resolution started in task", "busy"]];
+    ["Conflict resolution started in task", "busy"], ["Task refreshed from Main", "ok"]];
   const [label, tone] = actions.find(([label]) => text.startsWith(label + ": ")) || ["Task updated", ""];
   return taskUpdateNode(label, tone, text, "session-task-update");
 }
@@ -15321,6 +15324,30 @@ function taskReviewable(task) {
    failed - is a task nobody needs to stop, so it can go. */
 function taskRemovable(task) {
   return !!task && !["running", "queued"].includes(task.state);
+}
+/* Refresh is a command, not a navigation destination. The shared operation
+   surface owns cancellation; Back/Forward never repeat this POST. */
+const refreshingTasks = new Set();
+async function refreshTask(bid, session) {
+  const task = session && session.task;
+  const key = `${bid}:${session && session.id}`;
+  if (!task || !taskReviewable(task) || !backendSupportsTaskRefresh(bid) || refreshingTasks.has(key)) return;
+  refreshingTasks.add(key);
+  const view = sessionViewFor(bid, session.id);
+  if (view) view.syncTaskReviewMenu();
+  try {
+    const data = await api(bid, `sessions/${task.parent}/tasks/${session.id}/refresh`, {
+      method: "POST", body: {}, timeoutMs: 120000, operation: "Refreshing task from Main",
+    });
+    const count = Number(data.changed_files) || 0;
+    toast(data.refreshed ? `Refreshed from Main · ${count} file${count === 1 ? "" : "s"} changed` :
+      "Task already matches Main", "ok");
+  } catch (error) {
+    if (!error.cancelled) toast(`Could not refresh task from Main · ${error.message}`, "bad");
+  } finally {
+    refreshingTasks.delete(key);
+    if (view) view.syncTaskReviewMenu();
+  }
 }
 /* A removed task's condensed conversation, folded into Main where it was
    removed. Its state is the task's last state in the sheet's voice, except
@@ -18527,7 +18554,7 @@ class SessionView {
           }
           return node;
         }
-        if (d.subtype === "session_task") return sessionTaskUpdateNode(d);
+        if (d.subtype === "session_task" || d.subtype === "session_task_refresh") return sessionTaskUpdateNode(d);
         if (d.subtype === "session_task_archive") return taskArchiveNode(d, ev.ts, this.tab.bid);
         if (d.subtype === "session_request" && d.session_request) {
           const card = el("div", "session-request-card");
@@ -19519,6 +19546,10 @@ class SessionView {
     const task = this.session && this.session.task;
     review.disabled = !task || !workspaceViewFor(this.tab.bid, task.parent) ||
       !taskReviewable(task);
+    const refresh = this.taskRefreshMenuButton;
+    if (refresh && refresh.isConnected)
+      refresh.disabled = review.disabled || !backendSupportsTaskRefresh(this.tab.bid) ||
+        refreshingTasks.has(`${this.tab.bid}:${this.tab.sid}`);
   }
 
   showMenu(anchor) {
@@ -19545,6 +19576,8 @@ class SessionView {
         const workspace = task && workspaceViewFor(this.tab.bid, task.parent);
         if (workspace && taskReviewable(task)) modalReviewTask(workspace, this.session);
       });
+      if (backendSupportsTaskRefresh(this.tab.bid))
+        this.taskRefreshMenuButton = add("Refresh from Main", () => refreshTask(this.tab.bid, this.session));
     }
     /* the session's setting: from a task's head it sets Main's, which every
        tab of the workspace follows */

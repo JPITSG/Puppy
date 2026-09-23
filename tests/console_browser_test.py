@@ -29,7 +29,7 @@ os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from puppy import auth, backends, browser, config, db, notices, runner, search, session_git, session_tasks, session_aliases, terminal, token_usage
+from puppy import auth, backends, browser, config, db, notices, runner, search, session_git, session_tasks, session_aliases, terminal, token_usage, workspaces
 from puppy import web as webui
 from puppy.drivers import all_drivers
 
@@ -1338,6 +1338,95 @@ async def task_strip_verbs_checks(instance):
         runner.broadcast_sessions()
         await evaluate(instance, "%s.select(1); true" % workspace)
     print("PASS: the task strip's Review and bin stand between Tasks and + for the selected task only, both greyed while it works with the bin keeping its place and taking no tone, glyphs centred on the strip's box, the bin red under the pointer, real clicks opening the review sheet and the named Remove task confirm, Cancel keeping everything", flush=True)
+
+
+async def task_refresh_checks(instance):
+    """The task menu refreshes a real copy, without replaying the command on
+    Back/Forward, and reports a refused edit on desktop and narrow screens."""
+    project = ROOT / "refresh-example"
+    project.mkdir()
+    session_tasks._git(project, "init", "--quiet")
+    (project / "example.txt").write_text("Original example\n")
+    session_tasks._git(project, "add", "-A")
+    session_tasks._git(project, "commit", "-qm", "Example baseline")
+    parent = db.create_session("Refresh example", "codex", str(project), "", "", "", "workspace-write")
+    path = workspaces.create_temporary()
+    base = session_tasks._copy_project(str(project), path)
+    tid = db.create_session("Design discussion", "codex", path, "", "", "", "workspace-write", workspace_kind="temporary")
+    session_tasks._save(tid, {"format": 1, "parent": parent, "request_id": "refresh-preview",
+        "prompt": "Discuss the design before editing", "context": "", "base": base,
+        "created_at": time.time(), "outcome": "ok", "summary": "Design discussed; no edits yet",
+        "completed_at": time.time(), "applied_at": 0, "result_seq": 0})
+    db.add_event(tid, "assistant", {"text": "The discussion can continue after refreshing the files."})
+    runner.broadcast_sessions()
+    workspace = "state.views['s:0:%d']" % parent
+    view = workspace + ".activeView()"
+    route = "/api/sessions/%d/tasks/%d/refresh" % (parent, tid)
+
+    async def press(expression):
+        point = await evaluate(instance, """(() => {const b=%s, r=b.getBoundingClientRect();
+            return {x:r.x+r.width/2, y:r.y+r.height/2, visible:r.width>0 && r.height>0 &&
+                r.top>=0 && r.bottom<=innerHeight && r.left>=0 && r.right<=innerWidth};})()""" % expression)
+        assert point.pop("visible"), (expression, point)
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1),
+                                session=instance.page_session)
+
+    row = lambda label: "[...document.querySelectorAll('.menu button')].find(b=>b.textContent===%s)" % json.dumps(label)
+    try:
+        await until(instance, "!!findSessionMeta(0,%d)" % tid)
+        await evaluate(instance, """window.refreshOriginalFetch=fetch; window.refreshRequests=0;
+            fetch=(url,opts)=>{if(url===%s) refreshRequests++; return refreshOriginalFetch(url,opts);};
+            openSessionTab(0,%d,findSessionMeta(0,%d)); %s.openTask(%d); closeDrawer(); true""" %
+            (json.dumps(route), parent, parent, workspace, tid))
+        await until(instance, "%s.session?.id===%d && !navigation.pending && !navigation.scheduled" % (view, tid))
+        for width, height in ((1440, 900), (390, 844)):
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1, "mobile": width == 390},
+                session=instance.page_session)
+            (project / "example.txt").write_text("Main's next revision at %d\n" % width)
+            before = await evaluate(instance, "({requests:refreshRequests, history:history.length})")
+            await press(view + ".root.querySelector('.menu-btn')")
+            labels = await evaluate(instance, "[...document.querySelectorAll('.menu button')].map(b=>b.textContent)")
+            assert labels.index("Refresh from Main") == labels.index("Review changes") + 1, labels
+            await press(row("Refresh from Main"))
+            await until(instance, "refreshRequests===%d && !refreshingTasks.has('0:%d') && "
+                                  "document.querySelector('#toasts').textContent.includes('Refreshed from Main')" %
+                                  (before["requests"] + 1, tid))
+            assert (Path(path) / "example.txt").read_bytes() == (project / "example.txt").read_bytes()
+            assert await evaluate(instance, "history.length===%d && %s.selected===%d" % (before["history"], workspace, tid))
+            # Reading the new review is navigable; neither reopening that
+            # sheet nor returning to the task repeats its refresh command.
+            await press(view + ".root.querySelector('.menu-btn')")
+            await press(row("Review changes"))
+            await until(instance, "document.querySelector('#tr-files')?.textContent==='No changes to apply' && !navigation.scheduled")
+            await evaluate(instance, "history.back(); true")
+            await until(instance, "!document.querySelector('.task-review-modal') && !navigation.pending")
+            await evaluate(instance, "history.forward(); true")
+            await until(instance, "document.querySelector('#tr-files')?.textContent==='No changes to apply' && !navigation.pending")
+            await press("document.querySelector('#tr-close')")
+            await until(instance, "!document.querySelector('.task-review-modal') && !navigation.pending")
+            assert await evaluate(instance, "refreshRequests===%d" % (before["requests"] + 1))
+            # Local edits stay intact and a refusal uses the normal notice.
+            (Path(path) / "example.txt").write_text("Keep this task edit\n")
+            await press(view + ".root.querySelector('.menu-btn')")
+            await press(row("Refresh from Main"))
+            await until(instance, "refreshRequests===%d && !refreshingTasks.has('0:%d') && "
+                                  "document.querySelector('#toasts').textContent.includes('Could not refresh task from Main')" %
+                                  (before["requests"] + 2, tid))
+            assert (Path(path) / "example.txt").read_text() == "Keep this task edit\n"
+            (Path(path) / "example.txt").write_bytes((project / "example.txt").read_bytes())
+        assert len([e for e in db.get_events(tid) if e["data"].get("subtype") == session_tasks.REFRESH_SUBTYPE]) == 2
+    finally:
+        await evaluate(instance, "fetch=refreshOriginalFetch; delete window.refreshOriginalFetch; "
+                                 "closeAllMenus(null); closeTab('s:0:%d'); activateTab('s:0:1'); true" % parent)
+        workspaces.remove_temporary(db.get_session(tid))
+        runner.drop_hub(tid); db.delete_session(tid)
+        runner.drop_hub(parent); db.delete_session(parent)
+        runner.broadcast_sessions()
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    print("PASS: Refresh from Main directly below Review changes, real copy updated, refused edits kept, no history replay, desktop and phone", flush=True)
 
 
 async def drag_scroll_checks(instance):
@@ -3272,6 +3361,7 @@ async def checks(a, b, hub, capture=False):
     await pane_resize_checks(a)
     await reading_place_checks(a)
     await task_strip_verbs_checks(a)
+    await task_refresh_checks(a)
     await drag_scroll_checks(a)
     await narrow_composer_checks(a, capture)
     await composer_enter_checks(a, capture)
@@ -5158,6 +5248,9 @@ async def main(args):
             if args.navigation_only:
                 await navigation_checks(instances[0], url, sid)
                 return
+            if args.task_refresh_only:
+                await task_refresh_checks(instances[0])
+                return
             await session_activity_checks(*instances)
             await quota_checks(instances[0])
             await engine_activity_checks(instances[0])
@@ -5184,4 +5277,5 @@ if __name__ == "__main__":
     parser.add_argument("--screenshots", action="store_true")
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--navigation-only", action="store_true")
+    parser.add_argument("--task-refresh-only", action="store_true")
     asyncio.run(main(parser.parse_args()))

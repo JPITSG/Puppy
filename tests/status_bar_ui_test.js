@@ -37,6 +37,7 @@ const context = vm.createContext({
   },
   cancelSessionDrag() {}, cancelTabDrag() {}, positionContextMenu() {}, positionAnchoredMenu() {},
   backendSupportsEngineDefaults: () => false, backendSupportsSessionPinning: () => false,
+  backendSupportsTaskRefresh: () => false,
   appendSessionTasksToggle() {}, sessionWorkspace: () => null, canMoveScratch: () => false,
   titlePending: () => false, taskActivityTitle: () => "", promptStatusLabel: (text) => {
     const node = document.createElement("span"); node.textContent = text; return node;

@@ -39,6 +39,19 @@ on the next turn, and `session_meta` plus session-list updates publish the new
 path. Moves share task-operation guards and shutdown draining. Permanent
 project files are outside snapshot coverage and survive session deletion.
 
+Nodes advertising `session-task-refresh` accept
+`POST /api/sessions/{sid}/tasks/{tid}/refresh` with `{}`. An unchanged, idle task
+is refreshed from its Main session's current local working files using the same
+snapshot rules as task creation. The directory, transcript and native engine
+session are kept; HEAD, index and the existing review baseline advance together.
+The response carries `task`, `refreshed`, `changed_files` and Git name-status
+`files`; identical files return `refreshed: false` with zero changes. Task edits,
+staged changes, queued/held work, busy source projects, ignored-file collisions
+and missing copies are refused with 409. This uses the shared operation
+cancellation, ownership and shutdown guards. A `session_task_refresh` transcript
+event supplies a reminder to re-read files on the next ordinary model turn.
+See [task behavior and persistence](../docs/session-tasks.md).
+
 Nodes advertising `session-task-fold` accept
 `POST /api/sessions/{sid}/tasks/{tid}/remove` with `{"fold": true|false}`
 (default true). With `fold` on, the node appends one `info` event of subtype

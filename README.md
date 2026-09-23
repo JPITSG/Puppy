@@ -443,6 +443,13 @@ does not reopen its tab. Once started, use the task's **Stop** control.
   Main** writes that delta into your working tree, refusing overlapping edits
   that would not apply cleanly. Applied tasks can keep going; the next review
   contains only what changed since.
+- **Refresh from Main**, directly below **Review changes** in a task's menu,
+  replaces an unchanged task's files and starting point with Main's current
+  working files, including uncommitted changes. Its conversation, directory
+  and draft stay in place. Main and the task must be idle; task edits, staged
+  changes and collisions with local ignored files are refused. The next model
+  turn is told to re-read files before editing. Requires a backend advertising
+  `session-task-refresh`.
 - **Resolve conflicts** (on by default) lets a conflicting apply send one
   follow-up to the task's own agent with snapshots of the baseline, the task
   and Main, so the agent reconciles both sides in its copy for you to review
@@ -455,7 +462,7 @@ does not reopen its tab. Once started, use the task's **Stop** control.
   newest folded tasks at the start of its turns.
 
 Tasks need a Git repository. Limits: 64 tasks per session, 50,000 files or
-512 MiB of initial working files, 16 MiB per review. Details and the exact
+512 MiB per source snapshot, 16 MiB per review. Details and the exact
 persistence contract are in [docs/session-tasks.md](docs/session-tasks.md).
 The session menu's **Enable tasks** switch hides or restores the task strip;
 disabling it requires removing that session's existing tasks first. **Show

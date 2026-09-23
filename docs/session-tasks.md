@@ -28,11 +28,11 @@ if another task tab is selected. Model, effort and permissions start with that
 engine's saved defaults on the selected backend. Adjust any of them
 before starting; these choices apply only to the new task. Switching engines
 loads that engine's saved defaults, and effort choices follow the selected model.
-Preparation, review and the checks before applying can be cancelled through
-the shared progress dialog on backends advertising `operation-cancel-v1`.
+Preparation, review, refresh and the checks before applying can be cancelled
+through the shared progress dialog on backends advertising `operation-cancel-v1`.
 Cancellation waits for copy/Git cleanup and never starts a task prompt. Once
-applying files or dispatching conflict resolution begins, that step must finish;
-a running task has its own Stop control.
+applying or refreshing files or dispatching conflict resolution begins, that
+step must finish; a running task has its own Stop control.
 The task opens in its own inner tab; create another to work on a second
 feature concurrently. Every device adds tasks beside Main when it receives the
 session list, including tasks created while that device was away and tasks that
@@ -85,6 +85,35 @@ and refuses overlapping changes that cannot apply cleanly. Applied tasks can be
 continued; the next review contains only changes since their last apply. Review
 and apply again after resolving conflicts in the task or Main. Main does not
 silently synchronize changes back into already-created task copies.
+
+**Refresh from Main** sits immediately below **Review changes** in a task's
+menu on backends advertising `session-task-refresh`. Use it after discussing a
+task, before making its code changes, to continue on Main's latest files. It
+captures the Main session's current local repository, whatever its branch or
+subdirectory, including uncommitted changes, force-tracked ignored files and
+nonignored untracked files. It does not fetch a remote branch. The task keeps
+its directory, conversation, native engine session, settings, attachments and
+draft. The task's current branch (or detached HEAD), index and review baseline
+advance to the captured snapshot; subsequent reviews contain only new task edits.
+Previously opened reviews must be refreshed before applying.
+
+The task must have no changes since its review baseline and no staged edits,
+including a staged edit hidden by restoring its working file. Running tasks,
+queued or held work, unresolved Git conflicts and missing working copies are
+refused. Main and other sessions using the source project must also be idle.
+The command shares creation/apply's project guards and snapshot rules, including
+the file/size limits and symlink/submodule restrictions. It retains ignored
+local artifacts and refuses overlapping incoming paths instead of overwriting
+them. An unchanged Main is a no-op. External editors remain the user's
+responsibility, as with creation and apply.
+
+A successful refresh appends a notice to the task's transcript. Its next ordinary
+model turn receives a reminder that earlier file reads may be stale and that it
+must re-read relevant files before editing, with a bounded list of changed paths.
+The reminder survives restarts and failed turns until an ordinary turn succeeds;
+maintenance actions such as compact do not consume it. Refresh does not start an
+agent turn. Browser Back/Forward never repeat the refresh command; Back on its
+delayed progress dialog uses the shared cancellation contract.
 
 The review sheet's **Fold into Main after applying** checkbox is on for each
 new review. When enabled, a successful apply (including **Mark as reviewed**)
@@ -146,11 +175,11 @@ keep the plain remove.
 Main must use a local project directory on its executing node; linked remote
 workspace mirrors are not supported for tasks yet. Each task uses an independent local Git clone in a Puppy-owned scratch workspace.
 It starts with Main's working files, including uncommitted changes and nonignored
-untracked files. Ignored files/dependencies are omitted; root AGENTS.md and
+untracked files. Untracked ignored files/dependencies are omitted; root AGENTS.md and
 CLAUDE.md are retained. Submodules and absolute or outside-project symlinks are
-refused. Initial working files are bounded to 50,000 files / 512 MiB, reviews to
+refused. Each source snapshot is bounded to 50,000 files / 512 MiB, reviews to
 16 MiB, and each session to 64 tasks. Main and other Puppy sessions working in the
-source directory must be idle during creation/apply. Existing isolated tasks can
+source directory must be idle during creation, refresh and apply. Other isolated tasks can
 continue running. External editors remain the user's responsibility; these
 working copies are not an OS security sandbox.
 
@@ -188,6 +217,11 @@ once until explicitly closed again.
 
 Each task copy also names its review baseline as the Git ref `refs/puppy/base`
 so the engine's own history rewriting can never garbage-collect it.
+Refresh updates that ref and the existing record's `base` together with the
+task's files and Git starting point. Its reminder is an ordinary `info` event
+with subtype `session_task_refresh` and Git name-status `files`; the existing
+backup includes the event and the independent Git objects. No additional
+persisted record shape or engine-specific state is used.
 Conflict-resolution inputs are preserved at
 `refs/puppy/resolve/<review-token>/{base,task,main}` inside that copy. The next
 review uses the supplied Main snapshot as its baseline; preparation leaves the

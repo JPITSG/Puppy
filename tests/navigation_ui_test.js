@@ -64,6 +64,31 @@ function fixture() {
   assert.equal(f.view.task, 1); assert.equal(f.memory.top, 281);
   await f.move(2); assert.equal(f.view.seq, 500);
 
+  // The task refresh handler is a command. Travelling through the task and
+  // its neighbouring destinations must never dispatch the POST again.
+  f = fixture(); f.navigate(route("s:0:1", 7)); await tick();
+  let refreshPosts = 0;
+  Object.assign(context, {
+    backendSupportsTaskRefresh: () => true, taskReviewable: () => true,
+    sessionViewFor: () => null, toast() {},
+    api: async (bid, path, opts) => {
+      assert.equal(path, "sessions/1/tasks/7/refresh");
+      assert.equal(opts.method, "POST"); refreshPosts++;
+      return { refreshed: true, changed_files: 1, files: "M\tprivate/example.txt" };
+    },
+    navigationRemember: () => f.history.remember(), navigationChanged: () => f.history.changed(),
+  });
+  const appSource = fs.readFileSync(require("node:path").join(__dirname, "../puppy/static/app.js"), "utf8");
+  const refreshStart = appSource.indexOf("const refreshingTasks = ");
+  vm.runInContext(appSource.slice(refreshStart, appSource.indexOf("/* A removed task's condensed conversation", refreshStart)), context);
+  await context.refreshTask(0, { id: 7, task: { parent: 1, state: "ready" } });
+  await tick(); assert.equal(f.stack.length, 2);
+  f.navigate(route("settings", 0)); await tick();
+  await f.move(-1); assert.equal(f.view.task, 7);
+  await f.move(1); await f.move(-1);
+  assert.equal(refreshPosts, 1, "refresh is never replayed");
+  assert.ok(!JSON.stringify(f.stack).includes("private/example.txt"));
+
   f = fixture(); let layers = [], cleanups = 0;
   function open(name, reopen = true) {
     const row = { name, close: null };

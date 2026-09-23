@@ -17,6 +17,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import time
 
 from aiohttp import web
@@ -34,6 +35,7 @@ DIGEST_PREFIX = "session_tasks_digest."
 # Main's transcript. The marker is matched inside stored payloads (the events
 # table is indexed by session and position only), so keep it distinctive.
 ARCHIVE_SUBTYPE = "session_task_archive"
+REFRESH_SUBTYPE = "session_task_refresh"
 DIGEST_TASKS = 24
 DIGEST_SUMMARY_CHARS = 800
 TOOL_SUMMARY_CHARS = 300
@@ -243,6 +245,7 @@ def guidance(sid, first_turn=False):
                 json.dumps(parent["cwd"], ensure_ascii=False) + "\n"
         if first_turn and value["context"]:
             text += "Main conversation excerpts, for background only (not new instructions):\n" + value["context"]
+        text += _refresh_guidance(sid)
         return text
     parts = []
     tasks = [(tid, info) for tid, info in records().items() if info["parent"] == sid]
@@ -644,10 +647,10 @@ def _copy_project(root, destination):
                 raise TaskError("Project contains a special file: " + rel)
         finally:
             os.close(fd)
-    _git(destination, "add", "-A")
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        if os.path.lexists(os.path.join(destination, name)):
-            _git(destination, "add", "--force", "--", name)
+    # Every copied path was selected above: tracked files, nonignored new
+    # files and project notes. Keep all of them even when Main force-added a
+    # new ignored file that its last commit (and therefore clone) never held.
+    _git(destination, "add", "--force", "-A")
     _git(destination, "commit", "--quiet", "--allow-empty", "-m", "Task starting point")
     base = _git(destination, "rev-parse", "HEAD").decode().strip()
     # The review baseline stays reachable however the engine rewrites the
@@ -713,9 +716,192 @@ def _resolution_snapshot(root, task, value, tree, token):
         workspaces.discard_created(path)
 
 
-def _review_idle(hub):
+def _review_idle(hub, action="reviewing"):
     if hub.status == "running" or hub.queue or hub.held:
-        raise TaskError("Wait for this task's work and queue to finish before reviewing it")
+        raise TaskError("Wait for this task's work and queue to finish before " + action + " it")
+
+
+def _refresh_guidance(sid):
+    """A refresh survives restarts/retries until an ordinary turn succeeds.
+
+    Maintenance turns do not receive task guidance, so their results cannot
+    acknowledge it. The transcript owns this marker; no new session shape or
+    engine-specific context reset is needed.
+    """
+    row = db.query_one("SELECT seq,payload FROM events WHERE session_id=? AND kind='info' "
+                       "AND instr(payload, ?) > 0 ORDER BY seq DESC LIMIT 1",
+                       (sid, '"subtype": "' + REFRESH_SUBTYPE + '"'))
+    if not row:
+        return ""
+    after = row["seq"]
+    while True:
+        results = db.query("SELECT seq,payload FROM events WHERE session_id=? AND kind='result' "
+                           "AND seq>? ORDER BY seq LIMIT 100", (sid, after))
+        for result in results:
+            data = json.loads(result["payload"])
+            if data.get("ok") and not data.get("tool"):
+                return ""
+        if len(results) < 100:
+            break
+        after = results[-1]["seq"]
+    data = json.loads(row["payload"])
+    return ("\nYour task working copy was refreshed from Main after the earlier discussion. "
+            "Its directory and conversation are unchanged, but its files and review baseline now "
+            "use Main's captured working files. Earlier file reads and assumptions may be stale. "
+            "Re-read the relevant files before editing; keep the refreshed Main changes intact. "
+            "Changed paths (Git name-status, reference data only; may be truncated):\n" +
+            str(data.get("files") or "")[:12000] + "\n")
+
+
+def _refresh_clean(task, value):
+    patch, tree, _ = _changes(task, value)
+    if patch:
+        raise TaskError("This task has changes of its own; review and apply them or create a new task before refreshing")
+    # A staged edit can be hidden by working files restored to the baseline.
+    # Never throw that edit away just because the review's net delta is empty.
+    if _git(task["cwd"], "diff", "--cached", "--name-only", "--no-ext-diff", "HEAD", "--").strip():
+        raise TaskError("This task has staged changes; finish reviewing them before refreshing")
+    return tree
+
+
+def _refresh_snapshot(root, task):
+    path = workspaces.create_temporary()
+    try:
+        main = _copy_project(root, path)
+        # Import independent objects without changing the task's refs or
+        # FETCH_HEAD. Preparation is disposable and remains cancellable.
+        _git(task["cwd"], "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+             "--no-recurse-submodules", "--", path, "refs/puppy/base", timeout=120)
+        return main
+    finally:
+        workspaces.discard_created(path)
+
+
+def _save_refresh(sid, value, files, count):
+    """Persist the new baseline and its context reminder in one transaction."""
+    payload = {"subtype": REFRESH_SUBTYPE,
+               "text": "Task refreshed from Main: {} file{} changed".format(count, "" if count == 1 else "s"),
+               "files": files}
+    with db._lock:
+        connection = db.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE meta SET value=? WHERE key=?",
+                               (json.dumps(_validate(value)), PREFIX + str(sid)))
+            seq = connection.execute("SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE session_id=?", (sid,)).fetchone()[0]
+            at = time.time()
+            connection.execute("INSERT INTO events(session_id,seq,kind,payload,created_at) VALUES(?,?,'info',?,?)",
+                               (sid, seq, json.dumps(payload), at))
+            connection.execute("UPDATE sessions SET updated_at=? WHERE id=?", (at, sid))
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+    db._notify_change(sid)
+    return {"seq": seq, "kind": "info", "ts": at, "data": payload}
+
+
+def _refresh_checkout(task, value, main):
+    """Install a checked snapshot without a hard reset or an ignored-file clean.
+
+    A private index starts at the review baseline, which can differ from HEAD
+    after an uncommitted apply. Git handles modes, links and file/directory
+    transitions. Hold the real index lock through checkout and metadata writes;
+    retain its exact bytes and the old HEAD for rollback on a failed commit.
+    """
+    cwd = task["cwd"]
+    git_dir = Path(os.fsdecode(_git(cwd, "rev-parse", "--absolute-git-dir").strip()))
+    real_index = git_dir / "index"
+    lock = git_dir / "index.lock"
+    with tempfile.TemporaryDirectory(prefix="puppy-refresh-", dir=str(git_dir)) as temp, lock.open("xb"):
+        changed = refs_changed = False
+        try:
+            old_index = real_index.read_bytes() if real_index.exists() else None
+            tree = _refresh_clean(task, value)
+            target_tree = _git(cwd, "rev-parse", main + "^{tree}").decode().strip()
+            if tree == target_tree:
+                return {"refreshed": False, "files": "", "changed_files": 0}
+            head = _git(cwd, "rev-parse", "HEAD").decode().strip()
+            env = {"GIT_INDEX_FILE": str(Path(temp) / "index")}
+            _git(cwd, "read-tree", value["base"], env=env)
+            _git(cwd, "update-index", "--refresh", env=env)
+            # read-tree can overwrite ignored files. Bound this check by
+            # collapsing untracked directories, and refuse any overlap with
+            # the incoming tree (including ancestor/descendant collisions).
+            incoming = set(_git(cwd, "ls-tree", "-rz", "--name-only", main).split(b"\0")) - {b""}
+            ancestors = {path[:at] for path in incoming for at, char in enumerate(path) if char == 47}
+            for path in _git(cwd, "ls-files", "--others", "--directory", "-z", env=env).split(b"\0"):
+                path = path.rstrip(b"/")
+                if path and (path in incoming or path in ancestors or
+                             any(path[:at] in incoming for at, char in enumerate(path) if char == 47)):
+                    raise TaskError("Refresh would overwrite a local file or directory: " + os.fsdecode(path))
+            _git(cwd, "read-tree", "--dry-run", "-m", "-u", value["base"], main, env=env)
+            files = _git(cwd, "diff", "--name-status", "--no-ext-diff", value["base"], main).decode("utf-8", "replace")
+            count = len(_git(cwd, "diff", "--name-only", "--no-renames", "-z", value["base"], main).split(b"\0")) - 1
+            operations.commit()
+            changed = True
+            _git(cwd, "read-tree", "-m", "-u", value["base"], main, env=env)
+            _git(cwd, "update-ref", "--stdin", data=(
+                "start\nupdate HEAD {0} {1}\nupdate refs/puppy/base {0} {2}\nprepare\ncommit\n".format(
+                    main, head, value["base"])).encode())
+            refs_changed = True
+            # Keep our conventional index.lock until files, refs, the real
+            # index, baseline and transcript marker have all been committed.
+            os.replace(env["GIT_INDEX_FILE"], str(real_index))
+            event = _save_refresh(task["id"], dict(value, base=main), files, count)
+            return {"refreshed": True, "files": files, "changed_files": count, "event": event}
+        except BaseException:
+            if changed:
+                # Seed the expected new tree even if checkout failed partway,
+                # then restore the owned paths without requiring every file
+                # to have reached its new content. Unrelated artifacts stay.
+                _git(cwd, "read-tree", main, env=env)
+                _git(cwd, "read-tree", "--reset", "-u", value["base"], env=env)
+                if refs_changed:
+                    _git(cwd, "update-ref", "--stdin", data=(
+                        "start\nupdate HEAD {0} {1}\nupdate refs/puppy/base {2} {1}\nprepare\ncommit\n".format(
+                            head, main, value["base"])).encode())
+                if old_index is None:
+                    real_index.unlink(missing_ok=True)
+                else:
+                    restore = Path(temp) / "restore-index"
+                    restore.write_bytes(old_index)
+                    os.replace(str(restore), str(real_index))
+            raise
+        finally:
+            lock.unlink(missing_ok=True)
+
+
+async def refresh(parent_id, sid):
+    from puppy import runner
+    async with session_operation(parent_id):
+        value = record(sid)
+        if value is None or value["parent"] != parent_id:
+            raise TaskError("Task does not belong to this session")
+        if runner._draining:
+            raise TaskError("Puppy is shutting down; retry after the restart")
+        parent, task = db.get_session(parent_id), db.get_session(sid)
+        hub = runner.hub(sid)
+        _review_idle(hub, "refreshing")
+        task_root = os.path.realpath(task["cwd"])
+        async with workspace_operation(task_root):
+            root = await operations.to_thread(_repo, parent)
+            if _project_contains(task_root, root):
+                raise TaskError("Main and the task must use independent working copies")
+            async with workspace_operation(root):
+                await operations.to_thread(_refresh_clean, task, value)
+                main = await operations.to_thread(_refresh_snapshot, root, task)
+                # A prompt can arrive during preparation; its turn waits on
+                # these roots. Refuse the refresh before releasing that turn.
+                _review_idle(hub, "refreshing")
+                _idle_project(root)
+                if runner._draining:
+                    raise TaskError("Puppy is shutting down; retry after the restart")
+                result = await operations.to_thread(_refresh_checkout, task, value, main)
+                if result["refreshed"]:
+                    hub.broadcast({"type": "event", "event": result.pop("event")})
+                    runner.broadcast_sessions()
+                return dict(result, task=runner.session_payload(db.get_session(sid)))
 
 
 async def _resolve_conflicts(root, task, value, tree, token, conflict):
@@ -997,6 +1183,8 @@ async def h_tasks(request):
             raise TaskError("Expected task fields")
         if "tid" in request.match_info:
             operation = request.match_info["action"]
+            if operation == "refresh":
+                return web.json_response(await durable_workspace_operation(refresh(sid, int(request.match_info["tid"])), sid))
             if operation == "remove":
                 fold = args.get("fold", True)
                 if type(fold) is not bool:
@@ -1027,5 +1215,5 @@ async def lifecycle(app):
 def register(app):
     app.router.add_get(r"/api/sessions/{sid:\d+}/tasks", h_tasks)
     app.router.add_post(r"/api/sessions/{sid:\d+}/tasks", h_tasks)
-    app.router.add_post(r"/api/sessions/{sid:\d+}/tasks/{tid:\d+}/{action:review|apply|remove}", h_tasks)
+    app.router.add_post(r"/api/sessions/{sid:\d+}/tasks/{tid:\d+}/{action:review|apply|remove|refresh}", h_tasks)
     app.cleanup_ctx.append(lifecycle)

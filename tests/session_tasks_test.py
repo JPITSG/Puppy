@@ -364,6 +364,10 @@ async def actual_runner(parent):
             if 'Resolve conflicts for' in prompt:
                 assert not first_turn and session['native_session_id'] == 'test-native-task'
                 assert_main_inspection(prompt, db.get_session(parent)['cwd'])
+            if prompt in ('Continue after refresh', 'Continue once more'):
+                assert not first_turn and session['native_session_id'] == 'test-native-task'
+                assert ('refreshed from Main' in kwargs['system_prompt']) == (prompt == 'Continue after refresh')
+                assert (Path(session['cwd']) / 'runner-refresh').read_text() == 'Main advanced during discussion\n'
             return [sys.executable, "-c", "import json,time; time.sleep(" + ("3" if "Stop me" in prompt else ".4") + "); print(json.dumps({'a':'native_id','id':'test-native-task'})); print(json.dumps({'a':'event','kind':'assistant','data':{'text':'Actual runner finished'}})); print(json.dumps({'a':'result','data':{'ok':True}}))"]
         def parse_line(self, line, ctx):
             return [json.loads(line)]
@@ -376,6 +380,12 @@ async def actual_runner(parent):
             assert tasks.public(row['id'])['state'] == 'ready', db.get_events(row['id'])
             assert tasks.public(row['id'])['summary'] == 'Actual runner finished'
         project = Path(db.get_session(parent)['cwd'])
+        (project / 'runner-refresh').write_text('Main advanced during discussion\n')
+        assert (await tasks.refresh(parent, a['id']))['refreshed']
+        for prompt in ('Continue after refresh', 'Continue once more'):
+            assert not runner.hub(a['id']).send_message(prompt).get('error')
+            await runner.hub(a['id']).turn_task
+            assert tasks.public(a['id'])['state'] == 'ready', db.get_events(a['id'])
         (Path(a['cwd']) / 'runner-conflict').write_text('task addition\n')
         (project / 'runner-conflict').write_text('Main addition\n')
         review = await tasks.review(parent, a['id'])
@@ -383,7 +393,7 @@ async def actual_runner(parent):
         assert response['resolving']
         await runner.hub(a['id']).turn_task
         assert tasks.public(a['id'])['state'] == 'ready', db.get_events(a['id'])
-        assert len([row for row in db.get_events(a['id']) if row['kind'] == 'user']) == 2
+        assert len([row for row in db.get_events(a['id']) if row['kind'] == 'user']) == 4
         assert (project / 'runner-conflict').read_text() == 'Main addition\n'
         (project / 'runner-conflict').unlink()
         slow = await tasks.create(parent, {"prompt":"Stop me", "request_id":"stop-runner"})
@@ -411,6 +421,7 @@ async def toggle_api(app, parent, child):
         assert 'session-tasks-toggle' in app['puppy_capabilities']
         assert 'session-task-config' in app['puppy_capabilities']
         assert 'session-task-conflict-resolution' in app['puppy_capabilities']
+        assert 'session-task-refresh' in app['puppy_capabilities']
         assert 'session-task-fold' in app['puppy_capabilities']
         await configured_creation_api(client, parent)
         await resolution_api(client, parent)

@@ -248,6 +248,8 @@ BASE_CAPABILITIES = (
     "browser-navigation-stop",
     # Apply may start one conflict-resolution prompt in the task, for re-review.
     "session-task-conflict-resolution",
+    # Refresh an unchanged task copy and its review baseline from Main.
+    "session-task-refresh",
     "session-tasks",
     # Task creation accepts explicit engine/model/effort/permission choices.
     "session-task-config",

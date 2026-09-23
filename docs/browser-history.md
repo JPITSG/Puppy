@@ -11,6 +11,7 @@ There is no extra entry trapping the reader at the console's starting page.
 | Open or select a session, Settings, Search, terminal, browser or VNC tab | One destination; Back changes the selected view and keeps other tabs and running work alive |
 | Focus another split pane, or move a tab into another pane | Records the selected destination; traversal uses the tab's current pane and preserves the edited layout |
 | Main and task tabs, including tasks opened from the Tasks sheet | Records the selected conversation, including hidden task tabs reopened by history |
+| Refresh from Main in a task's menu | A command with no destination entry; Back/Forward never refresh again. Back on delayed progress requests cancellation and waits for cleanup |
 | Submit a search, or change a filter once one has run | Records query, filters, backend selection and result list together; a filter changed before the first search or typing alone adds no stop. A session's "Show all" page lands in the result list it was pressed in, so Back and Forward show what was loaded; a new search or closing the tab cancels pages still loading and hands their buttons back |
 | Open a search hit, session citation, or jump to latest | Records the conversation and message location; Back restores the prior reading position or search results |
 | Settings backend selectors in Timeouts, Timers and System prompt | Records the backend being viewed; restores it through the existing read and draft-handling paths |
