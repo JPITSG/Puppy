@@ -137,19 +137,17 @@ def demo_token_usage(now=None):
                 amounts = {"input": int(900 * scale), "output": int(14000 * scale),
                            "cache_read": int(420000 * scale), "cache_write": int(9000 * scale),
                            "reasoning": int(5000 * scale) if engine != "claude" else 0}
-                cost = round(0.9 * scale, 4) if engine == "claude" else None
                 rows.append(token_usage._row(ref, at, session["id"], "turn", engine, model,
-                                             amounts, cost))
+                                             amounts))
                 if engine == "claude" and turn % 3 == 0:
                     rows.append(token_usage._row(ref, at, session["id"], "turn", engine,
                                                  "preview-helper", {"input": 2400, "output": 300,
-                                                 "cache_read": 0, "cache_write": 0, "reasoning": 0},
-                                                 0.004))
+                                                 "cache_read": 0, "cache_write": 0, "reasoning": 0}))
         if day % 4 == 0:
             rows.append(token_usage._row("spawn:title{}:{}".format(day, int(start)), start - 1800,
                                          None, "title", "claude", "preview-helper",
                                          {"input": 600, "output": 20, "cache_read": 0,
-                                          "cache_write": 0, "reasoning": 0}, 0.001))
+                                          "cache_write": 0, "reasoning": 0}))
     token_usage.store(rows)
     return rows
 
@@ -4868,9 +4866,9 @@ async def token_usage_checks(instance, capture=False):
     served = token_usage.report(span["since"], span["until"])
     totals = served["totals"]
     whole = totals["input"] + totals["output"] + totals["cache_read"] + totals["cache_write"]
-    expected = await evaluate(instance, "[%d,%d,%d,%d].map(fmtUsage).concat([(%d).toLocaleString(), fmtUsd(%r)])" % (
+    expected = await evaluate(instance, "[%d,%d,%d,%d].map(fmtUsage).concat([(%d).toLocaleString()])" % (
         whole, totals["input"], totals["cache_read"] + totals["cache_write"], totals["output"],
-        totals["turns"], totals["cost"]))
+        totals["turns"]))
     shown = await evaluate(instance, """(() => {
         const m=document.querySelector('.token-usage-modal'), all=s=>[...m.querySelectorAll(s)].map(n=>n.textContent);
         return {labels:all('.tu-tile-label'), tiles:all('.tu-tile-value'), pressed:all('.seg-btn.on'),
@@ -4879,7 +4877,7 @@ async def token_usage_checks(instance, capture=False):
                 openable:m.querySelectorAll('button.tu-session').length,
                 clipped:[...m.querySelectorAll('.tu-tile-value,.tu-tile-sub')].filter(n=>n.scrollWidth>n.clientWidth+1).length};
     })()""")
-    assert shown["labels"] == ["Total", "Input", "Cache", "Output", "Turns", "Est. cost"], shown
+    assert shown["labels"] == ["Total", "Input", "Cache", "Output", "Turns"], shown
     assert shown["tiles"] == expected, (shown, expected)
     assert shown["pressed"] == ["30 days", "Backend", "All"] and shown["clipped"] == 0, shown
     assert shown["rows"] == ["Studio"] and shown["legend"] == [], "one backend is one series, with no legend"
@@ -5097,6 +5095,57 @@ async def token_usage_checks(instance, capture=False):
     await evaluate(instance, "history.forward(); true")
     await until(instance, settled + " && document.querySelector('.tu-lens .seg-btn.on').textContent === 'Engine'")
     assert await evaluate(instance, reads) == before + 2
+    # Rolling 24 hours asks for the exact span and draws hourly clock labels.
+    await press(".tu-range .seg-btn:first-child")
+    await until(instance, settled + " && document.querySelector('.tu-read-when').textContent === 'Last 24 hours'")
+    span = await evaluate(instance, """(() => {
+        const url=new URL(performance.getEntriesByType('resource').filter(e=>e.name.includes('/api/token-usage?')).at(-1).name);
+        return Object.fromEntries(['since','until','step','offset'].map(key=>[key,Number(url.searchParams.get(key))]));
+    })()""")
+    assert span["until"] - span["since"] == 86400 and span["step"] == 3600, span
+    served = token_usage.report(**span)
+    expected = sum(served["totals"][key] for key in ("input", "output", "cache_read", "cache_write"))
+    assert await evaluate(instance, "document.querySelector('.tu-read-sum').textContent===fmtUsage(%d)" % expected)
+    for width, height in ((1440, 900), (390, 844), (320, 844)):
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": width, "height": height, "deviceScaleFactor": 1,
+            "mobile": width < 900}, session=instance.page_session)
+        await evaluate(instance, "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))")
+        for theme in ("dark", "light"):
+            await evaluate(instance, "applyTheme(%s); document.querySelector('.token-usage-modal').scrollTop=0; true" % json.dumps(theme))
+            layout = await evaluate(instance, """(() => {
+                const m=document.querySelector('.token-usage-modal'), r=m.getBoundingClientRect();
+                return {fits:r.left>=0 && r.right<=innerWidth, overflow:m.scrollWidth-m.clientWidth,
+                    labels:[...m.querySelectorAll('.tu-tile-label')].map(n=>n.textContent),
+                    prices:m.textContent.includes('$') || m.textContent.includes('cost'),
+                    ranges:[...m.querySelectorAll('.tu-range .seg-btn')].map(n=>n.textContent),
+                    ticks:[...m.querySelectorAll('.tu-tick')].map(n=>n.textContent).filter(s=>s.includes(':')),
+                    clipped:[...m.querySelectorAll('.tu-range,.tu-read-head,.tu-tile-value')].filter(n=>n.scrollWidth>n.clientWidth+1).length};
+            })()""")
+            assert layout["fits"] and layout["overflow"] <= 1 and not layout["prices"] and not layout["clipped"], (width, theme, layout)
+            assert layout["labels"] == ["Total", "Input", "Cache", "Output", "Turns"], layout
+            assert layout["ranges"] == ["24 hours", "7 days", "30 days", "90 days", "All"] and len(layout["ticks"]) >= 2, layout
+            # Hour/date labels must also fit while a narrow phone reads a
+            # column, without moving the plot or its series readout.
+            rest = await evaluate(instance, readout)
+            await evaluate(instance, "document.querySelector('.tu-plot').dispatchEvent(new KeyboardEvent('keydown',{key:'Home',bubbles:true})); true")
+            active = await evaluate(instance, readout)
+            assert active["plot"] == rest["plot"] and active["items"] == rest["items"], (width, rest, active)
+            assert await evaluate(instance, "(() => {const n=document.querySelector('.tu-read-head'); return n.scrollWidth<=n.clientWidth+1})()"), (width, active)
+            await evaluate(instance, "document.querySelector('.tu-plot').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); true")
+            if capture:
+                shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                (BASE / "data" / ("token-usage-24h-%d-%s.png" % (width, theme))).write_bytes(base64.b64decode(shot["data"]))
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    await evaluate(instance, "document.querySelector('.tu-plot').focus(); true")
+    await instance.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Home", "code": "Home", "windowsVirtualKeyCode": 36}, session=instance.page_session)
+    assert await evaluate(instance, "document.querySelector('.tu-read-when').textContent.includes(':')")
+    await instance.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session=instance.page_session)
+    await evaluate(instance, "history.back(); true")
+    await until(instance, "!document.querySelector('.token-usage-modal')")
+    await evaluate(instance, "history.forward(); true")
+    await until(instance, settled + " && document.querySelector('.tu-read-when').textContent === 'Last 24 hours'")
     # A session's row opens that session and puts the sheet away.
     first = await evaluate(instance, "document.querySelector('button.tu-session .tu-session-name').textContent")
     sid = next(entry["id"] for entry in served["sessions"] if entry["name"] == first)
@@ -5365,6 +5414,9 @@ async def main(args):
             if args.task_refresh_only:
                 await task_refresh_checks(instances[0])
                 return
+            if args.token_usage_only:
+                await token_usage_checks(instances[0], args.screenshots)
+                return
             await sidebar_width_checks(instances[0])
             if args.sidebar_width_only:
                 return
@@ -5395,5 +5447,6 @@ if __name__ == "__main__":
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--navigation-only", action="store_true")
     parser.add_argument("--task-refresh-only", action="store_true")
+    parser.add_argument("--token-usage-only", action="store_true")
     parser.add_argument("--sidebar-width-only", action="store_true")
     asyncio.run(main(parser.parse_args()))

@@ -324,7 +324,6 @@ class SpawnJob:
         self.stop_reason = ""
         self.model_used = ""
         self.usage = {}
-        self.cost_usd = None
         self.denials = 0
         self.tool_calls = 0
         self.cancel_status = ""
@@ -516,8 +515,6 @@ class SpawnJob:
                          usage=dict(self.usage))
             if self.stop_reason:
                 value["stop_reason"] = self.stop_reason
-            if self.cost_usd is not None:
-                value["cost_usd"] = self.cost_usd
         return value
 
     def _finish(self, status: str, error: str = "") -> None:
@@ -759,8 +756,6 @@ class SpawnJob:
                 if isinstance(usage, dict):
                     self.usage = {key: value for key, value in usage.items()
                                   if isinstance(value, (int, float))}
-                if isinstance(result.get("cost_usd"), (int, float)):
-                    self.cost_usd = result["cost_usd"]
                 self.stop_reason = str(result.get("stop_reason") or "")[:120]
                 if self._incomplete_stop(self.stop_reason):
                     self.answer = self._partial_answer()
@@ -1311,8 +1306,6 @@ def _format_usage(job: dict) -> str:
     output_tokens = usage.get("output_tokens")
     if isinstance(output_tokens, (int, float)):
         parts.append("{:,} output tokens".format(int(output_tokens)))
-    if isinstance(job.get("cost_usd"), (int, float)):
-        parts.append("${:.4f}".format(job["cost_usd"]))
     if job.get("tool_calls"):
         parts.append("{} tool call(s)".format(job["tool_calls"]))
     if job.get("denials"):

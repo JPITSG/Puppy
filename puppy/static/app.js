@@ -8790,7 +8790,7 @@ $("btn-notices").onclick = () => toggleNoticesPanel();
    out. The browser keeps nothing but the three choices (range, grouping,
    measure), exact strings or the default.
 
-   The chart is stacked columns - one per day, week or month, each split by
+   The chart is stacked columns - one per hour, day, week or month, each split by
    the chosen grouping - on the palette validated for this console's two
    surfaces (--viz-1..8). A grouping keeps its colour while the sheet is used:
    survivors keep their slot across a change of range or measure, the stack
@@ -8800,6 +8800,7 @@ $("btn-notices").onclick = () => toggleNoticesPanel();
    arrow keys read a column in the line above the plot; the breakdown under
    it is the chart's table view, so no value lives in the chart alone. */
 const USAGE_RANGES = [
+  { key: "24h", label: "24 hours", hours: 24 },
   { key: "7", label: "7 days", days: 7 },
   { key: "30", label: "30 days", days: 30 },
   { key: "90", label: "90 days", days: 90 },
@@ -8856,11 +8857,6 @@ function usagePercent(share) {
   return share < .001 ? "<0.1%" : `${(share * 100).toFixed(1)}%`;
 }
 
-function fmtUsd(value) {
-  const amount = Number(value) || 0;
-  return "$" + (amount >= 100 ? Math.round(amount).toLocaleString() : amount.toFixed(2));
-}
-
 function usageMeasure(row, measure) {
   if (measure === "input") return row.input;
   if (measure === "output") return row.output;
@@ -8868,14 +8864,18 @@ function usageMeasure(row, measure) {
   return row.input + row.output + row.cache_read + row.cache_write;
 }
 
-/* The span a range asks for: from the first local midnight it covers to
-   now, by the hour (folded into local days here, exactly); "All" by the day
-   at this browser's offset from UTC. */
+/* The last 24 hours, or from a day range's first local midnight to now.
+   Hour buckets use the browser's offset so half/quarter-hour zones also
+   align with its clock; "All" reads by the day at the same offset. */
 function usageSpan(rangeKey, now = Date.now() / 1000) {
-  const range = USAGE_RANGES.find(item => item.key === rangeKey) || USAGE_RANGES[1];
+  const range = USAGE_RANGES.find(item => item.key === rangeKey) || USAGE_RANGES.find(item => item.key === "30");
+  const offset = -new Date(now * 1000).getTimezoneOffset() * 60 || 0;
+  if (range.hours) {
+    const until = Math.ceil(now);
+    return { range, since: until - range.hours * 3600, until, step: 3600, offset };
+  }
   const until = Math.ceil(now) + 60;
   if (!range.days) {
-    const offset = -new Date(now * 1000).getTimezoneOffset() * 60 || 0;
     return { range, since: until - USAGE_ALL_SPAN, until, step: 86400, offset };
   }
   const today = new Date(now * 1000);
@@ -8913,7 +8913,7 @@ async function readTokenUsage(span) {
 function usageRows(results) {
   const rows = [];
   const totals = { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0,
-    turns: 0, cost: null, sessions: 0, first_at: null, nodes: 0 };
+    turns: 0, sessions: 0, first_at: null, nodes: 0 };
   for (const result of results) {
     const data = result.data;
     if (!data || !Array.isArray(data.buckets)) continue;
@@ -8926,12 +8926,11 @@ function usageRows(results) {
       rows.push({ bid: result.bid, at: pick("at"), engine: String(bucket[at("engine")] || ""),
         model: String(bucket[at("model")] || ""), input: pick("input"), output: pick("output"),
         cache_read: pick("cache_read"), cache_write: pick("cache_write"),
-        reasoning: pick("reasoning"), cost: bucket[at("cost")] == null ? null : pick("cost") });
+        reasoning: pick("reasoning") });
     }
     const sum = data.totals || {};
     for (const key of ["input", "output", "cache_read", "cache_write", "reasoning", "turns"])
       totals[key] += Number(sum[key]) || 0;
-    if (sum.cost != null) totals.cost = (totals.cost || 0) + (Number(sum.cost) || 0);
     totals.sessions += Number(data.session_count) || 0;
     if (typeof data.first_at === "number" && (totals.first_at === null || data.first_at < totals.first_at))
       totals.first_at = data.first_at;
@@ -8980,12 +8979,11 @@ function usageSeries(rows, lens, measure) {
     let series = byKey.get(key);
     if (!series) {
       series = { key, label: usageSeriesLabel(row, lens), engine: row.engine, bid: row.bid,
-        input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, cost: null };
+        input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 };
       byKey.set(key, series);
     }
     for (const name of ["input", "output", "cache_read", "cache_write", "reasoning"])
       series[name] += row[name];
-    if (row.cost != null) series.cost = (series.cost || 0) + row.cost;
   }
   const list = [...byKey.values()].map(series => ({ ...series, value: usageMeasure(series, measure) }));
   if (lens === "model") {
@@ -9033,11 +9031,12 @@ function usageColor(slot) {
   return slot ? `var(--viz-${slot})` : "var(--viz-other)";
 }
 
-/* The columns the chart draws: a day, a week (from Monday) or a month each,
+/* The columns the chart draws: an hour, day, week (from Monday) or month each,
    from the range's start - or the first day any node counted, when that is
    later: nothing before it was counted, which is not the same as nothing
    used - to today, empty ones included. */
 function usageUnit(span, firstAt, now = Date.now() / 1000) {
+  if (span.range.hours) return "hour";
   if (span.range.days) return "day";
   const days = firstAt ? (now - firstAt) / 86400 : 0;
   return days <= 120 ? "day" : days <= 730 ? "week" : "month";
@@ -9052,10 +9051,19 @@ function usageBucketStart(at, unit) {
 }
 
 function usageBucketKey(date) {
-  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+  return String(date.getTime());
 }
 
 function usageBuckets(span, unit, firstAt, now = Date.now() / 1000) {
+  if (unit === "hour") {
+    const buckets = [];
+    const start = Math.floor((span.since + span.offset) / span.step) * span.step - span.offset;
+    // Fixed elapsed hours match the report, even across a clock change.
+    // Keep quiet hours; the first and last columns may cover partial hours.
+    for (let at = start; at < span.until; at += span.step)
+      buckets.push({ key: usageBucketKey(new Date(at * 1000)), start: at, values: new Map(), total: 0 });
+    return buckets;
+  }
   const startAt = Math.max(span.since, firstAt || (span.range.days ? span.since : now));
   let cursor = usageBucketStart(startAt, unit);
   const end = usageBucketStart(now, unit).getTime();
@@ -9079,7 +9087,8 @@ function usageRowDate(row, span) {
 function usageFill(buckets, rows, span, unit, lens, measure, seriesSlot) {
   const index = new Map(buckets.map((bucket, at) => [bucket.key, at]));
   for (const row of rows) {
-    const at = index.get(usageBucketKey(usageBucketStart(usageRowDate(row, span), unit)));
+    const date = unit === "hour" ? new Date(row.at * 1000) : usageBucketStart(usageRowDate(row, span), unit);
+    const at = index.get(usageBucketKey(date));
     if (at === undefined) continue;
     const value = usageMeasure(row, measure);
     if (!value) continue;
@@ -9093,6 +9102,8 @@ function usageFill(buckets, rows, span, unit, lens, measure, seriesSlot) {
 
 function usageBucketLabel(bucket, unit, long) {
   const at = bucket.start;
+  if (unit === "hour") return fmtDateTime(at, { hour: "2-digit", minute: "2-digit",
+    ...(long ? { weekday: "short", month: "short", day: "numeric", timeZoneName: "short" } : {}) });
   const thisYear = new Date(at * 1000).getFullYear() === new Date().getFullYear();
   if (unit === "month")
     return fmtDateTime(at, long ? { month: "long", year: "numeric" } :
@@ -9287,7 +9298,6 @@ function modalTokenUsage() {
       totals.reasoning ? `${fmtUsage(totals.reasoning)} reasoning` : ""));
     tiles.appendChild(tile("Turns", totals.turns.toLocaleString(),
       totals.sessions ? `in ${totals.sessions} ${totals.sessions === 1 ? "session" : "sessions"}` : ""));
-    if (totals.cost) tiles.appendChild(tile("Est. cost", fmtUsd(totals.cost), "where reported"));
   };
 
   const readLine = at => {
@@ -9297,7 +9307,7 @@ function modalTokenUsage() {
     const bucket = at === null ? null : chart.buckets[at];
     const head = el("div", "tu-read-head");
     head.appendChild(el("span", "tu-read-when", bucket ? usageBucketLabel(bucket, chart.unit, true) :
-      view.span.range.days ? `Last ${view.span.range.label}` : "All time"));
+      view.span.range.key !== "all" ? `Last ${view.span.range.label}` : "All time"));
     head.appendChild(el("span", "tu-read-sum", fmtUsage(bucket ? bucket.total : chart.total)));
     if (!bucket && chart.peak) head.appendChild(el("span", "tu-read-note",
       `peak ${usageBucketLabel(chart.peak, chart.unit, false)} · ${fmtUsage(chart.peak.total)}`));
@@ -9323,7 +9333,7 @@ function modalTokenUsage() {
   };
   const paint = () => {
     drawUsageChart(plot, view.chart, view.active);
-    if (!view.chart.total) plot.appendChild(el("div", "tu-plot-empty", view.span.range.days ?
+    if (!view.chart.total) plot.appendChild(el("div", "tu-plot-empty", view.span.range.key !== "all" ?
       `No tokens used in the last ${view.span.range.label}` : "No tokens used yet"));
   };
   const setActive = at => {
@@ -18655,9 +18665,7 @@ class SessionView {
          context included, summed over its requests: Claude and OpenCode report
          cache reads/writes beside a small uncached input_tokens, while Codex
          folds its cached_input_tokens into input_tokens, so adding the cache
-         keys that exist gives the same figure for all three. Cost is
-         deliberately absent - engines price differently (and some not at
-         all), so the line would stop meaning the same thing everywhere. */
+         keys that exist gives the same figure for all three. */
       case "result": {
         const n = el("div", "result-line");
         const outcome = el("span", d.ok ? "ok" : "bad");

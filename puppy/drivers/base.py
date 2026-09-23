@@ -22,7 +22,7 @@ Normalized transcript event kinds (persisted):
                  them ends (the optional native tool id links its card), and
                  background_wait_stopped when the node ended such a wait
                  itself (turn timeout, or an engine that never continued).
-    result       {ok, usage?, cost_usd?, engine_duration_ms?,
+    result       {ok, usage?, engine_duration_ms?,
                   api_duration_ms?, stop_reason?, error?}
                  The runner adds duration_ms as comparable elapsed wall time.
                  The transcript line reads outcome, duration, input tokens
@@ -32,8 +32,8 @@ Normalized transcript event kinds (persisted):
                  cached_input_tokens, a subset of input_tokens), total output
                  tokens (including any reasoning_output_tokens subset) and
                  clock time for every engine. model_usage (optional) breaks
-                 the turn down by model, {model: {the same usage keys,
-                 cost_usd?}}, when the engine reports it; the node's token
+                 the turn down by model, {model: {the same usage keys}},
+                 when the engine reports it; the node's token
                  ledger (token_usage.py) prefers it when it covers usage.
                  Engine-native or API-only measurements stay in their
                  explicitly scoped fields and are not displayed as wall time.

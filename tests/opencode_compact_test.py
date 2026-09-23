@@ -223,6 +223,7 @@ async def check_cases(api):
             assert result["ok"] is success, (mode, result)
             assert result["tool"] == "compact"
             assert "context_used" not in result
+            assert "cost_usd" not in result
             current = db.get_session(case.id)
             if success:
                 assert current["native_session_id"] == case.sid

@@ -36,17 +36,13 @@ disjoint, so they add up:
 | output | everything generated |
 | reasoning | the part of the output spent thinking, where the engine reports it |
 
-The cost is the engine's own estimate where it reports one (Claude Code's
-`total_cost_usd`, per model when it splits one) and nothing otherwise. It is
-an estimate, not a bill: a subscription is not charged by it.
-
 ## The ledger
 
 One exact-shape meta record per UTC day, `token_usage.<YYYY-MM-DD>`:
 
 ```json
-{"format": 1, "rows": [[ref, at, session, source, engine, model,
-                        input, output, cache_read, cache_write, reasoning, cost]]}
+{"format": 2, "rows": [[ref, at, session, source, engine, model,
+                        input, output, cache_read, cache_write, reasoning]]}
 ```
 
 - `ref` is `turn:<session>:<seq>` for a turn (the result event's own
@@ -59,8 +55,7 @@ One exact-shape meta record per UTC day, `token_usage.<YYYY-MM-DD>`:
   the engine reported serving, else the one the session or job asked for (at
   most 200 characters, empty for the engine's default).
 - The five counts are whole numbers from 0, and at least one of input,
-  output, cache read and cache write is not 0; `cost` is `null` or a finite
-  number from 0.
+  output, cache read and cache write is not 0.
 - `rows` is not empty, is ordered by `at`, then `ref`, then `model`, and
   holds a `(ref, model)` pair once.
 
@@ -68,8 +63,9 @@ A ref already present in its day is never counted again, whoever reports it
 first; one immediate transaction covers every day a write touches. Records
 are validated at startup and when a backup is restored, and a record that is
 not exactly this shape is refused - the node does not start, the archive is
-not restored - never repaired. There is no manual preparation: a node that
-has counted nothing simply has no records.
+not restored - never repaired. Existing nodes must have their ledger records
+prepared manually for format 2 before upgrading; older ledger formats, including
+those in snapshot archives, are rejected. A fresh node has no records.
 
 The ledger lives in the node's database. The instance's own ledger travels
 with its backup like the transcripts; a backend's ledger is that backend's
@@ -83,9 +79,10 @@ the additive `token-usage` capability:
 - `since` and `until` are epoch seconds, `since` above 0 and below `until`,
   at most five years apart (`until` defaults to now, `since` to thirty days
   before it).
-- `step` is `3600` (hours, which a console folds into its own local days
-  exactly) or `86400` (days, starting at `offset` seconds from UTC midnight -
-  whole minutes within fourteen hours).
+- `step` is `3600` (hours) or `86400` (days).
+- `offset` is the clock's UTC offset in seconds, positive east of UTC,
+  in whole minutes within fourteen hours. Both bucket sizes align to that
+  clock; a daily bucket starts at its midnight.
 
 Anything else is a `400`; a ledger record of the wrong shape is a `500`. The
 answer is:
@@ -94,21 +91,21 @@ answer is:
 {"ok": true, "since": 1787443200, "until": 1790035260, "step": 3600, "offset": 0,
  "first_at": 1785024000.5,
  "columns": ["at", "engine", "model", "input", "output", "cache_read",
-             "cache_write", "reasoning", "turns", "cost"],
- "buckets": [[1790031600, "claude", "claude-opus-5-5[1m]", 12, 340, 5600, 78, 0, 1, 0.0412]],
+             "cache_write", "reasoning", "turns"],
+ "buckets": [[1790031600, "claude", "claude-opus-5-5[1m]", 12, 340, 5600, 78, 0, 1]],
  "totals": {"input": 12, "output": 340, "cache_read": 5600, "cache_write": 78,
-            "reasoning": 0, "cost": 0.0412, "turns": 1},
+            "reasoning": 0, "turns": 1},
  "sessions": [{"id": 4, "name": "Harbor dashboard", "color": "#e0784f",
                "deleted": false, "parent": null, "parent_name": "",
                "engines": ["claude"], "last_at": 1790033412.25,
                "input": 12, "output": 340, "cache_read": 5600, "cache_write": 78,
-               "reasoning": 0, "cost": 0.0412, "turns": 1}],
+               "reasoning": 0, "turns": 1}],
  "session_count": 1,
  "jobs": {}}
 ```
 
 Every amount object - `totals`, each session, each of `jobs`' `spawn` and
-`title` entries - carries the five counts, `cost` and `turns`.
+`title` entries - carries the five counts and `turns`.
 
 `buckets` sums the rows by time bucket, engine and model; `totals` sums them
 all; `sessions` lists the 20 heaviest sessions (a deleted session by its id,
@@ -126,14 +123,18 @@ range. A backend that cannot be reached, or that is too old to keep a
 ledger, is named under the range with the reason rather than silently left
 out; the sheet reports an error only when no node answered.
 
-- **Range**: 7, 30 or 90 days, each from its first local midnight to now and
+- **Range**: **24 hours** covers the rolling last 24 hours, drawn in hourly
+  columns aligned to the browser's clock. Quiet hours stay visible; the first
+  and last columns may be partial hours. The readout includes the date, time
+  and time zone, so repeated hours at a clock change stay distinct.
+  **7, 30 or 90 days** each run from their first local midnight to now and are
   drawn a day per column - from the first day any node counted, when that is
   later, since nothing before it was counted - or **All**, up to five years of the ledger drawn
   by the day while it holds 120 days or fewer, by the week (from Monday) up
   to two years, and by the month beyond.
 - **Tiles**: the total, the fresh input, the cache (read and written), the
   output (with its reasoning part), the turns and how many sessions they were
-  in, and the estimated cost when any engine reported one.
+  in.
 - **By**: the columns are split per **Backend**, **Engine** or **Model**.
   A model is one series per engine under the name its engine's catalog
   gives it - a requested alias, the id the engine resolved it to, and one

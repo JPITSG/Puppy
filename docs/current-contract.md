@@ -65,12 +65,13 @@ still contain a value written before that release.
   `session_title.<sid>` records are exact `{format: 1, state, text,
   placeholder, requested_at}` rows belonging to existing sessions. See
   [Session titles](session-titles.md).
-- `token_usage.<YYYY-MM-DD>` records are exact `{format: 1, rows}` days of the
+- `token_usage.<YYYY-MM-DD>` records are exact `{format: 2, rows}` days of the
   token ledger: each row `[ref, at, session, source, engine, model, input,
-  output, cache_read, cache_write, reasoning, cost]`, ordered by time, ref and
+  output, cache_read, cache_write, reasoning]`, ordered by time, ref and
   model, inside its UTC day. Startup and backup validation reject any other
-  shape. A node that has counted nothing has no records, so nothing needs
-  preparing by hand. See [Token usage](token-usage.md).
+  shape. Existing ledgers require manual preparation for format 2 before
+  upgrade; older ledger formats in snapshot archives are also refused. A new
+  node has no records. See [Token usage](token-usage.md).
 
 ## Runtime APIs and console
 

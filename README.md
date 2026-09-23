@@ -726,10 +726,10 @@ with a window of history around it.
   down (Claude Code's subagents and helper calls), plus spawned agents and
   session-title runs. The chart button in the footer, between the bell and the
   notification tray, opens a sheet that asks the instance and every reachable
-  backend at once and names any it could not ask. Pick 7, 30 or 90 days or
-  all of it; tiles give the total, fresh input, cache reads and writes, output
-  with its reasoning part, turns, and the engine's own cost estimate where it
-  reports one. The stacked chart splits each day (or week or month) by
+  backend at once and names any it could not ask. Pick the last 24 hours,
+  7, 30 or 90 days, or all of it; tiles give the total, fresh input, cache reads
+  and writes, output with its reasoning part, and turns. The stacked chart
+  splits each hour for the 24-hour range, or each day (or week or month), by
   backend, engine or model and counts all tokens or only input, cache or
   output; each engine keeps its own colour and every series keeps its colour
   as the choices change. Hover, tap or use the arrow keys to read a column in

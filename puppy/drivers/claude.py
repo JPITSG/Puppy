@@ -37,7 +37,7 @@ stdin stays open it wakes the model itself when a task ends - a fresh
 system/init, a continuation, and another result in the same process. Closing
 stdin ends every task (~5 s, reported as stopped) and exits; a later resume
 first reports such a task as stale and runs an empty wake-up whose result
-precedes the prompt's own. total_cost_usd and duration_api_ms accumulate over
+precedes the prompt's own. duration_api_ms accumulates over
 the process while usage and num_turns are per result.
 Compliance note: we only drive the unmodified official binary; auth stays inside
 the CLI's own login (subscription OAuth), which is the vendor-sanctioned path.
@@ -320,8 +320,7 @@ _MODEL_USAGE_FIELDS = (("input_tokens", "inputTokens"), ("output_tokens", "outpu
 
 def _model_usage(model_usage) -> dict:
     """The result's per-model breakdown (modelUsage) in the usage vocabulary,
-    each model's cost beside its tokens. Like total_cost_usd it accumulates
-    over the process, so the last result's covers every wake-up of the turn -
+    accumulated over the process, so the last result covers every wake-up of the turn -
     and every model the turn used, its subagents' and background calls'
     included, which the result's own usage (the main loop's) does not."""
     if not isinstance(model_usage, dict):
@@ -337,9 +336,6 @@ def _model_usage(model_usage) -> dict:
                 row[target] = int(value)
         if not any(row.values()):
             continue
-        cost = entry.get("costUSD")
-        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
-            row["cost_usd"] = float(cost)
         out[str(model).strip()[:200]] = row
     return out
 
@@ -1084,11 +1080,10 @@ class ClaudeDriver(Driver):
             data = {
                 **identity,
                 "ok": not ev.get("is_error", False),
-                # duration_api_ms and total_cost_usd accumulate over the
+                # duration_api_ms accumulates over the
                 # process, so the last result already covers every wake-up.
                 # API time is not wall time: the runner supplies the latter.
                 "api_duration_ms": ev.get("duration_api_ms"),
-                "cost_usd": ev.get("total_cost_usd"),
                 "stop_reason": ev.get("stop_reason", ""),
                 "num_turns": ctx.get("folded_turns"),
                 "usage": dict(folded),

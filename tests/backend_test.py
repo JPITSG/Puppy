@@ -135,7 +135,7 @@ def exercise_driver_normalization() -> None:
         "a": "result", "data": {
             "native_session_id": "s", "native_prompt_id": "prompt-1",
             "native_tail_id": "prompt-1", "ok": True, "api_duration_ms": 900,
-            "cost_usd": 0.03, "stop_reason": "end_turn", "num_turns": 3,
+            "stop_reason": "end_turn", "num_turns": 3,
             "usage": {"input_tokens": 15, "output_tokens": 10,
                       "cache_read_input_tokens": 150},
             "error": "", "wakeups": 1}}]
@@ -1326,7 +1326,7 @@ finish()
         # The unified duration includes the 0.5s background wait; Claude's
         # API-only 250ms remains separately available and is never mislabeled.
         assert result["duration_ms"] >= 450, result["duration_ms"]
-        assert result["cost_usd"] == 0.02
+        assert "cost_usd" not in result
         assert result["native_prompt_id"] == "u-1"
         assert result["native_tail_id"] == "a-2"
         assert hub.last_completion_status == "ok"

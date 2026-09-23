@@ -47,8 +47,7 @@ if mode == "ok":
     reply = json.loads(sys.stdin.readline())
     assert reply.get("approve") is False and reply.get("msg")
     out({"t": "a", "text": "FINAL ANSWER: 42 (denied=" + reply["id"] + ")"})
-    out({"t": "result", "ok": True, "usage": {"output_tokens": 7},
-         "cost": 0.0125})
+    out({"t": "result", "ok": True, "usage": {"output_tokens": 7}})
 elif mode == "fail":
     out({"t": "result", "ok": False, "error": "stub exploded"})
 elif mode == "noresult":
@@ -138,7 +137,7 @@ class FakeDriver(Driver):
         if kind == "result":
             return [{"a": "result", "data": {
                 "ok": ev["ok"], "usage": ev.get("usage"),
-                "cost_usd": ev.get("cost"), "error": ev.get("error", ""),
+                "error": ev.get("error", ""),
                 "stop_reason": ev.get("stop_reason", "")}}]
         return []
 
@@ -169,7 +168,7 @@ async def test_one_shot_paths(cwd):
     assert job.denials == 1
     assert job.model_used == "stub-1"
     assert job.usage == {"output_tokens": 7}
-    assert job.cost_usd == 0.0125
+    assert "cost_usd" not in job.payload()
     text = spawn_exec.job_text(job.payload(), "testnode")
     assert "UNTRUSTED SPAWNED-AGENT OUTPUT" in text
     assert "1 approval(s) auto-denied" in text

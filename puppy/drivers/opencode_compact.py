@@ -163,7 +163,7 @@ def verify_summary(rows: list, sid: str, model: dict) -> dict:
         "context_verified": True, "native_session_id": sid,
         "native_compaction_id": request["id"], "native_summary_id": info["id"],
     }
-    # Native summary usage is billing telemetry, not the next turn's context
+    # Native summary usage counts tokens, not the next turn's context
     # size. Unknown counters stay unknown; never label the summary input as
     # the reduced context or use a private database schema to recover it.
     tokens = info.get("tokens")
@@ -177,8 +177,6 @@ def verify_summary(rows: list, sid: str, model: dict) -> dict:
             "cache_read_input_tokens": int(cache["read"]),
             "cache_creation_input_tokens": int(cache["write"]),
         })
-    if number(info.get("cost")):
-        result["cost_usd"] = info["cost"]
     return result
 
 

@@ -5,9 +5,9 @@ transcripts never leave it: the console asks every reachable backend for its
 share and draws them side by side. The ledger is one exact-shape meta record
 per UTC day, ``token_usage.<YYYY-MM-DD>``::
 
-    {"format": 1, "rows": [[ref, at, session, source, engine, model,
+    {"format": 2, "rows": [[ref, at, session, source, engine, model,
                             input, output, cache_read, cache_write,
-                            reasoning, cost], ...]}
+                            reasoning], ...]}
 
 A row is one engine run's tokens on one model: a session's turn (its persisted
 ``result`` event, ``ref`` = ``turn:<session>:<seq>``), a spawned agent or a
@@ -16,7 +16,6 @@ Claude turn whose subagents or background calls ran on another model) has one
 row per model, all under the one ref. The counts are the drivers' documented
 usage vocabulary made disjoint (see ``counts``): fresh input, cache reads,
 cache writes and output, with reasoning the part of the output spent thinking.
-``cost`` is the engine's own estimate when it reports one, else null.
 
 Rows are never derived at read time from transcripts: the ledger outlives the
 conversations it counts, so deleting a session never rewrites what it used,
@@ -40,10 +39,10 @@ log = logging.getLogger("puppy.token_usage")
 
 PREFIX = "token_usage."
 API_PATH = "/api/token-usage"
-FORMAT = 1
+FORMAT = 2
 SOURCES = ("turn", "spawn", "title")
 COLUMNS = ("ref", "at", "session", "source", "engine", "model",
-           "input", "output", "cache_read", "cache_write", "reasoning", "cost")
+           "input", "output", "cache_read", "cache_write", "reasoning")
 COUNTS = ("input", "output", "cache_read", "cache_write", "reasoning")
 MAX_REF = 200
 MAX_ENGINE = 64
@@ -98,13 +97,6 @@ def counts(usage):
     return value
 
 
-def _cost(value):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or \
-            not math.isfinite(value) or value < 0:
-        return None
-    return round(float(value), 6)
-
-
 def _day(at: float) -> str:
     return datetime.datetime.fromtimestamp(float(at), datetime.timezone.utc).strftime("%Y-%m-%d")
 
@@ -114,10 +106,10 @@ def _day_start(day: str) -> float:
         tzinfo=datetime.timezone.utc).timestamp()
 
 
-def _row(ref, at, session, source, engine, model, amounts, cost) -> list:
+def _row(ref, at, session, source, engine, model, amounts) -> list:
     return [ref, round(float(at), 3), session, source, engine, model,
             amounts["input"], amounts["output"], amounts["cache_read"],
-            amounts["cache_write"], amounts["reasoning"], _cost(cost)]
+            amounts["cache_write"], amounts["reasoning"]]
 
 
 def _row_key(row) -> tuple:
@@ -147,10 +139,6 @@ def _valid_row(row, start: float) -> bool:
         return False
     amounts = row[6:11]
     if not all(_valid_int(value) for value in amounts) or not any(amounts[:4]):
-        return False
-    cost = row[11]
-    if cost is not None and (isinstance(cost, bool) or not isinstance(cost, (int, float)) or
-                             not math.isfinite(cost) or cost < 0):
         return False
     return True
 
@@ -227,7 +215,7 @@ def _text(value, limit: int) -> str:
     return str(value or "").strip()[:limit]
 
 
-def _model_rows(ref, at, session, source, engine, model, usage, cost, model_usage):
+def _model_rows(ref, at, session, source, engine, model, usage, model_usage):
     """The rows of one engine run: one per model when the engine broke its
     tokens down by model and that breakdown covers the run's own usage, else
     one row on the model that served it."""
@@ -240,19 +228,18 @@ def _model_rows(ref, at, session, source, engine, model, usage, cost, model_usag
         for name, entry in sorted(model_usage.items()):
             amounts = counts(entry) if isinstance(entry, dict) else None
             if amounts:
-                split.append((_text(name, MAX_MODEL), amounts,
-                              entry.get("cost_usd")))
+                split.append((_text(name, MAX_MODEL), amounts))
         covered = sum(sum(amounts[key] for key in ("input", "output", "cache_read",
                                                    "cache_write"))
-                      for _, amounts, _ in split)
+                      for _, amounts in split)
         needed = sum(whole[key] for key in ("input", "output", "cache_read",
                                             "cache_write")) if whole else 0
         if split and covered >= needed:
-            return [_row(ref, at, session, source, engine, name, amounts, part_cost)
-                    for name, amounts, part_cost in split]
+            return [_row(ref, at, session, source, engine, name, amounts)
+                    for name, amounts in split]
     if not whole:
         return []
-    return [_row(ref, at, session, source, engine, _text(model, MAX_MODEL), whole, cost)]
+    return [_row(ref, at, session, source, engine, _text(model, MAX_MODEL), whole)]
 
 
 def turn_rows(session: dict, event: dict) -> list:
@@ -262,7 +249,7 @@ def turn_rows(session: dict, event: dict) -> list:
     model = session.get("last_model") or session.get("model") or ""
     return _model_rows("turn:{}:{}".format(sid, int(event["seq"])), float(event["ts"]),
                        sid, "turn", session.get("engine"), model, data.get("usage"),
-                       data.get("cost_usd"), data.get("model_usage"))
+                       data.get("model_usage"))
 
 
 def record_turn(session: dict, event: dict) -> None:
@@ -283,7 +270,7 @@ def job_rows(job) -> list:
     at = job.finished_at or time.time()
     return _model_rows("spawn:{}:{}".format(job.id, int(job.created_at)), at, session,
                        source, job.engine, job.model_used or job.model, job.usage,
-                       job.cost_usd, None)
+                       None)
 
 
 def record_job(job) -> None:
@@ -346,8 +333,6 @@ def _session_names(ids) -> dict:
 def _add(target: list, row: list) -> None:
     for index in range(5):
         target[index] += row[6 + index]
-    if row[11] is not None:
-        target[5] = (target[5] or 0.0) + row[11]
 
 
 def report(since: float, until: float, step: int = 3600, offset: int = 0) -> dict:
@@ -358,7 +343,7 @@ def report(since: float, until: float, step: int = 3600, offset: int = 0) -> dic
     runs there instead."""
     days, earliest = _read(since, until)
     buckets, sessions = {}, {}
-    totals = [0, 0, 0, 0, 0, None]
+    totals = [0, 0, 0, 0, 0]
     refs, jobs = set(), {}
     for key, raw in days:
         for row in _parse(key, raw):
@@ -369,23 +354,23 @@ def report(since: float, until: float, step: int = 3600, offset: int = 0) -> dic
             # run of its own, counted apart from the turns
             turn = row[3] == "turn"
             bucket = math.floor((at + offset) / step) * step - offset
-            slot = buckets.setdefault((bucket, row[4], row[5]), [0, 0, 0, 0, 0, None, set()])
+            slot = buckets.setdefault((bucket, row[4], row[5]), [0, 0, 0, 0, 0, set()])
             _add(slot, row)
             _add(totals, row)
             if turn:
-                slot[6].add(row[0])
+                slot[5].add(row[0])
                 refs.add(row[0])
             if row[2] is not None:
-                entry = sessions.setdefault(row[2], [0, 0, 0, 0, 0, None, set(), 0.0, set()])
+                entry = sessions.setdefault(row[2], [0, 0, 0, 0, 0, set(), 0.0, set()])
                 _add(entry, row)
                 if turn:
-                    entry[6].add(row[0])
-                entry[7] = max(entry[7], at)
-                entry[8].add(row[4])
+                    entry[5].add(row[0])
+                entry[6] = max(entry[6], at)
+                entry[7].add(row[4])
             else:
-                entry = jobs.setdefault(row[3], [0, 0, 0, 0, 0, None, set()])
+                entry = jobs.setdefault(row[3], [0, 0, 0, 0, 0, set()])
                 _add(entry, row)
-                entry[6].add(row[0])
+                entry[5].add(row[0])
     first_at = None
     if earliest:
         first_at = _parse(*earliest)[0][1]
@@ -396,8 +381,7 @@ def report(since: float, until: float, step: int = 3600, offset: int = 0) -> dic
     def amounts(values) -> dict:
         return {"input": values[0], "output": values[1], "cache_read": values[2],
                 "cache_write": values[3], "reasoning": values[4],
-                "cost": None if values[5] is None else round(values[5], 6),
-                "turns": len(values[6])}
+                "turns": len(values[5])}
 
     heaviest = sorted(sessions.items(), key=lambda item: (-total(item[1]), item[0]))[:TOP_SESSIONS]
     names = _session_names([sid for sid, _ in heaviest])
@@ -405,13 +389,12 @@ def report(since: float, until: float, step: int = 3600, offset: int = 0) -> dic
         "ok": True, "since": since, "until": until, "step": step, "offset": offset,
         "first_at": first_at,
         "columns": ["at", "engine", "model", "input", "output", "cache_read",
-                    "cache_write", "reasoning", "turns", "cost"],
-        "buckets": [[bucket, engine, model, *values[:5], len(values[6]),
-                     None if values[5] is None else round(values[5], 6)]
+                    "cache_write", "reasoning", "turns"],
+        "buckets": [[bucket, engine, model, *values[:5], len(values[5])]
                     for (bucket, engine, model), values in sorted(buckets.items())],
-        "totals": dict(amounts(totals[:6] + [refs])),
-        "sessions": [dict(amounts(values), id=sid, last_at=values[7],
-                          engines=sorted(values[8]), **names.get(sid, {}))
+        "totals": dict(amounts(totals + [refs])),
+        "sessions": [dict(amounts(values), id=sid, last_at=values[6],
+                          engines=sorted(values[7]), **names.get(sid, {}))
                      for sid, values in heaviest],
         "session_count": len(sessions),
         "jobs": {source: amounts(values) for source, values in sorted(jobs.items())},

@@ -29,15 +29,14 @@ const H = at => Math.floor(at / 3600) * 3600;
 const plain = value => JSON.parse(JSON.stringify(value));
 
 function node(bid, buckets, extra = {}) {
-  const totals = { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, cost: null, turns: 0 };
+  const totals = { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, turns: 0 };
   for (const row of buckets) {
     totals.input += row[3]; totals.output += row[4]; totals.cache_read += row[5];
     totals.cache_write += row[6]; totals.reasoning += row[7]; totals.turns += row[8];
-    if (row[9] != null) totals.cost = (totals.cost || 0) + row[9];
   }
   return { ok: true, since: 0, until: 0, step: 3600, offset: 0, first_at: NOW - 10 * DAY,
     columns: ["at", "engine", "model", "input", "output", "cache_read", "cache_write",
-              "reasoning", "turns", "cost"],
+              "reasoning", "turns"],
     buckets, totals, sessions: [], session_count: 0, jobs: {}, ...extra };
 }
 
@@ -85,6 +84,7 @@ function consoleFor(options = {}) {
     engineModelOption: (engine, model) => ((engine && engine.model_options) || []).find(option =>
       option.value === model || (option.aliases || []).includes(model)),
     fmtDateTime: (ts, opts) => {
+      if (opts.hour) return new Intl.DateTimeFormat("en-GB", opts).format(new Date(ts * 1000));
       const date = new Date(ts * 1000);
       const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
       let text = `${months[date.getMonth()]} ${date.getDate()}`;
@@ -146,6 +146,38 @@ const text = (root, selector) => [...root.querySelectorAll(selector)].map(item =
     const all = context.usageSpan("all", NOW);
     assert.deepEqual([all.step, all.offset, all.until - all.since], [86400, 0, 5 * 365 * DAY]);
     assert.equal(context.usageSpan("nonsense", NOW).range.key, "30", "anything else is the default");
+    // Rolling elapsed hours, including quiet ones, partial edges and repeated
+    // local hours. The report's fixed offset also covers half/quarter-hour zones.
+    const hourly = context.usageSpan("24h", NOW);
+    assert.deepEqual([hourly.since, hourly.until, hourly.step], [NOW - DAY, NOW, 3600]);
+    assert.equal(context.usageUnit(hourly, NOW - 900 * DAY, NOW), "hour");
+    assert.equal(context.usageBuckets(hourly, "hour", NOW - 60, NOW).length, 24);
+    const partial = context.usageSpan("24h", NOW + 1500);
+    assert.equal(context.usageBuckets(partial, "hour", null, NOW + 1500).length, 25);
+    for (const [zone, at] of [["Asia/Kolkata", NOW], ["Asia/Kathmandu", NOW],
+      ["America/New_York", Date.UTC(2026, 10, 1, 12) / 1000],
+      ["America/New_York", Date.UTC(2026, 2, 8, 12) / 1000],
+      ["Australia/Lord_Howe", Date.UTC(2026, 3, 5, 12) / 1000]]) {
+      process.env.TZ = zone;
+      const span = context.usageSpan("24h", at);
+      const buckets = context.usageBuckets(span, "hour", null, at);
+      assert.equal(span.until - span.since, DAY);
+      assert.equal(new Set(buckets.map(b => b.key)).size, buckets.length, zone);
+      assert.equal((buckets[0].start + span.offset) % 3600, 0, zone);
+      assert.ok(buckets.length >= 24 && buckets.length <= 25, zone);
+      const rows = buckets.map(b => ({ bid: 0, at: b.start, input: 1, output: 0,
+        cache_read: 0, cache_write: 0, reasoning: 0 }));
+      context.usageFill(buckets, rows, span, "hour", "backend", "all", new Set(["b:0"]));
+      assert.ok(buckets.every(b => b.total === 1), zone + " each report bucket lands once");
+      for (let i = 1; i < buckets.length; i++) assert.equal(buckets[i].start - buckets[i - 1].start, 3600);
+      if (zone === "America/New_York" && new Date(at * 1000).getMonth() === 10) {
+        const repeated = buckets.filter(b => new Date(b.start * 1000).getHours() === 1);
+        assert.equal(repeated.length, 2);
+        assert.notEqual(context.usageBucketLabel(repeated[0], "hour", true),
+          context.usageBucketLabel(repeated[1], "hour", true), "hover distinguishes the repeated hour");
+      }
+    }
+    process.env.TZ = "UTC";
     // the columns: a day each, a week from Monday, a month; empty ones kept
     const days = context.usageBuckets(month, "day", null, NOW);
     assert.equal(days.length, 30);
@@ -186,7 +218,7 @@ const text = (root, selector) => [...root.querySelectorAll(selector)].map(item =
     // a requested alias and the id it resolved to are one model: the
     // catalog's row, named once
     const spelled = (model, input) => ({ bid: 0, at: NOW, engine: "claude", model, input, output: 0,
-      cache_read: 0, cache_write: 0, reasoning: 0, cost: null });
+      cache_read: 0, cache_write: 0, reasoning: 0 });
     const merged = context.usageSeries([spelled("opus[1m]", 5), spelled("claude-opus-5-5[1m]", 7),
       spelled("claude-sonnet-9", 2)], "model", "all");
     assert.deepEqual(plain(merged.map(item => [item.label, item.value])),
@@ -210,29 +242,29 @@ const text = (root, selector) => [...root.querySelectorAll(selector)].map(item =
     /* ---------- the sheet ---------- */
     const today = Date.UTC(2026, 8, 22) / 1000;
     const local = [
-      [H(today + 3600 * 9), "claude", "claude-opus-5-5[1m]", 10, 200, 3000, 40, 0, 2, 0.5],
-      [H(today + 3600 * 9), "claude", "claude-haiku-4-5", 500, 20, 0, 0, 0, 1, 0.01],
-      [H(today - DAY + 3600 * 23), "codex", "gpt-6-astra", 400, 50, 600, 0, 30, 1, null],
-      [H(today - 3 * DAY), "claude", "", 1, 1, 1, 0, 0, 1, null],
+      [H(today + 3600 * 9), "claude", "claude-opus-5-5[1m]", 10, 200, 3000, 40, 0, 2],
+      [H(today + 3600 * 9), "claude", "claude-haiku-4-5", 500, 20, 0, 0, 0, 1],
+      [H(today - DAY + 3600 * 23), "codex", "gpt-6-astra", 400, 50, 600, 0, 30, 1],
+      [H(today - 3 * DAY), "claude", "", 1, 1, 1, 0, 0, 1],
     ];
     const remote = [
-      [H(today + 3600 * 2), "opencode", "vendor/open", 7, 70, 700, 0, 60, 1, null],
+      [H(today + 3600 * 2), "opencode", "vendor/open", 7, 70, 700, 0, 60, 1],
     ];
     const studio = node(0, local, {
       sessions: [
         { id: 4, name: "Harbor dashboard", color: "#e0784f", deleted: false, parent: null, parent_name: "",
           engines: ["claude"], input: 511, output: 221, cache_read: 3001, cache_write: 40, reasoning: 0,
-          cost: 0.51, turns: 3, last_at: today },
+          turns: 3, last_at: today },
         { id: 9, name: "", color: "", deleted: true, parent: null, parent_name: "",
           engines: ["codex"], input: 400, output: 50, cache_read: 600, cache_write: 0, reasoning: 30,
-          cost: null, turns: 1, last_at: today }],
+          turns: 1, last_at: today }],
       session_count: 7,
-      jobs: { title: { input: 3, output: 3, cache_read: 0, cache_write: 0, reasoning: 0, cost: null, turns: 2 } },
+      jobs: { title: { input: 3, output: 3, cache_read: 0, cache_write: 0, reasoning: 0, turns: 2 } },
       first_at: NOW - 40 * DAY });
     const workshop = node(3, remote, { first_at: NOW - 20 * DAY, sessions: [
       { id: 2, name: "Card spacing", color: "#4dd0c4", deleted: false, parent: 1, parent_name: "Garden",
         engines: ["opencode"], input: 7, output: 70, cache_read: 700, cache_write: 0, reasoning: 60,
-        cost: null, turns: 1, last_at: today }], session_count: 1 });
+        turns: 1, last_at: today }], session_count: 1 });
     const sheet = consoleFor({
       backends: [{ id: 3, name: "Workshop", capabilities: ["token-usage"] },
                  { id: 5, name: "Attic", capabilities: ["token-usage"] },
@@ -255,10 +287,10 @@ const text = (root, selector) => [...root.querySelectorAll(selector)].map(item =
     assert.equal(m.querySelector(".tu-intro").textContent,
       "What every engine used on each backend · counted since Aug 13, 2026");
     // the figures, summed across the nodes
-    assert.deepEqual(text(m, ".tu-tile-label"), ["Total", "Input", "Cache", "Output", "Turns", "Est. cost"]);
-    assert.deepEqual(text(m, ".tu-tile-value"), ["5.6k", "918", "4.3k", "341", "6", "$0.51"]);
+    assert.deepEqual(text(m, ".tu-tile-label"), ["Total", "Input", "Cache", "Output", "Turns"]);
+    assert.deepEqual(text(m, ".tu-tile-value"), ["5.6k", "918", "4.3k", "341", "6"]);
     assert.deepEqual(text(m, ".tu-tile-sub"), ["2 backends", "uncached", "4.3k read · 40 written",
-      "90 reasoning", "in 8 sessions", "where reported"]);
+      "90 reasoning", "in 8 sessions"]);
     // by backend: two series, the chart's legend and table agree
     const svg = m.querySelector(".tu-plot svg");
     assert.ok(svg, "the chart is drawn");
@@ -268,7 +300,6 @@ const text = (root, selector) => [...root.querySelectorAll(selector)].map(item =
     assert.deepEqual(text(m, ".tu-table .tu-name-label"), ["Studio", "Workshop"]);
     assert.deepEqual(text(m, ".tu-table .tu-total"), ["4.8k", "777"]);
     assert.deepEqual(text(m, ".tu-pct"), ["86%", "14%"]);
-    assert.equal(m.querySelector(".tu-table .tu-cost"), null, "no cost under a row");
     assert.deepEqual(text(m, ".tu-table .tu-name-sub"), ["in 911 · cache 3.6k · out 271", "in 7 · cache 700 · out 70"],
       "only the split a phone shows under the name");
     // the readout: the range's total and its peak, then every series
@@ -342,7 +373,7 @@ const text = (root, selector) => [...root.querySelectorAll(selector)].map(item =
     let release;
     const slow = new Promise(resolve => { release = resolve; });
     const racing = consoleFor({ replies: { 0: route => route.includes("step=86400") ?
-      node(0, [[Date.UTC(2026, 8, 1) / 1000, "claude", "", 5, 5, 5, 0, 0, 1, null]],
+      node(0, [[Date.UTC(2026, 8, 1) / 1000, "claude", "", 5, 5, 5, 0, 0, 1]],
         { first_at: Date.UTC(2026, 8, 1, 9) / 1000 }) : slow } });
     racing.context.modalTokenUsage();
     const r = racing.document.querySelector(".token-usage-modal");
@@ -356,7 +387,7 @@ const text = (root, selector) => [...root.querySelectorAll(selector)].map(item =
     assert.ok(racing.calls.requests[1].route.includes("step=86400&offset=0"));
     assert.equal(r.querySelector(".tu-read-when").textContent, "All time");
     assert.equal(r.querySelector(".tu-read-sum").textContent, "15");
-    release(node(0, [[H(today), "claude", "", 999, 0, 0, 0, 0, 1, null]]));
+    release(node(0, [[H(today), "claude", "", 999, 0, 0, 0, 0, 1]]));
     await settle();
     assert.equal(r.querySelector(".tu-read-sum").textContent, "15", "the older answer is dropped");
     assert.ok(!r.querySelector(".tu-body").classList.contains("loading"));
@@ -381,6 +412,21 @@ const text = (root, selector) => [...root.querySelectorAll(selector)].map(item =
     const s = stale.document.querySelector(".token-usage-modal");
     assert.deepEqual([...s.querySelectorAll(".seg-btn.on")].map(item => item.textContent),
       ["30 days", "Backend", "All"], "anything but the exact value reads as the default");
+
+    const daySheet = consoleFor({ storage: { "puppy.usage.range": "24h" }, replies: {
+      0: node(0, [[NOW - DAY, "claude", "", 2, 3, 0, 0, 0, 1],
+        [NOW - 3600, "codex", "", 4, 5, 0, 0, 0, 1]]) } });
+    const dayView = daySheet.context.modalTokenUsage();
+    await settle();
+    assert.equal(dayView.view.chart.unit, "hour");
+    assert.equal(dayView.view.chart.buckets.length, 24);
+    assert.equal(dayView.view.chart.total, 14);
+    assert.equal(dayView.m.querySelector(".tu-read-when").textContent, "Last 24 hours");
+    assert.deepEqual(text(dayView.m, ".tu-tile-label"), ["Total", "Input", "Cache", "Output", "Turns"]);
+    assert.ok(daySheet.calls.requests[0].route.includes(`since=${NOW - DAY}&until=${NOW}&step=3600`));
+    assert.ok(!dayView.m.textContent.includes("$") && !dayView.m.textContent.includes("cost"));
+    dayView.m.querySelector(".tu-plot").dispatchEvent(new FakeEvent("keydown", { key: "End" }));
+    assert.equal(dayView.m.querySelector(".tu-read-sum").textContent, "9");
 
     /* ---------- failures ---------- */
     const failing = consoleFor({ backends: [{ id: 3, name: "Workshop", capabilities: ["token-usage"] }],

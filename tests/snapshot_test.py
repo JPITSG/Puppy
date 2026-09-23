@@ -351,9 +351,9 @@ async def main() -> None:
         # outliving the sessions it counts.
         assert token_usage.store([
             ["turn:{}:7".format(linked_id), 1789992000.0, linked_id, "turn", "claude",
-             "preview-standard", 12, 340, 5600, 78, 0, 0.0412],
+             "preview-standard", 12, 340, 5600, 78, 0],
             ["spawn:ab12cd34:1789995600", 1789995600.5, None, "title", "codex",
-             "", 90, 12, 0, 0, 4, None]]) == 2
+             "", 90, 12, 0, 0, 4]]) == 2
 
         def usage_records():
             return {row["key"]: row["value"] for row in db.query(
@@ -694,7 +694,7 @@ async def main() -> None:
             "completion_log", "session_completion.{}".format(linked_id)))
         notices.record("mutated after export", "warn")
         token_usage.store([["turn:{}:8".format(linked_id), 1790078400.0, linked_id, "turn",
-                            "claude", "", 1, 1, 0, 0, 0, None]])
+                            "claude", "", 1, 1, 0, 0, 0]])
         assert list(usage_records()) == ["token_usage.2026-09-21", "token_usage.2026-09-22"]
         db.execute("DELETE FROM meta WHERE key=?", (notices.META_KEY,))
         assert notices.payload()["items"] == []

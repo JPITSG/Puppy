@@ -37,7 +37,7 @@ summary, with matching parent/request-model identities, no native error,
 `finish: stop`, a completion time, no tool parts, and nonempty text.
 Missing, malformed or ambiguous evidence fails verification. A lost POST
 reply is never retried; a committed summary can still be verified by reading
-the messages. The summary's own token/cost counters are reported when valid;
+the messages. The summary's own token counters are reported when valid;
 its input count is not displayed as the reduced context size.
 
 Readiness is bounded to 20 seconds, ordinary API requests to 10 seconds,

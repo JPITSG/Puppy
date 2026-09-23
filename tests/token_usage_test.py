@@ -132,11 +132,11 @@ def rows_and_store():
     session = {"id": 7, "engine": "claude", "model": "opus[1m]",
                "last_model": "claude-opus-5-5[1m]"}
     event = {"seq": 41, "ts": NOON + 5.00049, "data": {
-        "ok": True, "cost_usd": 1.25, "usage": {"input_tokens": 3, "output_tokens": 70,
+        "ok": True, "usage": {"input_tokens": 3, "output_tokens": 70,
                                                 "cache_read_input_tokens": 900}}}
     rows = token_usage.turn_rows(session, event)
     assert rows == [["turn:7:41", round(NOON + 5.00049, 3), 7, "turn", "claude",
-                     "claude-opus-5-5[1m]", 3, 70, 900, 0, 0, 1.25]], rows
+                     "claude-opus-5-5[1m]", 3, 70, 900, 0, 0]], rows
     # no confirmed model: the requested one, else the engine's default ("")
     assert token_usage.turn_rows(dict(session, last_model=""), event)[0][5] == "opus[1m]"
     assert token_usage.turn_rows(dict(session, last_model="", model=""), event)[0][5] == ""
@@ -145,12 +145,12 @@ def rows_and_store():
     # a per-model breakdown that covers the main loop splits the turn by model
     split = dict(event, data=dict(event["data"], model_usage={
         "claude-opus-5-5[1m]": {"input_tokens": 3, "output_tokens": 70,
-                                "cache_read_input_tokens": 900, "cost_usd": 1.2},
-        "claude-haiku-4-5": {"input_tokens": 400, "output_tokens": 9, "cost_usd": 0.05},
+                                "cache_read_input_tokens": 900},
+        "claude-haiku-4-5": {"input_tokens": 400, "output_tokens": 9},
         "junk": "x", "": {"input_tokens": 5}}))
     split_rows = token_usage.turn_rows(session, split)
-    assert [(row[5], row[6], row[11]) for row in split_rows] == [
-        ("", 5, None), ("claude-haiku-4-5", 400, 0.05), ("claude-opus-5-5[1m]", 3, 1.2)], split_rows
+    assert [(row[5], row[6]) for row in split_rows] == [
+        ("", 5), ("claude-haiku-4-5", 400), ("claude-opus-5-5[1m]", 3)], split_rows
     assert {row[0] for row in split_rows} == {"turn:7:41"}, "one ref for every model of the turn"
     # a breakdown smaller than the main loop's own usage is not trusted
     thin = dict(event, data=dict(event["data"], model_usage={
@@ -160,7 +160,7 @@ def rows_and_store():
     # stored in the day of its time, ordered, each ref once whoever reports it
     assert token_usage.store(rows) == 1
     assert ledger_keys() == ["token_usage.2026-09-21"]
-    assert stored("2026-09-21") == {"format": 1, "rows": rows}
+    assert stored("2026-09-21") == {"format": 2, "rows": rows}
     assert token_usage.store(split_rows) == 0, "a ref already counted is left alone"
     assert token_usage.store(rows) == 0
     later = token_usage.turn_rows(session, dict(event, seq=42, ts=NOON + 9))
@@ -193,12 +193,11 @@ def rows_and_store():
         model = "gpt-6-astra"
         model_used = ""
         usage = {"input_tokens": 1000, "cached_input_tokens": 600, "output_tokens": 50}
-        cost_usd = None
         owner = ("turn", 7, "turn-1")
 
     assert token_usage.job_rows(Job) == [
         ["spawn:ab12cd34:{}".format(int(NOON + 100.9)), NOON + 160, 7, "spawn", "codex",
-         "gpt-6-astra", 400, 50, 600, 0, 0, None]]
+         "gpt-6-astra", 400, 50, 600, 0, 0]]
     Job.model_used = "gpt-6-astra-2"
     Job.owner = ("remote",)
     assert token_usage.job_rows(Job)[0][2:6] == [None, "spawn", "codex", "gpt-6-astra-2"]
@@ -243,7 +242,7 @@ def persisted_shape():
         # record anywhere else is the startup's and the restore's to refuse
         uses = [lambda: token_usage.report(NOON - DAY, NOON + 3 * DAY),
                 lambda: token_usage.store([["turn:9:1", NOON + 30, 9, "turn", "codex", "",
-                                            1, 0, 0, 0, 0, None]])] if at == key else []
+                                            1, 0, 0, 0, 0]])] if at == key else []
         for call in uses:
             try:
                 call()
@@ -265,10 +264,10 @@ def persisted_shape():
 
     refused("not json", "non-JSON record")
     refused("[]", "a list is not the record")
-    refused({"format": 1, "rows": good["rows"], "extra": 1}, "an unknown key")
-    refused({"format": 2, "rows": good["rows"]}, "another format")
-    refused({"format": 1, "rows": []}, "an empty day")
-    refused({"format": 1, "rows": "x"}, "rows that are not a list")
+    refused({"format": 2, "rows": good["rows"], "extra": 1}, "an unknown key")
+    refused({"format": 1, "rows": good["rows"]}, "previous format")
+    refused({"format": 2, "rows": []}, "an empty day")
+    refused({"format": 2, "rows": "x"}, "rows that are not a list")
     refused(good, "a day that does not match its rows", "token_usage.2026-09-20")
     refused(good, "a key that is not a day", "token_usage.20260921")
     refused(good, "an impossible day", "token_usage.2026-13-40")
@@ -285,7 +284,6 @@ def persisted_shape():
     refused(row_variant(0, 5, 5), "a model that is not text")
     refused(row_variant(0, 6, -1), "a negative count")
     refused(row_variant(0, 6, 1.5), "a fractional count")
-    refused(row_variant(0, 11, -0.1), "a negative cost")
     record = json.loads(json.dumps(good))
     record["rows"][0][6:10] = [0, 0, 0, 0]
     refused(record, "a row that counts nothing")
@@ -309,36 +307,36 @@ def reports():
     garden, harbor, atlas = now_sessions["Garden planner"], now_sessions["Harbor"], \
         now_sessions["Atlas"]
 
-    def row(ref, at, session, engine, model, amounts, cost=None, source="turn"):
-        return [ref, at, session, source, engine, model, *amounts, cost]
+    def row(ref, at, session, engine, model, amounts, source="turn"):
+        return [ref, at, session, source, engine, model, *amounts]
 
     rows = [
-        row("turn:{}:1".format(garden), NOON + 60, garden, "claude", "opus", [1, 10, 100, 5, 0], 0.5),
-        row("turn:{}:1".format(garden), NOON + 60, garden, "claude", "haiku", [20, 2, 0, 0, 0], 0.01),
-        row("turn:{}:2".format(garden), NOON + 3700, garden, "claude", "opus", [2, 20, 200, 0, 0], 1.0),
+        row("turn:{}:1".format(garden), NOON + 60, garden, "claude", "opus", [1, 10, 100, 5, 0]),
+        row("turn:{}:1".format(garden), NOON + 60, garden, "claude", "haiku", [20, 2, 0, 0, 0]),
+        row("turn:{}:2".format(garden), NOON + 3700, garden, "claude", "opus", [2, 20, 200, 0, 0]),
         row("turn:{}:1".format(harbor), NOON + 120, harbor, "codex", "gpt", [50, 5, 500, 0, 3]),
         row("turn:{}:1".format(atlas), NOON - 2 * DAY, atlas, "claude", "opus", [7, 7, 7, 7, 0]),
         row("turn:999:1", NOON + 200, 999, "codex", "gpt", [1, 1, 1, 0, 0]),
-        row("spawn:t1:1", NOON + 300, None, "claude", "haiku", [3, 3, 0, 0, 0], None, "title"),
-        row("spawn:r1:1", NOON + 400, None, "codex", "gpt", [4, 4, 0, 0, 0], None, "spawn"),
+        row("spawn:t1:1", NOON + 300, None, "claude", "haiku", [3, 3, 0, 0, 0], "title"),
+        row("spawn:r1:1", NOON + 400, None, "codex", "gpt", [4, 4, 0, 0, 0], "spawn"),
     ]
     assert token_usage.store(rows) == len(rows)
     report = token_usage.report(NOON - 600, NOON + DAY)
     assert report["ok"] and report["step"] == 3600 and report["offset"] == 0
     assert report["first_at"] == NOON - 2 * DAY, "the earliest usage kept anywhere"
     assert report["columns"] == ["at", "engine", "model", "input", "output", "cache_read",
-                                 "cache_write", "reasoning", "turns", "cost"]
+                                 "cache_write", "reasoning", "turns"]
     hour = NOON  # noon is on the hour
     assert report["buckets"] == [
-        [hour, "claude", "haiku", 23, 5, 0, 0, 0, 1, 0.01],
-        [hour, "claude", "opus", 1, 10, 100, 5, 0, 1, 0.5],
-        [hour, "codex", "gpt", 55, 10, 501, 0, 3, 2, None],
-        [hour + 3600, "claude", "opus", 2, 20, 200, 0, 0, 1, 1.0],
+        [hour, "claude", "haiku", 23, 5, 0, 0, 0, 1],
+        [hour, "claude", "opus", 1, 10, 100, 5, 0, 1],
+        [hour, "codex", "gpt", 55, 10, 501, 0, 3, 2],
+        [hour + 3600, "claude", "opus", 2, 20, 200, 0, 0, 1],
     ], report["buckets"]
     totals = report["totals"]
     assert (totals["input"], totals["output"], totals["cache_read"], totals["cache_write"],
             totals["reasoning"], totals["turns"]) == (81, 45, 801, 5, 3, 4), totals
-    assert abs(totals["cost"] - 1.51) < 1e-9, "a turn split by model is one turn"
+    assert set(totals) == set(token_usage.COUNTS) | {"turns"}
     # the tokens count every run; the turns only the turns - a title job and
     # a spawned agent are runs of their own, counted with their job below
     listed = [(entry["id"], entry["turns"], entry["deleted"]) for entry in report["sessions"]]
@@ -349,18 +347,24 @@ def reports():
     assert report["sessions"][2]["name"] == "" and report["session_count"] == 3
     assert report["jobs"] == {
         "spawn": {"input": 4, "output": 4, "cache_read": 0, "cache_write": 0, "reasoning": 0,
-                  "cost": None, "turns": 1},
+                  "turns": 1},
         "title": {"input": 3, "output": 3, "cache_read": 0, "cache_write": 0, "reasoning": 0,
-                  "cost": None, "turns": 1}}
+                  "turns": 1}}
     # the span is half-open, and a quiet span answers empty
     assert token_usage.report(NOON + 61, NOON + 3700)["totals"]["turns"] == 2
     quiet = token_usage.report(NOON + 5 * DAY, NOON + 6 * DAY)
     assert quiet["buckets"] == [] and quiet["sessions"] == [] and quiet["totals"]["turns"] == 0
-    assert quiet["totals"]["cost"] is None and quiet["first_at"] == NOON - 2 * DAY
+    assert quiet["first_at"] == NOON - 2 * DAY
     # days at a fixed offset: UTC+2's midnight
     days = token_usage.report(NOON - 3 * DAY, NOON + DAY, step=DAY, offset=7200)
     midnight = NOON - 12 * 3600 - 7200
     assert {bucket[0] for bucket in days["buckets"]} == {midnight - 2 * DAY, midnight}
+    # Hourly requests keep their exact rolling bounds while the columns
+    # align to a clock that is half an hour ahead of a UTC hour.
+    hours = token_usage.report(NOON + 61, NOON + 3700, offset=19800)
+    assert hours["totals"]["turns"] == 2
+    assert {bucket[0] for bucket in hours["buckets"]} == {NOON - 1800}
+    assert (hours["since"], hours["until"]) == (NOON + 61, NOON + 3700)
     # a task is named with its Main
     from puppy import session_tasks
     record = {"format": 1, "parent": garden}
@@ -471,18 +475,20 @@ async def through_the_runner():
     app.on_cleanup.clear()
     async with TestClient(TestServer(app)):
         sid, result = await fixture_turn("--fixture")
+        # Native price fields never enter the result or the ledger.
+        assert "cost_usd" not in result["data"]
         # the transcript keeps the breakdown; the ledger counts it by model
         assert set(result["data"]["model_usage"]) == {"claude-fixture-5[1m]", "claude-helper-4"}
         assert result["data"]["model_usage"]["claude-helper-4"] == {
             "input_tokens": 500, "output_tokens": 20, "cache_read_input_tokens": 0,
-            "cache_creation_input_tokens": 0, "cost_usd": 0.05}
+            "cache_creation_input_tokens": 0}
         rows = [row for key in ledger_keys()
                 for row in json.loads(db.query_one(
                     "SELECT value FROM meta WHERE key=?", (key,))["value"])["rows"]]
         ref = "turn:{}:{}".format(sid, result["seq"])
-        assert [(row[0], row[2], row[3], row[4], row[5], row[6:11], row[11]) for row in rows] == [
-            (ref, sid, "turn", "claude", "claude-fixture-5[1m]", [10, 200, 3000, 40, 0], 0.45),
-            (ref, sid, "turn", "claude", "claude-helper-4", [500, 20, 0, 0, 0], 0.05)], rows
+        assert [(row[0], row[2], row[3], row[4], row[5], row[6:11]) for row in rows] == [
+            (ref, sid, "turn", "claude", "claude-fixture-5[1m]", [10, 200, 3000, 40, 0]),
+            (ref, sid, "turn", "claude", "claude-helper-4", [500, 20, 0, 0, 0])], rows
         assert rows[0][1] == round(result["ts"], 3)
         # a turn without the breakdown is one row on the model its init named
         clear()
@@ -491,9 +497,9 @@ async def through_the_runner():
         assert db.get_session(plain_sid)["last_model"] == "claude-fixture-5[1m]"
         rows = json.loads(db.query_one("SELECT value FROM meta WHERE key GLOB 'token_usage.*'")[
             "value"])["rows"]
-        assert [(row[0], row[5], row[6:11], row[11]) for row in rows] == [
+        assert [(row[0], row[5], row[6:11]) for row in rows] == [
             ("turn:{}:{}".format(plain_sid, plain["seq"]), "claude-fixture-5[1m]",
-             [10, 200, 3000, 40, 0], 0.5)], rows
+             [10, 200, 3000, 40, 0])], rows
 
 
 async def main():
