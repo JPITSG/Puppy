@@ -551,6 +551,7 @@ a{color:var(--acc2)}
 .foot-eng .st-quota{color:var(--ok)}
 .foot-eng .st-quota.low{color:var(--err)}
 .foot-row{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);margin-top:8px;padding-top:7px}
+.foot-row>*{flex-shrink:0}
 #btn-bell.on{color:var(--acc2)}
 /* the tray is accented while its box is open, like the CPU reading beside it */
 #btn-notices[aria-expanded="true"]{color:var(--acc2)}
@@ -992,7 +993,7 @@ select.choice-native{display:none!important}
   .app.side-dragging.side-collapsed .side{width:var(--side-w);visibility:visible}
   .app.side-drag-revealing .side,.app.side-drag-collapsing .side{overflow:hidden}
   .app.side-drag-revealing .side>*:not(.side-resize){min-width:var(--side-w-open,256px)}
-  .app.side-drag-collapsing .side>*:not(.side-resize){min-width:200px}
+  .app.side-drag-collapsing .side>*:not(.side-resize){min-width:var(--side-w-min)}
   /* the resting collapsed state: no transition, so a reload starts settled */
   .app.side-collapsed .side{width:0;opacity:0;visibility:hidden}
   /* going out, stay visible for the whole slide and only then leave the tree */
@@ -3048,7 +3049,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .side{
     position:fixed;left:0;top:0;bottom:0;transform:translateX(-105%);
     transition:transform var(--t-slow) var(--ease);
-    background:var(--panel);width:min(300px,84vw);touch-action:pan-y pinch-zoom;
+    background:var(--panel);width:max(var(--side-w-min,0px),min(300px,84vw));touch-action:pan-y pinch-zoom;
   }
   /* This is itself a scroll container, so touch-action resolution stops here
      rather than inheriting the drawer's rule through it. Keep its native

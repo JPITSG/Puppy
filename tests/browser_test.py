@@ -2356,6 +2356,7 @@ const URL={revoked:[],revokeObjectURL(value){this.revoked.push(value);}};
 const fmtBytes=value=>String(value)+" B";
 const noteSessionActivity=()=>{};
 const scrollCaretIntoView=()=>{};
+const spellLearnSent=()=>{};
 const toast=()=>{};
 %s
 %s
@@ -2810,7 +2811,8 @@ def check_desktop_side_drag(ui_source: str) -> None:
 
     The hidden edge must expose a paused intermediate width, settle slowly by
     position or quickly by velocity, while the visible grip keeps its ordinary
-    resize range and changes into a reversible collapse below 200px.
+    resize range and changes into a reversible collapse below the footer's
+    measured minimum. Saved widths and reset share that same minimum.
     """
     marker = ui_source.index("/* Desktop sidebar drag.")
     start = ui_source.index("(() => {", marker)
@@ -2827,6 +2829,7 @@ def check_desktop_side_drag(ui_source: str) -> None:
                 break
     assert end is not None, "unbalanced desktop sidebar gesture"
     gesture = ui_source[start:end]
+    widths = ui_source[ui_source.index("const SIDE_DEFAULT_WIDTH ="):ui_source.index("/* Measure the footer")]
     script = r"""
 class Classes {
   constructor(...names) { this.names = new Set(names); }
@@ -2870,10 +2873,8 @@ const storage = {"puppy.sidecollapsed":"1", "puppy.sidew":"256"};
 const lsGet = key => storage[key] || null;
 const lsSet = (key, value) => { storage[key] = value; };
 const lsDel = key => { delete storage[key]; };
-function savedSideWidth() {
-  const saved = parseInt(lsGet("puppy.sidew") || "", 10);
-  return saved ? Math.min(480, Math.max(200, saved)) : 256;
-}
+%s
+sideMinWidth = 280; // layout measurement belongs to the real-browser checks
 function setSideCollapsed(on, animate=true) {
   const open = savedSideWidth();
   nodes.app.classList.toggle("side-collapsed", !!on);
@@ -2911,9 +2912,9 @@ edge.emit("pointerdown", {clientX:4,timeStamp:500});
 edge.emit("pointermove", {clientX:190,timeStamp:800});
 edge.emit("pointerup", {clientX:190,timeStamp:1000}); runFrame();
 const majorityOpen=!app.classList.contains("side-collapsed") &&
-  rootStyle.value("--side-w")==="256px";
+  rootStyle.value("--side-w")==="280px";
 
-grip.emit("pointerdown", {clientX:256,timeStamp:1100});
+grip.emit("pointerdown", {clientX:280,timeStamp:1100});
 grip.emit("pointermove", {clientX:330,timeStamp:1300});
 grip.emit("pointerup", {clientX:330,timeStamp:1500});
 const resized=rootStyle.value("--side-w")==="330px" && storage["puppy.sidew"]==="330";
@@ -2952,26 +2953,29 @@ grip.emit("pointercancel", {clientX:70,timeStamp:4210}); runFrame();
 const cancelRestored=!app.classList.contains("side-collapsed") &&
   rootStyle.value("--side-w")==="330px";
 grip.emit("dblclick");
-const doubleClickReset=rootStyle.value("--side-w")==="256px" &&
+const doubleClickReset=rootStyle.value("--side-w")==="280px" &&
   storage["puppy.sidew"]===undefined;
+sideMinWidth = 340;
+grip.emit("dblclick");
+const changedMinimum=rootStyle.value("--side-w")==="340px";
 
 console.log(JSON.stringify({revealHeld,revealPaused,minorityClosed,majorityOpen,resized,
   collapseHeld,positionClosed,laneRestoresOpen,restoredWidth,flickOpen,cancelRestored,
-  doubleClickReset}));
-""" % gesture
+  doubleClickReset,changedMinimum}));
+""" % (widths, gesture)
     proc = subprocess.run(["node", "-e", with_live_views(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:600]
     result = json.loads(proc.stdout.strip())
     assert result["revealHeld"] == {
-        "width": "90px", "opacity": str(90 / 256), "dragging": True}, result
+        "width": "90px", "opacity": str(90 / 280), "dragging": True}, result
     assert result["revealPaused"] == {
-        "width": "90px", "opacity": str(90 / 256)}, result
+        "width": "90px", "opacity": str(90 / 280)}, result
     assert result["minorityClosed"] and result["majorityOpen"] and result["resized"], result
     assert result["collapseHeld"] == {
-        "width": "80px", "opacity": "0.4", "clipping": True}, result
+        "width": "80px", "opacity": str(80 / 280), "clipping": True}, result
     assert result["positionClosed"] and result["laneRestoresOpen"], result
     assert result["restoredWidth"] and result["flickOpen"] and result["cancelRestored"], result
-    assert result["doubleClickReset"], result
+    assert result["doubleClickReset"] and result["changedMinimum"], result
 
 
 def check_user_message_copy(ui_source: str) -> None:
@@ -3220,6 +3224,7 @@ const api=async (bid,path,options)=>{
   return {ok:true,status:"sent",request_id:options.body.request_id};
 };
 const attachmentMarkerLine=()=>{throw new Error("unexpected attachment in steering fixture");};
+const spellLearnSent=()=>{};
 %s
 const proto={%s};
 const view=Object.assign(Object.create(proto),{

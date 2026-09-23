@@ -3841,6 +3841,7 @@ let localStateStreamTopics = new Set();
 async function enterApp() {
   state.authed = true;
   $("app").classList.remove("hidden");
+  syncSideMinimum();
   await refreshState();
   loadTabs();
   const valid = state.tabs.filter(t => {
@@ -11365,10 +11366,47 @@ function drawerLayout() {
   return window.matchMedia("(max-width:900px)").matches;
 }
 
+const SIDE_DEFAULT_WIDTH = 256;
+const SIDE_MAX_WIDTH = 480;
+let sideMinWidth = 0;
+
 function savedSideWidth() {
   const saved = parseInt(lsGet("puppy.sidew") || "", 10);
-  return saved ? Math.min(480, Math.max(200, saved)) : 256;
+  return Math.max(sideMinWidth, Math.min(SIDE_MAX_WIDTH, saved || SIDE_DEFAULT_WIDTH));
 }
+
+/* Measure the footer in its own styles at its largest reading, including
+   controls that are temporarily hidden. No button count, font metric or
+   padding is duplicated in the resize limit. The empty sidebar clone keeps
+   other content (session names, status panels) out of its intrinsic width. */
+function syncSideMinimum() {
+  const app = $("app"), side = $("side"), root = document.documentElement;
+  if (app.classList.contains("hidden") || app.classList.contains("side-dragging") ||
+      app.classList.contains("side-animating")) return;
+  const probe = side.cloneNode(false);
+  const foot = side.querySelector(".side-foot").cloneNode(false);
+  const row = side.querySelector(".foot-row").cloneNode(true);
+  probe.removeAttribute("id");
+  probe.setAttribute("aria-hidden", "true");
+  probe.setAttribute("inert", "");
+  for (const node of row.querySelectorAll("[id]")) node.removeAttribute("id");
+  for (const node of row.querySelectorAll(".hidden")) node.classList.remove("hidden");
+  row.querySelector(".host-cpu").textContent = "CPU 100%";
+  Object.assign(probe.style, { position: "absolute", visibility: "hidden",
+    width: "max-content", minWidth: "0", height: "auto", transition: "none" });
+  foot.style.minWidth = "0"; // the collapse animation must not widen the probe
+  foot.appendChild(row);
+  probe.appendChild(foot);
+  side.parentNode.appendChild(probe);
+  sideMinWidth = Math.ceil(probe.getBoundingClientRect().width);
+  probe.remove();
+  root.style.setProperty("--side-w-min", sideMinWidth + "px");
+  const open = savedSideWidth();
+  root.style.setProperty("--side-w-open", open + "px");
+  root.style.setProperty("--side-w", app.classList.contains("side-collapsed") ? "0px" : open + "px");
+}
+window.addEventListener("resize", syncSideMinimum);
+if (document.fonts) document.fonts.ready.then(syncSideMinimum);
 
 /* Collapsing zeroes --side-w as well as hiding the column: the body's backdrop
    grid is masked against that width so it never collides with the session
@@ -11398,8 +11436,8 @@ function setSideCollapsed(on, animate = true) {
   window.dispatchEvent(new Event("resize"));   // xterm fit etc.
 }
 
-/* Desktop sidebar drag. The ordinary right-edge grip remains a 200-480px
-   resizer. Pulling it below that range changes into a live collapse gesture;
+/* Desktop sidebar drag. The ordinary right-edge grip resizes from the footer's
+   minimum width. Pulling it below that range changes into a live collapse gesture;
    when hidden, the narrow viewport-edge target reverses the same gesture.
    Width (and therefore the workspace) stays under the pointer, then the
    existing sidebar transition carries only the remaining distance. */
@@ -11410,8 +11448,6 @@ function setSideCollapsed(on, animate = true) {
   const edge = $("drawer-edge");
   const root = document.documentElement;
   const desktop = window.matchMedia("(min-width: 901px)");
-  const minWidth = 200;
-  const maxWidth = 480;
   const flingVelocity = .45; // CSS px/ms over the most recent 100ms
   let gesture = null;
   let settleFrame = null;
@@ -11447,6 +11483,7 @@ function setSideCollapsed(on, animate = true) {
   }
 
   function liveWidth(current, event) {
+    const minWidth = current.minWidth;
     const delta = event.clientX - current.startX;
     if (!current.moved && Math.abs(delta) < 1) return;
     current.moved = true;
@@ -11493,6 +11530,7 @@ function setSideCollapsed(on, animate = true) {
   function finish(event, cancelled = false) {
     const current = gesture;
     if (!current || event.pointerId !== current.id) return;
+    const minWidth = current.minWidth;
     if (!cancelled) liveWidth(current, event); // retain a one-frame mouse flick
     gesture = null;
     try { current.target.releasePointerCapture(current.id); } catch (error) {}
@@ -11534,6 +11572,7 @@ function setSideCollapsed(on, animate = true) {
     if (!desktop.matches || event.button !== 0 || event.isPrimary === false || gesture ||
         app.classList.contains("side-animating")) return;
     if (app.classList.contains("side-collapsed") !== revealing) return;
+    const minWidth = sideMinWidth;
     const openWidth = savedSideWidth();
     const startWidth = revealing ? 0 : side.getBoundingClientRect().width;
     if (!revealing && !(startWidth >= minWidth)) return;
@@ -11546,7 +11585,7 @@ function setSideCollapsed(on, animate = true) {
     root.style.setProperty("--side-w-open", openWidth + "px");
     gesture = {
       id: event.pointerId, target, revealing, startX: event.clientX,
-      width: startWidth, maxWidth: revealing ? openWidth : maxWidth,
+      width: startWidth, minWidth, maxWidth: revealing ? openWidth : Math.max(SIDE_MAX_WIDTH, minWidth),
       moved: false, samples: [{ position: startWidth, time: event.timeStamp }],
     };
     app.classList.add("side-dragging");
@@ -11568,9 +11607,9 @@ function setSideCollapsed(on, animate = true) {
   wire(edge, true);
   wire(grip, false);
   grip.addEventListener("dblclick", () => {
-    root.style.setProperty("--side-w", "256px");
-    root.style.setProperty("--side-w-open", "256px");
     lsDel("puppy.sidew");
+    root.style.setProperty("--side-w", savedSideWidth() + "px");
+    root.style.setProperty("--side-w-open", savedSideWidth() + "px");
     window.dispatchEvent(new Event("resize"));
   });
 })();

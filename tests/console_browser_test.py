@@ -1051,6 +1051,116 @@ async def usage_error_checks(instance, capture=False):
     print('PASS: complete usage-refresh errors and long identifiers remain visible without overflow on desktop and phones in both themes',flush=True)
 
 
+async def sidebar_width_checks(instance):
+    """The footer fits at its worst case, through every way of setting width."""
+    async def viewport(width, phone=False):
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": width, "height": 844 if phone else 900,
+            "deviceScaleFactor": 2 if phone else 1, "mobile": phone}, session=instance.page_session)
+        await evaluate(instance, "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))")
+
+    async def mouse(kind, x, clicks=1):
+        await instance.call("Input.dispatchMouseEvent", {
+            "type": kind, "x": x, "y": 100, "button": "left",
+            "buttons": 0 if kind == "mouseReleased" else 1,
+            "clickCount": clicks}, session=instance.page_session)
+
+    async def settled():
+        await until(instance, "!$('app').classList.contains('side-animating') && "
+                    "!$('app').classList.contains('side-dragging')")
+
+    async def fits(where):
+        value = await evaluate(instance, """(() => {
+            $('conn-dot').classList.add('ok'); renderHostCpu(100);
+            $('btn-bell').classList.remove('hidden');
+            const side=$('side').getBoundingClientRect(), foot=$('side').querySelector('.side-foot');
+            const items=[...foot.querySelectorAll('.foot-row .icon-btn,.host-cpu,.conn-dot')].map(n=>{
+                const r=n.getBoundingClientRect();
+                return {id:n.id,left:r.left,right:r.right,width:r.width,height:r.height,
+                    clipped:n.scrollWidth>n.clientWidth+1, icon:n.classList.contains('icon-btn')};
+            });
+            return {width:side.width,left:side.left,right:side.right,viewport:innerWidth,items,
+                inset:parseFloat(getComputedStyle(foot).paddingRight),cpu:$('host-cpu').textContent};
+        })()""")
+        assert value["cpu"] == "CPU 100%", (where, value)
+        assert value["left"] >= -.1 and value["right"] <= value["viewport"] + .1, (where, value)
+        for item in value["items"]:
+            assert item["width"] > 0 and not item["clipped"], (where, value)
+            assert item["left"] >= value["left"] + value["inset"] - .1, (where, value)
+            assert item["right"] <= value["right"] - value["inset"] + .1, (where, value)
+            if item["icon"]:
+                assert abs(item["width"] - item["height"]) < .1, (where, value)
+        for before, after in zip(value["items"], value["items"][1:]):
+            assert before["right"] <= after["left"], (where, value)
+        return value["width"]
+
+    await viewport(1440)
+    # A width saved by an older console is corrected during boot, even while
+    # the bell and CPU are hidden. Showing either must not resize the sidebar.
+    await evaluate(instance, "lsSet('puppy.sidew','200'); lsSet('puppy.sidecollapsed',''); true")
+    await instance.call("Page.reload", session=instance.page_session)
+    await until(instance, "typeof navigation!=='undefined' && !!navigation.current && state.sessions.length>0")
+    hidden_width = await evaluate(instance, "$('side').getBoundingClientRect().width")
+    minimum = await fits("saved narrow width on reload")
+    assert minimum == hidden_width, (minimum, hidden_width)
+    for theme in ("dark", "light"):
+        await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+        # Shrinking from a normal width cannot leave a squeezed footer behind.
+        await evaluate(instance, "lsSet('puppy.sidew','360'); setSideCollapsed(false,false); true")
+        await mouse("mousePressed", 360)
+        await mouse("mouseMoved", 200)
+        await asyncio.sleep(.15)  # release by position rather than fling speed
+        await mouse("mouseReleased", 200)
+        await settled()
+        await fits(theme + " after dragging below the minimum")
+        edge = await evaluate(instance, "$('side').getBoundingClientRect().right")
+        for count in (1, 2):
+            await mouse("mousePressed", edge, count)
+            await mouse("mouseReleased", edge, count)
+        await settled()
+        assert await fits(theme + " double-click reset") == minimum
+        # Changing the reading through its digit boundaries keeps that width.
+        for cpu in (0, 9, 10, 99, 100):
+            assert await evaluate(instance, "renderHostCpu(%d); $('side').getBoundingClientRect().width" % cpu) == minimum
+        # Collapsing and reloading must also repair a stale saved open width.
+        await evaluate(instance, "lsSet('puppy.sidew','200'); setSideCollapsed(true,false); true")
+        await instance.call("Page.reload", session=instance.page_session)
+        await until(instance, "typeof navigation!=='undefined' && !!navigation.current && state.sessions.length>0")
+        assert await evaluate(instance, "$('app').classList.contains('side-collapsed') && $('side').getBoundingClientRect().width===0")
+        await mouse("mousePressed", 4)
+        await mouse("mouseMoved", minimum - 10)
+        await asyncio.sleep(.15)
+        await mouse("mouseReleased", minimum - 10)
+        await settled()
+        assert await fits(theme + " reopen from collapsed reload") == minimum
+
+    # The minimum follows actual controls and font metrics, not today's count
+    # or a guessed pixel width. Simulate another footer control and larger type.
+    await evaluate(instance, """window.widthExtra=$('btn-settings').cloneNode(true);
+        widthExtra.id='sidebar-width-fixture'; $('side').querySelector('.foot-row').insertBefore(widthExtra,$('host-cpu').parentNode);
+        document.documentElement.style.setProperty('--fs-2xs','14px');
+        window.dispatchEvent(new Event('resize')); true""")
+    assert await fits("additional control and larger CPU font") > minimum + 26
+    await evaluate(instance, "widthExtra.remove(); document.documentElement.style.removeProperty('--fs-2xs'); "
+                             "window.dispatchEvent(new Event('resize')); true")
+    assert await fits("restored controls and font") == minimum
+    for width in (320, 390):
+        await viewport(width, True)
+        await evaluate(instance, "openDrawer(); true")
+        await until(instance, "Math.abs($('side').getBoundingClientRect().left)<.1")
+        for theme in ("dark", "light"):
+            await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+            assert await fits("%dpx phone in %s" % (width, theme)) >= minimum
+        await evaluate(instance, "closeDrawer(); true")
+    await viewport(1440)
+    await evaluate(instance, """lsDel('puppy.sidew'); setSideCollapsed(false,false); applyTheme('dark'); syncBell();
+        openSessionTab(0,1,findSessionMeta(0,1)); window.demoView=state.views['s:0:1'].activeView(); true""")
+    await until(instance, "demoView.draftReady")
+    print("PASS: sidebar footer fits every button and CPU 100% after narrow saved widths, drag, reset, "
+          "collapsed reload and reopen; measured controls/fonts, steady CPU digit changes and both themes "
+          "on desktop and 320/390px phones", flush=True)
+
+
 async def pane_resize_checks(instance):
     await instance.call("Emulation.setDeviceMetricsOverride", {
         "width": 1440, "height": 900, "deviceScaleFactor": 1,
@@ -3272,7 +3382,9 @@ async def git_sheet_checks(a):
 
     async def press(selector):
         # the sheet is taller than the screen with its History listed, and a
-        # real click needs its button on the screen
+        # real click needs its button on the screen. History loads separately
+        # from the facts; wait for it before measuring a button it moves down.
+        await until(a, "document.querySelectorAll('.session-git-log .sgl-hash').length >= 100")
         spot = await evaluate(a, "(() => { const b = document.querySelector(%s); b.scrollIntoView({block: 'center'}); const r = b.getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()" % json.dumps(selector))
         for kind in ("mousePressed", "mouseReleased"):
             await a.call("Input.dispatchMouseEvent", {"type": kind, "x": spot["x"], "y": spot["y"],
@@ -4777,7 +4889,9 @@ async def token_usage_checks(instance, capture=False):
 
     async def press(selector):
         spot = await evaluate(instance, """(() => {
-            const r=document.querySelector(%s).getBoundingClientRect();
+            const node=document.querySelector(%s);
+            node.scrollIntoView({block:'nearest'});
+            const r=node.getBoundingClientRect();
             return {x:r.x+r.width/2, y:r.y+r.height/2};
         })()""" % json.dumps(selector))
         for kind in ("mousePressed", "mouseReleased"):
@@ -5251,6 +5365,9 @@ async def main(args):
             if args.task_refresh_only:
                 await task_refresh_checks(instances[0])
                 return
+            await sidebar_width_checks(instances[0])
+            if args.sidebar_width_only:
+                return
             await session_activity_checks(*instances)
             await quota_checks(instances[0])
             await engine_activity_checks(instances[0])
@@ -5278,4 +5395,5 @@ if __name__ == "__main__":
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--navigation-only", action="store_true")
     parser.add_argument("--task-refresh-only", action="store_true")
+    parser.add_argument("--sidebar-width-only", action="store_true")
     asyncio.run(main(parser.parse_args()))

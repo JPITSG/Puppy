@@ -653,6 +653,11 @@ with a window of history around it.
   drag a tab to the edge of a pane to split the workspace. Tab layout is
   remembered per browser. Drag a divider or use its arrow keys to resize panes;
   double-click a divider to reset it.
+- **Sidebar width.** Drag its right edge to resize it, or double-click to reset
+  the width. Its minimum fits every footer button and the CPU reading at 100%,
+  including when restoring a saved width or opening the phone drawer. Pull
+  farther left to collapse it; the workspace's menu button or a drag from the
+  left edge opens it again.
 - **Status at a glance.** Every session row shows a spinner and a running clock
   while its agent works, the backend it runs on when idle, and task activity or
   a waiting approval. The executing backend owns the clock: refreshing,
