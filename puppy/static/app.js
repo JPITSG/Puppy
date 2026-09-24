@@ -1,6 +1,57 @@
 "use strict";
 /* Puppy console SPA - vanilla ES6, no build step. */
 
+/* ================= optional libraries ================= */
+/* Optional libraries share one load per page, including concurrent panes.
+   Keep the console script's version and URL prefix, even across a restart.
+   A failed asset is evicted so reopening a view can retry just that asset. */
+const CONSOLE_SCRIPT_URL = new URL(document.currentScript.src);
+const CONSOLE_ASSET_TIMEOUT_MS = 15000;
+const consoleAssets = new Map();
+function loadConsoleAsset(file, { stylesheet = false, ready = () => true } = {}) {
+  const url = new URL(file, CONSOLE_SCRIPT_URL);
+  url.search = CONSOLE_SCRIPT_URL.search;
+  const key = url.href;
+  if (consoleAssets.has(key)) return consoleAssets.get(key);
+  const pending = new Promise((resolve, reject) => {
+    const node = document.createElement(stylesheet ? "link" : "script");
+    let timer;
+    const finish = error => {
+      clearTimeout(timer);
+      node.onload = node.onerror = null;
+      if (error) { node.remove(); reject(error); }
+      else resolve();
+    };
+    node.onload = () => finish(ready() ? null : new Error(`Could not initialize ${file}`));
+    node.onerror = () => finish(new Error(`Could not load ${file}`));
+    timer = setTimeout(() => finish(new Error(`Loading ${file} timed out`)), CONSOLE_ASSET_TIMEOUT_MS);
+    if (stylesheet) {
+      node.rel = "stylesheet"; node.href = key;
+      // Vendor rules must stay before the console's overrides regardless of
+      // when the first terminal opens.
+      document.head.insertBefore(node, $("console-styles"));
+    } else {
+      node.src = key; node.async = true;
+      document.head.appendChild(node);
+    }
+  }).catch(error => { consoleAssets.delete(key); throw error; });
+  consoleAssets.set(key, pending);
+  return pending;
+}
+function loadMarkdownLibraries() {
+  return Promise.all([
+    loadConsoleAsset("vendor/marked.min.js", { ready: () => typeof marked !== "undefined" && typeof marked.parse === "function" }),
+    loadConsoleAsset("vendor/purify.min.js", { ready: () => typeof DOMPurify !== "undefined" && typeof DOMPurify.sanitize === "function" }),
+  ]);
+}
+function loadTerminalLibraries() {
+  return Promise.all([
+    loadConsoleAsset("vendor/xterm.css", { stylesheet: true }),
+    loadConsoleAsset("vendor/xterm.min.js", { ready: () => typeof Terminal === "function" }),
+    loadConsoleAsset("vendor/addon-fit.min.js", { ready: () => typeof FitAddon !== "undefined" && typeof FitAddon.FitAddon === "function" }),
+  ]);
+}
+
 /* ================= helpers ================= */
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
@@ -16916,7 +16967,15 @@ class SessionView {
     }
   }
 
-  connect() {
+  async connect() {
+    if (this.closed || this.markdownLoading) return;
+    if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) return;
+    this.markdownLoading = true;
+    try { await loadMarkdownLibraries(); }
+    catch (error) {
+      // md() escapes plain text unless both parser and sanitizer are ready.
+      if (!this.closed) toast("Could not load message formatting · showing plain text · reopen the tab to retry", "warn", TOAST_LONG);
+    } finally { this.markdownLoading = false; }
     if (this.closed) return;
     if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) {
       this.setReconnecting(true);
@@ -20229,7 +20288,24 @@ class TermView {
     positionAnchoredMenu(menu, anchor);
   }
 
-  start() {
+  async start() {
+    if (this.closed || this.loadingLibraries) return;
+    this.loadingLibraries = true;
+    this.deadReason = "";
+    this.showDead(false);
+    try { await loadTerminalLibraries(); }
+    catch (error) {
+      this.loadingLibraries = false;
+      if (!this.closed) {
+        this.deadReason = "Could not load terminal · retry to load it again";
+        this.syncRemoteState();
+      }
+      return;
+    }
+    this.loadingLibraries = false;
+    if (this.closed) return;
+    const loading = this.root.querySelector(".term-dead");
+    if (loading) loading.remove();
     this.term = new Terminal({
       cursorBlink: true, fontSize: 13, scrollback: 8000,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
@@ -20269,7 +20345,8 @@ class TermView {
       this.pasteClipboard();
     };
     this.host.addEventListener("contextmenu", this.onContextMenu);
-    setTimeout(() => {
+    this.startTimer = setTimeout(() => {
+      if (this.closed) return;
       this.fit.fit();
       if (this.tab.ended === true) this.showDead();
       else this.connect();
@@ -20445,8 +20522,10 @@ class TermView {
     /* DECTCEM rather than a CSS override: the cursor is the terminal's to draw,
        and a hidden one stays hidden under a translucent overlay whichever
        renderer xterm chose. reset() on a new shell brings it back. */
-    this.term.write("\x1b[?25l");
-    this.term.blur();
+    if (this.term) {
+      this.term.write("\x1b[?25l");
+      this.term.blur();
+    }
     const words = terminalDeadWording(this.tab);
     const d = el("div", "term-dead");
     d.appendChild(el("div", "term-dead-message", words.ended));
@@ -20455,6 +20534,7 @@ class TermView {
     fresh.type = "button";
     fresh.onclick = () => {
       if (this.tab.bid && !backendConnectionAllowed(this.tab.bid)) return;
+      if (!this.term) { this.start(); return; }
       if (this.tab.ended === true || this.nodeEnded) this.replaceTerminal(d);
       else {
         d.remove(); this.term.reset(); this.term.write("\x1b[?25h");
@@ -20496,11 +20576,11 @@ class TermView {
     const words = terminalDeadWording(this.tab);
     const ended = this.tab.ended || this.nodeEnded;
     message.textContent = remoteStoppingMessage(this.tab.bid) ||
-      (unavailable ? "Backend unavailable" : this.deadReason ||
+      (unavailable ? "Backend unavailable" : this.loadingLibraries ? "Loading terminal…" : this.deadReason ||
        (ended ? words.ended : "Terminal disconnected"));
     button.textContent = unavailable ? "Waiting for backend…" :
-      (ended ? words.start : "Reconnect");
-    button.disabled = unavailable;
+      this.loadingLibraries ? "Loading…" : !this.term ? "Retry" : (ended ? words.start : "Reconnect");
+    button.disabled = unavailable || !!this.loadingLibraries;
   }
   destroy() {
     this.closed = true;
@@ -20510,6 +20590,7 @@ class TermView {
     if (this.onSelectUp) document.removeEventListener("mouseup", this.onSelectUp);
     if (this.onContextMenu) this.host.removeEventListener("contextmenu", this.onContextMenu);
     clearTimeout(this.agentActiveTimer);
+    clearTimeout(this.startTimer);
     this.stopMetadataScrolling();
     if (this.ws) try { this.ws.close(); } catch (e) {}
     if (this.dataSub) { this.dataSub.dispose(); this.dataSub = null; }

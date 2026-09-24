@@ -254,12 +254,71 @@ async def open_console(instance, url, sid):
     startup = await evaluate(instance, """performance.getEntriesByType('resource').map(e => ({
         path:new URL(e.name).pathname, encoded:e.encodedBodySize, decoded:e.decodedBodySize}))""")
     assert not any(entry["path"] == "/api/auth/status" for entry in startup), startup
+    assert not any("/static/vendor/" in entry["path"] and entry["path"].endswith((".js", ".css"))
+                   for entry in startup), startup
     for path in ("/static/app.js", "/static/app.css", "/api/state"):
         entries = [entry for entry in startup if entry["path"] == path]
         assert len(entries) == 1 and 0 < entries[0]["encoded"] < entries[0]["decoded"], (path, entries)
     await evaluate(instance, "openSessionTab(0," + str(sid) + ",state.sessions.find(s=>s.id===" + str(sid) + ")); window.demoView=state.views['s:0:" + str(sid) + "'].activeView(); true")
     await until(instance, "!!demoView.sharedDraft && demoView.draftReady")
-    print("PASS: authenticated console starts with one state request and compressed assets/state", flush=True)
+    libraries = await evaluate(instance, """performance.getEntriesByType('resource')
+        .map(e => new URL(e.name).pathname).filter(p => p.includes('/static/vendor/') && /\.(js|css)$/.test(p)).sort()""")
+    assert libraries == ["/static/vendor/marked.min.js", "/static/vendor/purify.min.js"], libraries
+    assert await evaluate(instance, """(() => {
+        const box = document.createElement('div');
+        box.innerHTML = md('**Formatted** <img onerror="bad()"><script>bad()</script>');
+        return box.querySelector('strong').textContent === 'Formatted' &&
+            !box.querySelector('script, [onerror]') && typeof Terminal === 'undefined';
+    })()""")
+    print("PASS: compressed one-request startup without vendor libraries; first chat loads only the parser and sanitizer", flush=True)
+
+
+async def lazy_assets_checks(console, sid):
+    """Two first-use terminal panes, a failed download/retry, and reload restore."""
+    tabs, terminals = [], []
+    command = shlex.join([sys.executable, str(BASE / "tests/terminal_latency_bench.py"), "--child", "--screen"])
+    await console.call("Network.enable", session=console.page_session)
+    await console.call("Network.setBlockedURLs", {"urls": ["*vendor/xterm.min.js*"]}, session=console.page_session)
+    try:
+        tabs = await evaluate(console, "[1, 2].map(() => openTermTab(0, %s, null, %s).id)" %
+                              (json.dumps(command), json.dumps(str(ROOT))))
+        await until(console, """%s.every(id => {
+            const v = state.views[id], b = v.root.querySelector('.term-dead-new');
+            return b && b.textContent === 'Retry' && !b.disabled && !v.term && !v.tab.terminalId;
+        })""" % json.dumps(tabs))
+        await console.call("Network.setBlockedURLs", {"urls": []}, session=console.page_session)
+        await evaluate(console, """%s.forEach(id => state.views[id].root.querySelector('.term-dead-new').click()); true""" % json.dumps(tabs))
+        try:
+            await until(console, "%s.every(id => !!state.views[id].dataSub)" % json.dumps(tabs))
+        except AssertionError:
+            print(await evaluate(console, "%s.map(id => {const v=state.views[id]; return {id, loading:v.loadingLibraries, term:!!v.term, ws:v.ws && v.ws.readyState, reason:v.deadReason};})" % json.dumps(tabs)), flush=True)
+            raise
+        terminals = await evaluate(console, "%s.map(id => state.views[id].tab.terminalId)" % json.dumps(tabs))
+        assert len(set(terminals)) == 2, terminals
+        resources = await evaluate(console, """performance.getEntriesByType('resource')
+            .filter(e => e.encodedBodySize > 0 && /vendor\\/(xterm|addon-fit)/.test(e.name))
+            .map(e => new URL(e.name).pathname).sort()""")
+        assert resources == ["/static/vendor/addon-fit.min.js", "/static/vendor/xterm.css",
+                             "/static/vendor/xterm.min.js"], resources
+        assert await evaluate(console, """(() => {
+            const sheets = [...document.querySelectorAll('link[rel="stylesheet"]')].map(n => new URL(n.href).pathname);
+            return sheets.indexOf('/static/vendor/xterm.css') < sheets.indexOf('/static/auth.css');
+        })()""")
+        await console.call("Page.reload", session=console.page_session)
+        await until(console, """typeof state !== 'undefined' && state.views[%s] && !!state.views[%s].dataSub""" %
+                    (json.dumps(tabs[-1]), json.dumps(tabs[-1])))
+        assert await evaluate(console, "state.views[%s].tab.terminalId" % json.dumps(tabs[-1])) == terminals[-1]
+        restored = await evaluate(console, """performance.getEntriesByType('resource')
+            .map(e => new URL(e.name).pathname).filter(p => /vendor\\/(xterm|addon-fit)/.test(p)).sort()""")
+        assert restored == resources, restored
+        print("PASS: first-use terminal assets shared by two panes, failed download retries without starting a shell, CSS order and restored terminal IDs", flush=True)
+    finally:
+        await console.call("Network.setBlockedURLs", {"urls": []}, session=console.page_session)
+        await evaluate(console, "%s.forEach(id => closeTab(id)); activateTab('s:0:%d'); "
+                       "window.demoView=state.views['s:0:%d'].activeView(); true" % (json.dumps(tabs), sid, sid))
+        for terminal_id in terminals:
+            await terminal.manager().close(terminal_id, "test finished")
+        await until(console, "!!demoView.sharedDraft && demoView.draftReady")
 
 
 async def type_text(instance, text):
@@ -5909,6 +5968,10 @@ async def main(args):
             instances = [browser.Manager("TSTA"), browser.Manager("TSTB")]
             for instance in instances:
                 await open_console(instance, url, sid)
+            if args.lazy_assets_only:
+                await lazy_assets_checks(instances[0], sid)
+                await terminal_io_checks(instances[0])
+                return
             if args.navigation_only:
                 await navigation_checks(instances[0], url, sid, args.screenshots)
                 return
@@ -5927,6 +5990,7 @@ async def main(args):
             await backup_schedule_checks(instances[0], app, args.screenshots)
             if args.backup_schedule_only:
                 return
+            await lazy_assets_checks(instances[0], sid)
             await sidebar_width_checks(instances[0], args.screenshots)
             if args.sidebar_width_only:
                 return
@@ -5963,4 +6027,5 @@ if __name__ == "__main__":
     parser.add_argument("--question-scroll-only", action="store_true")
     parser.add_argument("--sidebar-width-only", action="store_true")
     parser.add_argument("--backup-schedule-only", action="store_true")
+    parser.add_argument("--lazy-assets-only", action="store_true")
     asyncio.run(main(parser.parse_args()))
