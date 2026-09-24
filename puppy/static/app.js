@@ -3827,13 +3827,6 @@ function showAuth() {
   state.authed = false;
   location.reload();
 }
-async function initAuth() {
-  const st = await api(0, "auth/status");
-  if (!st.authed) { showAuth(); return; }
-  state.instance = st.instance_name || "puppy";
-  await enterApp();
-}
-
 /* ================= boot ================= */
 let updatesWs = null;
 let updatesRetry = 800;
@@ -3844,6 +3837,8 @@ let updatesHasOpened = false;
 let localStateStreamTopics = new Set();
 
 async function enterApp() {
+  // The root page already required a signed-in user. The state request is
+  // also authenticated, and api() returns an expired login to sign-in.
   state.authed = true;
   $("app").classList.remove("hidden");
   syncSideMinimum();
@@ -27973,8 +27968,9 @@ function modalSwitchEngine(view) {
 }
 
 /* ================= go ================= */
-initAuth().catch(e => {
-  toast(`Could not reach the backend · ${e.message}`, "bad", TOAST_LONG);
+enterApp().catch(e => {
+  if (!state.leavingForAuth)
+    toast(`Could not reach the backend · ${e.message}`, "bad", TOAST_LONG);
 });
 
 

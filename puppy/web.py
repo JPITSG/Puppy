@@ -14,7 +14,7 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import (__version__, agent_notes, auth, backends, backup_schedule, bind_verify, browser,
+from puppy import (__version__, agent_notes, auth, backends, backup_schedule, bind_verify, browser, compression,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
                    spelling, token_usage,
@@ -2220,7 +2220,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
 
 def build_app(runtime_web: dict = None,
               runtime_ssl_context=None) -> web.Application:
-    app = web.Application(middlewares=[auth.middleware, state_change_guard],
+    app = web.Application(middlewares=[auth.middleware, state_change_guard, compression.middleware],
                           client_max_size=8 * 1024 * 1024)
     live_websockets.initialize(app)
     app["puppy_role"] = "full"

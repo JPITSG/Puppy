@@ -7,8 +7,42 @@ const vm = require("node:vm");
 const { FakeDocument, fire } = require("./fake_dom.js");
 const html = fs.readFileSync(path.join(__dirname, "../puppy/static/auth.html"), "utf8");
 const source = fs.readFileSync(path.join(__dirname, "../puppy/static/auth.js"), "utf8");
+const appSource = fs.readFileSync(path.join(__dirname, "../puppy/static/app.js"), "utf8");
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const reply = (data, ok = true) => ({ ok, json: async () => data });
+
+function startConsole(respond) {
+  const document = new FakeDocument();
+  document.body.innerHTML = '<div id="app" class="hidden"></div>';
+  const calls = [], steps = [], notices = [];
+  const state = { authed: false, tabs: [], sessions: [] };
+  let reloads = 0;
+  const context = { document, state, AbortController, setTimeout, clearTimeout,
+    $: id => document.getElementById(id), TOAST_LONG: 10000,
+    location: { reload: () => { reloads++; } },
+    fetch: async (url, options) => { calls.push({ url, options }); return respond(url); },
+    toast: (...args) => notices.push(args),
+    browserInstancesFor: () => false,
+    openSessionHash: async () => steps.push("hash"),
+    navigation: { start: () => steps.push("history") }, navigationHash: () => ({}),
+    loadTabs: () => {
+      assert.equal(state.instance, "Demo", "state is installed before restoring tabs");
+      state.tabs = [{id:"s:0:7", type:"session", bid:0, sid:7},
+        {id:"s:0:99", type:"session", bid:0, sid:99}];
+      state.active = "s:0:7"; steps.push("tabs");
+    },
+  };
+  for (const name of ["syncSideMinimum", "syncBell", "rememberEnginePayload", "rememberUploadSettings",
+      "hydrateBackendLastKnown", "ingestSessionActivity", "reconcileRemoteState", "renderSidebar",
+      "normalizeWorkspace", "renderTabs", "sessionGitFocused", "connectUpdates", "startRemotePolling"])
+    context[name] = () => steps.push(name);
+  const between = (start, end) => appSource.slice(appSource.indexOf(start),
+    appSource.indexOf(end, appSource.indexOf(start)));
+  vm.runInNewContext(between("function apiPath(", "/* Nothing a progress dialog") +
+    between("function showAuth(", "function clearNodeStateRevisions(") +
+    between("/* ================= go ================= */", "async function openSessionReference("), context);
+  return { document, state, calls, steps, notices, reloads: () => reloads };
+}
 
 async function start(status) {
   const document = new FakeDocument();
@@ -103,5 +137,34 @@ async function start(status) {
   assert.equal(failed.calls[1].url, "/api/auth/status");
   assert.equal(failed.document.title, "Create account");
   assert.equal(failed.field("submit").disabled, false);
-  console.log("Sign-in/setup, errors, submission guard, reload and status recovery passed");
+
+  let finishState;
+  const boot = startConsole(() => new Promise(resolve => { finishState = resolve; }));
+  assert.deepEqual(boot.calls.map(call => call.url), ["/api/state"],
+    "signed-in startup requests state directly, with no preceding auth/status round trip");
+  assert.equal(boot.document.getElementById("app").classList.contains("hidden"), false);
+  assert.equal(boot.steps.includes("tabs"), false, "tab restoration waits for authoritative state");
+  finishState(reply({instance_name:"Demo", sessions:[{id:7}], engines:[], backends:[]}));
+  await tick();
+  assert.deepEqual(boot.calls.map(call => call.url), ["/api/state"]);
+  assert.equal(boot.state.authed, true);
+  assert.equal(boot.state.tabs.length, 1, "missing local sessions are still pruned on startup");
+  assert(boot.steps.includes("connectUpdates"));
+  assert.deepEqual(boot.steps.slice(-2), ["hash", "history"]);
+  assert.equal(boot.reloads(), 0);
+
+  const expired = startConsole(async () => ({...reply({error:"auth required"}, false), status:401}));
+  await tick();
+  assert.equal(expired.reloads(), 1, "a login revoked since the root request returns to sign-in");
+  assert.equal(expired.state.authed, false);
+  assert.equal(expired.steps.includes("tabs"), false);
+  assert.equal(expired.steps.includes("connectUpdates"), false);
+  assert.equal(expired.notices.length, 0, "returning to sign-in is not a backend failure notice");
+
+  const unavailable = startConsole(async () => { throw new Error("offline"); });
+  await tick();
+  assert.equal(unavailable.reloads(), 0, "a network failure is not an expired login");
+  assert.equal(unavailable.steps.includes("connectUpdates"), false);
+  assert.equal(unavailable.notices[0][0], "Could not reach the backend · network error");
+  console.log("Sign-in/setup, errors, submission guard, reload, direct state startup and expired-login recovery passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });

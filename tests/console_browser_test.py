@@ -251,8 +251,15 @@ async def open_console(instance, url, sid):
     await evaluate(instance, "fetch('/api/auth/login', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'mira',password:'preview-password'})}).then(r=>r.json())")
     await instance.call("Page.reload", session=instance.page_session)
     await until(instance, "typeof state !== 'undefined' && state.sessions.length > 0")
+    startup = await evaluate(instance, """performance.getEntriesByType('resource').map(e => ({
+        path:new URL(e.name).pathname, encoded:e.encodedBodySize, decoded:e.decodedBodySize}))""")
+    assert not any(entry["path"] == "/api/auth/status" for entry in startup), startup
+    for path in ("/static/app.js", "/static/app.css", "/api/state"):
+        entries = [entry for entry in startup if entry["path"] == path]
+        assert len(entries) == 1 and 0 < entries[0]["encoded"] < entries[0]["decoded"], (path, entries)
     await evaluate(instance, "openSessionTab(0," + str(sid) + ",state.sessions.find(s=>s.id===" + str(sid) + ")); window.demoView=state.views['s:0:" + str(sid) + "'].activeView(); true")
     await until(instance, "!!demoView.sharedDraft && demoView.draftReady")
+    print("PASS: authenticated console starts with one state request and compressed assets/state", flush=True)
 
 
 async def type_text(instance, text):

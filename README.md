@@ -916,6 +916,11 @@ documented in [Timeout settings](docs/timeouts.md); the Git repository check,
 its timer and the same preparation step in [Git repositories](docs/session-git.md);
 generated session titles and theirs in [Session titles](docs/session-titles.md).
 
+Signed-in console startup uses one authenticated state request. Startup scripts,
+styles, HTML and the initial state use gzip when supported. Compressed scripts
+and styles are reused in server memory until their source changes; authentication
+and the browser's `no-store` policy still apply to every load.
+
 ## Data, privacy and security
 
 - **Self-hosted, single-user.** Accounts are stored with PBKDF2; sign-in
@@ -977,6 +982,9 @@ an external network, a real engine, a browser or subscription quota. Install
 Node.js to run the JavaScript suites:
 
 ```sh
+python3 tests/compression_test.py    # startup gzip, cache invalidation and static HTTP behavior
+python3 tests/auth_surface_test.py   # public sign-in isolation and authenticated assets
+node tests/auth_ui_test.js           # sign-in/setup, direct state startup and expired logins
 node tests/sidebar_ui_test.js        # sidebar ordering, pins, reorders, filtering
 node tests/tab_drag_ui_test.js       # task discovery, saved visibility and tab dragging
 node tests/drag_scroll_ui_test.js    # the lists a reorder drag scrolls, and the drops past their ends
