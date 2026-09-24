@@ -21612,8 +21612,7 @@ class VncView {
         <button class="icon-btn vnc-refresh" type="button"
           aria-label="Redraw the whole screen"></button>
         <span class="vnc-target" aria-label="VNC server"></span>
-        <button class="btn btn-sm vnc-cad" type="button"
-          title="Send Control+Alt+Delete to the remote machine">Ctrl+Alt+Del</button>
+        <button class="btn btn-sm vnc-cad" type="button">Ctrl+Alt+Del</button>
         <button class="icon-btn br-kbd vnc-kbd" type="button"
           aria-label="Type into the remote screen"
           aria-pressed="false" aria-expanded="false">
@@ -26645,7 +26644,6 @@ function modal(html, className = "", reopen = null) {
   const closeButton = el("button", "icon-btn modal-close");
   closeButton.type = "button";
   closeButton.setAttribute("aria-label", "Close dialog");
-  closeButton.title = "Close";
   closeButton.appendChild(xIcon(20));
   closeButton.onclick = () => {
     if (modalStack[modalStack.length - 1] === record) return dismiss();
