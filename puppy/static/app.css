@@ -3034,6 +3034,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   width:max-content;max-width:320px;max-width:min(320px,calc(100vw - 16px));
   padding:5px 10px 6px;border:1px solid var(--tip-line);border-radius:var(--r-sm);
   font:var(--fs-sm)/1.45 var(--sans);letter-spacing:.01em;color:var(--txt);
+  font-variant-numeric:tabular-nums;
   white-space:pre-line;word-wrap:break-word;overflow-wrap:anywhere;
   background:var(--tip-bg);box-shadow:var(--tip-shadow);
   -webkit-backdrop-filter:blur(12px) saturate(1.35);

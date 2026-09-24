@@ -3961,6 +3961,106 @@ async def session_activity_checks(a, b):
     print("PASS: backend session clock survives reloads, a second browser and socket reconnect; idle clears it and new work starts from zero", flush=True)
 
 
+def seed_tool_clocks(sid=2):
+    """Two aged, unfinished calls in the demo; no command or engine runs."""
+    h = runner.hub(sid)
+    h.status, h.active_since = "running", time.time() - 600
+    db.touch_session(sid, status="running")
+    events = []
+    for tool, key, age, inputs in (
+            ("Bash", "clock-shell", 75, {"command": "npm test -- dashboard"}),
+            ("inspect_assets", "clock-other", 12, {"path": "/home/mira/projects/harbor/assets"})):
+        clock = SimpleNamespace(time=lambda age=age: time.time() - age)
+        with patch.object(db, "time", clock):
+            events.append(db.add_event(sid, "tool_use", {"tool": tool, "tool_use_id": key, "input": inputs}))
+    runner.broadcast_sessions()
+    return h, events
+
+
+async def tool_clock_checks(instance, capture=False):
+    h, events = seed_tool_clocks()
+    key = "s:0:2"
+
+    async def bind():
+        await until(instance, "typeof state!=='undefined' && !!state.views['s:0:2']")
+        await evaluate(instance, "window.clockView=state.views['s:0:2'].activeView(); true")
+        await until(instance, "clockView.status==='running' && !!clockView.toolCards['clock-other']")
+
+    async def hover(tool_id):
+        await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 0, "y": 0}, session=instance.page_session)
+        point = await evaluate(instance, """(() => {
+            const m=clockView.toolCards[%s].querySelector('.t-state'); m.scrollIntoView({block:'center'});
+            const r=m.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};
+        })()""" % json.dumps(tool_id))
+        await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", **point}, session=instance.page_session)
+        try:
+            await until(instance, "!!document.querySelector('#tip:not([hidden]):not(.out) .tip-card') && document.querySelector('#tip .tip-card').textContent.startsWith('Running · ') && document.querySelector('#tip .tip-card').textContent===tips.text(clockView.toolCards[%s].querySelector('.t-state'))" % json.dumps(tool_id))
+        except AssertionError:
+            detail = await evaluate(instance, """(() => {const mark=clockView.toolCards[%s].querySelector('.t-state');
+                return {status:clockView.status,closed:clockView.closed,end:clockView.toolClockEndSeq,
+                    meta:findSessionMeta(0,2),anchor:sessionActivityAnchors.get('0:2'),text:tips.text(mark),mark:mark.outerHTML,
+                    tip:document.querySelector('#tip')?.outerHTML,hit:document.elementFromPoint(%s,%s)?.outerHTML};})()""" %
+                (json.dumps(tool_id), point['x'], point['y']))
+            raise AssertionError(detail)
+        value = await evaluate(instance, "document.querySelector('#tip .tip-card').textContent")
+        seconds = sum(int(v) * 60 ** i for i, v in enumerate(reversed(value.split(' · ')[1].split(':'))))
+        event = next(row for row in events if row['data']['tool_use_id'] == tool_id)
+        assert abs(seconds - (time.time() - event['ts'])) < 3, (tool_id, value, event)
+        return seconds
+
+    try:
+        await evaluate(instance, "openSessionTab(0,2,findSessionMeta(0,2)); true")
+        await bind()
+        for width in (1440, 390):
+            await instance.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": 900 if width == 1440 else 844,
+                "deviceScaleFactor": 1, "mobile": width == 390}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                await hover("clock-shell")
+                before = await evaluate(instance, "document.querySelector('#tip .tip-card').textContent")
+                tip_width = await evaluate(instance, "document.querySelector('#tip').getBoundingClientRect().width")
+                geometry = """(() => {const r=clockView.toolCards['clock-shell'].getBoundingClientRect();return [r.x,r.y,r.width,r.height]})()"""
+                box = await evaluate(instance, geometry)
+                await until(instance, "document.querySelector('#tip .tip-card').textContent!==%s" % json.dumps(before))
+                assert await evaluate(instance, geometry) == box, "the live clock must not resize or move the call"
+                assert await evaluate(instance, "document.querySelector('#tip').getBoundingClientRect().width") == tip_width, "clock digits must keep their width"
+                assert await evaluate(instance, """(() => {const r=document.querySelector('#tip').getBoundingClientRect();
+                    return r.left>=0 && r.right<=innerWidth && r.top>=0 && r.bottom<=innerHeight;})()""")
+                if capture:
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                    (BASE / "data" / ("tool-clock-{}-{}.png".format(width, theme))).write_bytes(base64.b64decode(shot["data"]))
+                await hover("clock-other")
+        elapsed = await hover("clock-shell")
+        await evaluate(instance, "window.clockReloadMarker=true; true")
+        await instance.call("Page.reload", session=instance.page_session)
+        await until(instance, "!window.clockReloadMarker")
+        await bind()
+        assert await hover("clock-shell") >= elapsed, "reload reset the call's clock"
+        await evaluate(instance, "window.clockSocket=clockView.ws; clockView.ws.close(); true")
+        await until(instance, "clockView.ws!==clockSocket && clockView.draftReady")
+        assert await hover("clock-shell") >= elapsed, "reconnect reset the call's clock"
+        # Complete the hovered call while the pointer stays on its status mark.
+        finished = db.add_event(2, "tool_result", {"tool_use_id": "clock-shell", "content": "Checks complete"})
+        h.broadcast({"type": "event", "event": finished})
+        await until(instance, "clockView.toolCards['clock-shell'].querySelector('.t-state').classList.contains('ok') && document.querySelector('#tip').hidden")
+        await hover("clock-other")
+        # An interrupted call can lack a tool_result. Its persisted turn ending
+        # must still hide the clock, including if work continues immediately.
+        stopped = db.add_event(2, "info", {"subtype": "interrupted", "text": "Turn interrupted by user"})
+        h.broadcast({"type": "event", "event": stopped})
+        await until(instance, "document.querySelector('#tip').hidden")
+        assert await evaluate(instance, "tips.text(clockView.toolCards['clock-other'].querySelector('.t-state'))==='' && clockView.status==='running'")
+    finally:
+        h.status, h.active_since = "idle", None
+        db.touch_session(2, status="idle")
+        db.execute("DELETE FROM events WHERE session_id=? AND seq>=?", (2, events[0]["seq"]))
+        runner.broadcast_sessions()
+        await evaluate(instance, "closeTab(%s); activateTab('s:0:1'); applyTheme('dark'); window.demoView=state.views['s:0:1'].activeView(); true" % json.dumps(key))
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    print("PASS: per-tool hover clocks tick under a still pointer, fit both themes and phone, survive reload/reconnect, and end on completion/interruption", flush=True)
+
+
 async def engine_activity_checks(instance):
     result = await evaluate(instance, """(() => {
         const saved = {engines:state.engines, backends:state.backends,
@@ -5791,6 +5891,8 @@ async def main(args):
             url = "http://127.0.0.1:{}/".format(site._server.sockets[0].getsockname()[1])
             print("Demo: " + url, flush=True)
             if args.serve:
+                if args.tool_clock_only:
+                    seed_tool_clocks()
                 await asyncio.Event().wait()
                 return
             config.set_value("browser.enabled", True)
@@ -5802,6 +5904,9 @@ async def main(args):
                 await open_console(instance, url, sid)
             if args.navigation_only:
                 await navigation_checks(instances[0], url, sid, args.screenshots)
+                return
+            if args.tool_clock_only:
+                await tool_clock_checks(instances[0], args.screenshots)
                 return
             if args.task_refresh_only:
                 await task_refresh_checks(instances[0])
@@ -5819,6 +5924,7 @@ async def main(args):
             if args.sidebar_width_only:
                 return
             await session_activity_checks(*instances)
+            await tool_clock_checks(instances[0], args.screenshots)
             await quota_checks(instances[0])
             await engine_activity_checks(instances[0])
             await model_alias_checks(instances[0])
@@ -5844,6 +5950,7 @@ if __name__ == "__main__":
     parser.add_argument("--screenshots", action="store_true")
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--navigation-only", action="store_true")
+    parser.add_argument("--tool-clock-only", action="store_true")
     parser.add_argument("--task-refresh-only", action="store_true")
     parser.add_argument("--token-usage-only", action="store_true")
     parser.add_argument("--question-scroll-only", action="store_true")

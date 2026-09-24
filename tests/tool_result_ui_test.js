@@ -6,7 +6,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
-const {FakeDocument} = require("./fake_dom.js");
+const {FakeDocument, FakeElement} = require("./fake_dom.js");
 const source = fs.readFileSync(path.join(__dirname, "../puppy/static/app.js"), "utf8");
 const between = (from, to) => {
   const start = source.indexOf(from), end = source.indexOf(to, start);
@@ -15,13 +15,19 @@ const between = (from, to) => {
 };
 const document = new FakeDocument();
 const icon = () => document.createElement("svg");
+let clockNow = 2000000, sessionMeta = null;
 const context = vm.createContext({
   document, Map, console, choiceSvg: icon, toolIconNode: icon,
+  Element: FakeElement, window: {addEventListener() {}}, Date: {now: () => clockNow},
+  findSessionMeta: () => sessionMeta, fmtTime: () => "12:00", fmtTokens: String,
   xIcon: icon, checkIcon: icon, promptSpinnerNode: icon,
   linkifyInto: (node, text) => { node.textContent = text; return node; },
 });
 vm.runInContext([
   between("const el = ", "/* Close buttons"),
+  between("const tips =", "/* ================= state ================= */"),
+  between("const sessionActivityAnchors =", "function reconcileRemoteState("),
+  between("function formatSessionActivity(", "function formatUptime("),
   between("function displayValue(", "function toolIconNode("),
   between("function toolStateInto(", "/* A side question"),
   between("/* Task endings stay visible", "const ATTACHMENT_PREVIEW_TYPES"),
@@ -29,7 +35,7 @@ vm.runInContext([
   between("  findEventNode(seq)", "  /* Dividers mark"),
   between("  buildEventNode(ev)", "  /* live streaming bubble */"),
   between("  atBottom() {", "  /* ---- outgoing ---- */"),
-  "} globalThis.View = View;",
+  "} globalThis.View = View; globalThis.tips = tips;",
 ].join("\n"), context);
 
 /* one row is taller than the 160px of slack atBottom allows, so a single box
@@ -147,4 +153,51 @@ const resultText = card => {
   assert.equal(v.scroll.scrollTop, 0, "and never moves a reader who is not");
 }
 
-console.log("PASS: tool results fold into their call's card, closed, and reunite when it loads");
+/* Each live bubble reads its own persisted call timestamp against the backend
+   clock, even when that clock differs from this browser's by many minutes. */
+{
+  sessionMeta = {id: 1, status: "running", active_since: 900};
+  context.ingestOneSessionActivity(7, sessionMeta, 1000, clockNow);
+  const v = view(); v.tab = {bid: 7, sid: 1}; v.status = "running";
+  const first = {...call("first", 10), ts: 985};
+  const second = {...call("second", 11), ts: 995};
+  v.renderEvent(first, true); v.renderEvent(second, true);
+  const tip = (owner, id) => context.tips.text(owner.toolCards[id].querySelector(".t-state"));
+  assert.equal(tip(v, "first"), "Running · 0:15");
+  assert.equal(tip(v, "second"), "Running · 0:05");
+  clockNow += 3000;
+  assert.equal(tip(v, "first"), "Running · 0:18", "hover reads elapsed time, never starts it");
+  assert.equal(tip(v, "second"), "Running · 0:08");
+  const reloaded = view(); reloaded.tab = v.tab; reloaded.status = "running";
+  context.ingestOneSessionActivity(7, sessionMeta, 1003, clockNow);
+  reloaded.renderEvent(first, true);
+  assert.equal(tip(reloaded, "first"), "Running · 0:18", "snapshot/rebuild retains the original start");
+  clockNow += 3600000;
+  assert.equal(tip(v, "first"), "Running · 1:00:18");
+  v.renderEvent(result("first", 12), true);
+  assert.equal(tip(v, "first"), "", "the finished call cannot keep a live tooltip");
+  assert.equal(tip(v, "second"), "Running · 1:00:08", "a peer finishing does not stop this call");
+  v.renderEvent(result("second", 13, {is_error: true}), true);
+  assert.equal(tip(v, "second"), "", "a failure also stops its clock");
+  v.renderEvent({...call("stopped", 14), ts: 996}, true);
+  context.backgroundTaskStateInto(v.toolCards.stopped, {status: "stopped"});
+  assert.equal(tip(v, "stopped"), "");
+  v.renderEvent({...call("unanswered", 15), ts: 997}, true);
+  v.renderEvent({seq: 16, ts: 1004, kind: "result", data: {ok: false}}, true);
+  assert.equal(tip(v, "unanswered"), "", "a turn ending stops a call without its own result");
+  v.renderEvent({...call("next", 17), ts: 1005}, true);
+  assert.ok(tip(v, "next").startsWith("Running · "), "the next call has its own clock");
+  v.status = "idle";
+  assert.equal(tip(v, "next"), "", "idle sessions have no running call clocks");
+  v.status = "running"; sessionMeta.active_since = 1006;
+  assert.equal(tip(v, "next"), "", "old calls cannot restart in a new work block");
+  sessionMeta.active_since = 900;
+  v.renderEvent(call("undated", 18), true);
+  assert.equal(tip(v, "undated"), "", "an unknown start is never invented");
+  v.closed = true;
+  assert.equal(tip(reloaded, "first"), "Running · 1:00:18");
+  reloaded.closed = true;
+  assert.equal(tip(reloaded, "first"), "", "retired views stop live readouts");
+}
+
+console.log("PASS: tool results fold and reunite; per-call hover clocks retain event starts across reloads and clock skew, tick independently, and stop on completion or interruption");

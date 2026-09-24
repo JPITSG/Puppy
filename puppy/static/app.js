@@ -3058,6 +3058,7 @@ function decorateMentionsInto(node, text) {
    Empty titles keep an empty `data-tip` so they still suppress an ancestor's
    bubble the way `title=""` does natively. */
 const tips = (() => {
+  const liveText = new WeakMap();
   const CLIPPED_TITLES = ".tab .t-title,.task-card-head .t-name";
   const SHOW_MS = 500;   // first-hover delay
   const WARM_MS = 350;   // instant re-show window after a hide
@@ -3074,6 +3075,8 @@ const tips = (() => {
      copy because renderers keep assigning `.title` after adoption */
   const text = (a) => {
     if (!a) return "";
+    const read = liveText.get(a);
+    if (read) return read();
     // Read live layout and text: resizing or renaming can change whether the
     // title needs a bubble, including while that bubble is already visible.
     if (a.matches(CLIPPED_TITLES)) {
@@ -3163,8 +3166,8 @@ const tips = (() => {
      text refreshed (live meters) and its drift tracked (reorder animations) */
   function onTick() {
     if (!anchor) return;
-    if (mode === "focus") { if (!anchor.isConnected) hide(); return; }
-    const a = anchorOf(document.elementFromPoint(lastX, lastY));
+    const a = mode === "focus" ? (anchor.isConnected ? anchor : null) :
+      anchorOf(document.elementFromPoint(lastX, lastY));
     if (!a) { hide(); return; }
     adopt(a);
     const t = text(a);
@@ -3242,7 +3245,9 @@ const tips = (() => {
   }, true);
   document.addEventListener("focusin", onFocusIn);
   document.addEventListener("focusout", () => { if (mode === "focus") hide(); });
-  return { text };
+  // Only the visible bubble ticks; a transcript never needs a timer per call.
+  const live = (a, read) => { liveText.set(a, read); a.setAttribute("data-tip", ""); };
+  return { text, live };
 })();
 
 /* ================= state ================= */
@@ -14704,6 +14709,20 @@ function toolStateInto(stateEl, completed, isError) {
   stateEl.setAttribute("aria-label", completed ? (isError ? "failed" : "done") : "running");
   return stateEl;
 }
+/* The event and active_since use the executing backend's clock. Its existing
+   activity anchor translates that clock into this browser's without assuming
+   the two machines agree. Subtract the call's own start, never the turn's. */
+function toolRunningTip(view, startedAt, seq) {
+  if (view.closed || view.status !== "running" || seq <= (view.toolClockEndSeq || 0) ||
+      !Number.isFinite(startedAt) || startedAt <= 0) return "";
+  const { bid, sid } = view.tab;
+  const session = findSessionMeta(bid, sid) || view.session;
+  const activeSince = Number(session && session.active_since);
+  const anchor = sessionActivityAnchors.get(sessionActivityKey(bid, sid));
+  if (!Number.isFinite(anchor) || !Number.isFinite(activeSince) ||
+      activeSince <= 0 || startedAt < activeSince) return "";
+  return `Running · ${formatSessionActivity(anchor + (startedAt - activeSince) * 1000)}`;
+}
 function toolLabel(tool) {
   return String(tool || "tool").replace(/_/g, " ");
 }
@@ -16681,6 +16700,7 @@ class SessionView {
     this.reconnectTimer = null;
     this.connectionSequence = 0;
     this.toolCards = {};
+    this.toolClockEndSeq = 0; // retain known turn endings across history windows
     this.backgroundTaskUpdates = new Map();
     this.orphanResults = new Map();   // results whose call is not in this window
     this.switchLines = [];    // engine-switch dividers, re-labelled as state arrives
@@ -17583,6 +17603,7 @@ class SessionView {
         }
         break;
       case "turn_done":
+        this.toolClockEndSeq = Math.max(this.toolClockEndSeq || 0, this.newestSeq || 0);
         this.setBackgroundTasks(null);
         /* The node reports whether this turn continued into queued work. */
         const queueWaiting = d.queue_waiting === true;
@@ -18534,6 +18555,8 @@ class SessionView {
       }
       case "tool_use": {
         const n = toolCardNode(d);
+        const mark = n.querySelector(".t-state"), startedAt = Number(ev.ts), seq = Number(ev.seq);
+        tips.live(mark, () => mark.classList.contains("busy") ? toolRunningTip(this, startedAt, seq) : "");
         if (d.tool_use_id) {
           this.toolCards[d.tool_use_id] = n;
           for (const update of this.backgroundTaskUpdates.get(d.tool_use_id) || [])
@@ -18592,6 +18615,8 @@ class SessionView {
         return orphan;
       }
       case "info": {
+        if (d.subtype === "interrupted")
+          this.toolClockEndSeq = Math.max(this.toolClockEndSeq || 0, Number(ev.seq) || 0);
         if (d.subtype === "task") {
           const node = backgroundTaskUpdateNode(d);
           node.dataset.seq = String(ev.seq);
@@ -18669,6 +18694,9 @@ class SessionView {
          folds its cached_input_tokens into input_tokens, so adding the cache
          keys that exist gives the same figure for all three. */
       case "result": {
+        // A stopped turn may have no individual tool result. Do not let its
+        // old spinner acquire a new clock when the next queued turn starts.
+        this.toolClockEndSeq = Math.max(this.toolClockEndSeq || 0, Number(ev.seq) || 0);
         const n = el("div", "result-line");
         const outcome = el("span", d.ok ? "ok" : "bad");
         outcome.appendChild(d.ok ? checkIcon(13) : xIcon(13));

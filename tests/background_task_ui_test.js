@@ -16,6 +16,7 @@ const document = new FakeDocument();
 const icon = () => document.createElement("svg");
 const context = vm.createContext({
   document, Map, console, choiceSvg: icon, toolIconNode: icon,
+  tips: {live() {}},
   xIcon: icon, checkIcon: icon, promptSpinnerNode: icon,
   linkifyInto: (node, text) => { node.textContent = text; return node; },
 });

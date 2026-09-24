@@ -124,7 +124,10 @@ side questions, engine switches and a result line for every turn with elapsed
 time, tokens in and out, and, when the engine reports it, how full the model's
 context is. Tool cards and folded-task headers share a vertically centered row
 for their carets, icons and status marks, with equal spacing from the chevron to
-the tool icon and from the icon to its label. Reading at the foot of a live
+the tool icon and from the icon to its label. Hover a running tool's status
+spinner to see a live elapsed clock for that individual call, including shell
+commands. It uses the saved call timestamp, survives reloads and reconnects,
+and stops when the call or its turn finishes. Reading at the foot of a live
 transcript keeps you there: a card that grows where it stands - a background
 task ending, an answer to a side question, a result dropped into a card you
 opened - carries the view down with it, exactly as a new message does, while a
