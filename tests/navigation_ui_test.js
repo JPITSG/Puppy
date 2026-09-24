@@ -4,6 +4,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { FakeDocument, FakeElement } = require("./fake_dom.js");
 const context = vm.createContext({ Date, Math, Map, Set, Promise });
 vm.runInContext(fs.readFileSync(require("node:path").join(__dirname,
   "../puppy/static/navigation.js"), "utf8") + "\nthis.ConsoleHistory = ConsoleHistory;", context);
@@ -88,6 +89,55 @@ function fixture() {
   await f.move(1); await f.move(-1);
   assert.equal(refreshPosts, 1, "refresh is never replayed");
   assert.ok(!JSON.stringify(f.stack).includes("private/example.txt"));
+
+  // The real modal header uses the same layer release and fresh reopen factory
+  // as the footer, including a heading inside a form and a nested confirmation.
+  f = fixture();
+  const document = new FakeDocument();
+  const el = (tag, cls = "") => { const node = document.createElement(tag); node.className = cls; return node; };
+  const root = el("div"); root.id = "modal-root"; document.body.appendChild(root);
+  const opener = el("button"); document.body.appendChild(opener); opener.focus();
+  const modalContext = vm.createContext({ document, HTMLElement: FakeElement, console, el,
+    $: id => document.getElementById(id), navigation: f.history,
+    navigationRemember: () => f.history.remember(), closeChoiceMenu() {},
+    enhanceChoiceSelect() {}, openChoiceControl: null });
+  const between = (from, to) => appSource.slice(appSource.indexOf(from), appSource.indexOf(to, appSource.indexOf(from)));
+  vm.runInContext(between("function xIcon(", "function bellIcon(") + "\n" +
+    between("const modalStack =", "/* ---- modal copy ----"), modalContext);
+  let editor, headerCleanups = 0;
+  const openEditor = () => {
+    editor = modalContext.modal('<form><h2>Editor</h2><input id="draft"><button type="submit">Save</button></form>', "", openEditor);
+    editor.onClose(() => headerCleanups++);
+    editor.m.querySelector("#draft").focus();
+  };
+  openEditor(); await tick();
+  const firstEditor = editor.m, cross = editor.m.querySelector(".modal-close");
+  assert.equal(cross.type, "button", "header close never submits its enclosing form");
+  assert.equal(cross.getAttribute("aria-label"), "Close dialog");
+  assert.equal(editor.m.querySelector("h2").textContent, "Editor");
+  assert.equal(editor.m.querySelector("h2").parentNode, cross.parentNode);
+  editor.m.querySelector("#draft").value = "Private draft";
+  const child = modalContext.modal("<h2>Confirm</h2><button>Cancel</button>");
+  let childCleanups = 0; child.onClose(() => childCleanups++);
+  const childCross = child.m.querySelector(".modal-close"); childCross.focus();
+  await tick();
+  cross.onclick();
+  assert.equal(root.children.length, 2, "an obscured dialog cannot close the one underneath");
+  childCross.onclick(); await tick(); await tick();
+  assert.equal(root.children.length, 1); assert.equal(childCleanups, 1);
+  assert.equal(document.activeElement, editor.m.querySelector("#draft"));
+  assert.equal(document.activeElement.value, "Private draft");
+  cross.focus(); cross.onclick(); await tick(); await tick();
+  assert.equal(root.children.length, 0); assert.equal(headerCleanups, 1);
+  assert.equal(document.activeElement, opener); assert.equal(f.cursor, 0);
+  await f.move(1);
+  assert.notEqual(editor.m, firstEditor, "Forward builds a fresh dialog after header dismissal");
+  assert.equal(editor.m.querySelector("#draft").value, "");
+  await f.move(1);
+  assert.equal(root.children.length, 1, "Forward cannot revive the dismissed confirmation");
+  await f.move(-2);
+  assert.equal(root.children.length, 0); assert.equal(headerCleanups, 2);
+  assert.ok(!JSON.stringify(f.stack).includes("Private draft"));
 
   f = fixture(); let layers = [], cleanups = 0;
   function open(name, reopen = true) {

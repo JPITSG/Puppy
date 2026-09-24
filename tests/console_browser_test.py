@@ -3333,12 +3333,12 @@ async def git_sheet_checks(a):
            the steps from its title down to it and from it down to the first
            control */
         const notes = document.createElement('div'); notes.className = 'modal agent-notes-modal';
-        notes.innerHTML = '<h2>Agent notes</h2><p class="modal-copy agent-notes-intro">Garden planner · /home/mira/projects/garden</p>'
+        notes.innerHTML = '<div class="modal-head"><h2>Agent notes</h2><button type="button" class="icon-btn modal-close"></button></div><p class="modal-copy agent-notes-intro">Garden planner · /home/mira/projects/garden</p>'
             + '<form><label class="check"><input type="checkbox"> Use one file for both</label></form>';
         document.body.appendChild(notes);
         const notesIntro = notes.querySelector('.agent-notes-intro');
         const voice = node => [style(node).fontSize, style(node).lineHeight, style(node).color, style(node).fontFamily].join(' ');
-        const notesTitleStep = notesIntro.getBoundingClientRect().top - notes.querySelector('h2').getBoundingClientRect().bottom;
+        const notesTitleStep = notesIntro.getBoundingClientRect().top - notes.querySelector('.modal-head').getBoundingClientRect().bottom;
         const notesIntroStep = notes.querySelector('.check').getBoundingClientRect().top - notesIntro.getBoundingClientRect().bottom;
         const notesVoice = voice(notesIntro), notesIntroHeight = notesIntro.getBoundingClientRect().height;
         notes.remove();
@@ -3354,7 +3354,7 @@ async def git_sheet_checks(a):
         return {title: m.querySelector('h2').textContent, intro: intro.textContent,
             facts: Array.from(m.querySelectorAll('.ws-fact')).map(row => [row.querySelector('.field-lbl').textContent, row.querySelector('.wsf-v').textContent]),
             reviewStep, factStep: parseFloat(style(facts).rowGap),
-            notesTitleStep, titleStep: intro.getBoundingClientRect().top - m.querySelector('h2').getBoundingClientRect().bottom,
+            notesTitleStep, titleStep: intro.getBoundingClientRect().top - m.querySelector('.modal-head').getBoundingClientRect().bottom,
             notesIntroStep, introStep: facts.getBoundingClientRect().top - intro.getBoundingClientRect().bottom,
             notesVoice, introVoice: voice(intro),
             notesIntroHeight, introHeight: intro.getBoundingClientRect().height,
@@ -5357,7 +5357,79 @@ async def token_usage_checks(instance, capture=False):
           "and a session opened from its row", flush=True)
 
 
-async def navigation_checks(instance, url, sid):
+async def modal_header_checks(instance, capture=False):
+    """Shared close control: layout, real pointer/keyboard input, and forms."""
+    async def press(key, code, modifiers=0):
+        for phase in ("keyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": phase, "key": key,
+                "code": key, "windowsVirtualKeyCode": code, "modifiers": modifiers,
+                **({"text": "\r"} if key == "Enter" and phase == "keyDown" else {})},
+                session=instance.page_session)
+
+    for width in (1440, 390, 320):
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": width, "height": 900 if width == 1440 else 844,
+            "deviceScaleFactor": 1, "mobile": width != 1440}, session=instance.page_session)
+        for theme in ("dark", "light"):
+            await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); true")
+            for name, script, ready in (
+                ("git", "modalSessionGit(0,findSessionMeta(0,1))", "!document.querySelector('.session-git-modal').hasAttribute('aria-busy') && !!document.querySelector('.session-git-log .sgl-hash')"),
+                ("usage", "modalTokenUsage()", "!!document.querySelector('.tu-plot svg')"),
+                ("form", """window.headerSubmits=0; window.headerEditor=modal('<form><h2>A long dialog title that wraps safely alongside the close control</h2><input id="header-field"><div class="m-btns"><button type="submit" class="btn" id="header-save">Save</button></div></form>');
+                    headerEditor.m.querySelector('form').onsubmit=e=>{e.preventDefault();headerSubmits++};
+                    headerEditor.m.querySelector('#header-field').focus()""", "true"),
+            ):
+                await evaluate(instance, "document.getElementById('btn-usage').focus(); " + script + "; true")
+                await until(instance, ready + " && !navigation.pending && !navigation.scheduled")
+                layout = await evaluate(instance, """(() => {
+                    const m=modalStack[modalStack.length-1].m; m.scrollTop=0;
+                    const h=m.querySelector('h2'), b=m.querySelector('.modal-close'), svg=b.querySelector('svg');
+                    const r=b.getBoundingClientRect(), title=h.getBoundingClientRect(), box=m.getBoundingClientRect(), icon=svg.getBoundingClientRect();
+                    const style=getComputedStyle(m);
+                    return {x:r.x+r.width/2,y:r.y+r.height/2,
+                        label:b.getAttribute('aria-label'),type:b.type,count:m.querySelectorAll('.modal-close').length,
+                        aligned:Math.abs(title.top+title.height/2-r.top-r.height/2)<.1,
+                        centered:Math.abs(icon.x+icon.width/2-r.x-r.width/2)<.1 && Math.abs(icon.y+icon.height/2-r.y-r.height/2)<.1,
+                        right:Math.abs(r.right-(box.left+parseFloat(style.borderLeftWidth)+m.clientWidth-parseFloat(style.paddingRight)))<1,
+                        separate:title.right+12<=r.left+.1,hit:b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)),
+                        fits:box.left>=0 && box.right<=innerWidth && m.scrollWidth<=m.clientWidth,
+                        target:r.width>=32 && r.height>=32};
+                })()""")
+                assert layout["label"] == "Close dialog" and layout["type"] == "button" and layout["count"] == 1, layout
+                for field in ("aligned", "centered", "right", "separate", "hit", "fits", "target"):
+                    assert layout[field], (width, theme, name, field, layout)
+                if capture and width != 320 and name != "form":
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                    (BASE / "data" / ("modal-header-{}-{}-{}.png".format(name, width, theme))).write_bytes(base64.b64decode(shot["data"]))
+                if name == "form":
+                    # The cross is first in the Tab loop, never an implicit submit.
+                    await evaluate(instance, "document.getElementById('header-save').focus(); true")
+                    await press("Tab", 9)
+                    assert await evaluate(instance, "document.activeElement.classList.contains('modal-close')")
+                    await press("Tab", 9, 8)
+                    assert await evaluate(instance, "document.activeElement.id==='header-save'")
+                    await press("Tab", 9)
+                    await press("Enter", 13)
+                else:
+                    for phase in ("mousePressed", "mouseReleased"):
+                        await instance.call("Input.dispatchMouseEvent", {"type": phase,
+                            "x": layout["x"], "y": layout["y"], "button": "left", "clickCount": 1},
+                            session=instance.page_session)
+                try:
+                    await until(instance, "!modalStack.length && !navigation.pending && !navigation.scheduled")
+                except AssertionError:
+                    detail = await evaluate(instance, "({open:modalStack.length,pending:navigation.pending,scheduled:navigation.scheduled,focus:document.activeElement.className,submits:window.headerSubmits})")
+                    raise AssertionError((width, theme, name, detail))
+                assert await evaluate(instance, "document.activeElement.id==='btn-usage'"), (name, "focus return")
+                if name == "form":
+                    assert await evaluate(instance, "headerSubmits===0"), "the X submitted its enclosing form"
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    await evaluate(instance, "applyTheme('dark'); true")
+    print("PASS: modal header close alignment, desktop/phone in both themes, pointer and keyboard dismissal, Tab loop, focus return and no form submission")
+
+
+async def navigation_checks(instance, url, sid, capture=False):
     """Real popstate, hash/reload and UI lifecycle; no command is replayed."""
     await instance.call("Emulation.setDeviceMetricsOverride", {
         "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
@@ -5372,6 +5444,7 @@ async def navigation_checks(instance, url, sid):
         await until(instance, condition + " && !navigation.pending && !navigation.scheduled")
 
     await run("for (const item of [...modalStack].reverse()) item.close(); closeDrawer(); closeHostPanel(); closeNoticesPanel()")
+    await modal_header_checks(instance, capture)
     await run("openSessionTab(0,1,findSessionMeta(0,1)); state.views['s:0:1'].select(1)")
     await run("openSessionTab(0,2,findSessionMeta(0,2))")
     await run("openSettingsTab()")
@@ -5499,6 +5572,14 @@ async def navigation_checks(instance, url, sid):
     await travel(-1, "modalStack.length===0")
     await travel(1, "!!document.querySelector('#ns-name')")
     assert await evaluate(instance, "!document.querySelector('#mc-yes') && document.activeElement.closest('.modal')!==null")
+    await run("document.querySelector('#ns-name').value='Header draft'; window.navConfirm=null; modalConfirm('Delete?','Header close must cancel',{destructive:true}).then(value=>navConfirm=value)")
+    await run("modalStack[modalStack.length-1].m.querySelector('.modal-close').click()")
+    await until(instance, "navConfirm===false && modalStack.length===1")
+    assert await evaluate(instance, "document.querySelector('#ns-name').value==='Header draft'")
+    await run("document.querySelector('.modal-close').click()")
+    await until(instance, "modalStack.length===0")
+    await travel(1, "!!document.querySelector('#ns-name')")
+    assert await evaluate(instance, "document.querySelector('#ns-name').value==='' && !document.querySelector('#mc-yes')")
     await run("document.querySelector('#ns-cancel').click(); openSettingsTab()")
     await travel(-1, "state.active==='s:0:1' && !modalStack.length")
     await run("openHostPanel()")
@@ -5678,7 +5759,7 @@ async def backup_schedule_checks(instance, app, capture=False):
         assert backup_schedule._load()["pending"]["source"] == "manual"
         await app["puppy_backups"].tick()  # fixture tasks are busy: wait, never interrupt
         await evaluate(instance, "backupView.backupRefresh()")
-        assert await evaluate(instance, "document.querySelector('#backup-status').textContent.includes('Waiting for idle time')")
+        await until(instance, "document.querySelector('#backup-status').textContent.includes('Waiting for idle time')")
         # A later error uses the same row and colour, beside previous downloads.
         current = backup_schedule._load()
         pending = current["pending"]
@@ -5720,7 +5801,7 @@ async def main(args):
             for instance in instances:
                 await open_console(instance, url, sid)
             if args.navigation_only:
-                await navigation_checks(instances[0], url, sid)
+                await navigation_checks(instances[0], url, sid, args.screenshots)
                 return
             if args.task_refresh_only:
                 await task_refresh_checks(instances[0])
@@ -5745,7 +5826,7 @@ async def main(args):
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])
             await engine_terminal_checks(instances[0], sid)
-            await navigation_checks(instances[0], url, sid)
+            await navigation_checks(instances[0], url, sid, args.screenshots)
             if args.screenshots:
                 await screenshots(instances[0])
     finally:

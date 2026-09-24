@@ -649,6 +649,8 @@ with a window of history around it.
   VNC connection. Leaving a form runs its usual cleanup; Forward opens a fresh
   form. Reload restores available views and message locations, while recent
   search results and dialog reopen state live only in this page's memory.
+  Dialogs also have a close X in the header; it follows the same dismissal and
+  cancellation behavior as Escape.
   See [browser history](docs/browser-history.md) for the full behavior.
 - **Tabs and splits.** Sessions, terminals, browsers and search open as tabs;
   drag a tab to the edge of a pane to split the workspace. Tab layout is

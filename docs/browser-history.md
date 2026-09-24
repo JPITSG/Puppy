@@ -25,7 +25,10 @@ There is no extra entry trapping the reader at the console's starting page.
 | Type a draft, recall a prompt, change a model/permission, send/steer/ask/stop, save/reset a setting, apply/delete/sync, clear the notification history, reorder/resize layout, toggle theme/alerts | Commands and preferences are not undone or replayed by history |
 | Embedded browser's own Back/Forward buttons | Continue navigating that browser's website history; the enclosing console's history selects console views |
 
-Closing a dialog with its own control consumes its history layer. Closing a
+Closing a dialog with its own control, including the header's close X, consumes
+its history layer. The X follows the same dismissal path as Escape: it cancels
+a pending choice, and a cancellable operation keeps its progress visible until
+cleanup finishes. It never submits a form. Closing a
 sheet and opening another view in the same action creates one destination.
 Opening a nested confirmation and going Back leaves the underlying editor and
 its unsaved fields in place. Leaving the editor itself runs its normal cleanup:
@@ -74,6 +77,9 @@ settlement; `onDismiss` continues to own cancellation. Do not add a separate
 `popstate` listener to a feature. A non-modal navigable panel uses
 `navigation.layer(dismiss, reopen)` and calls its returned release function when
 it closes. Keep permission, progress and destructive-action semantics intact.
+The shared modal helper wraps the title and a labelled, non-submit close button
+in one header. Only the top dialog's X can dismiss it; the button participates
+in the same Tab loop and focus return as the rest of the dialog.
 
 Every new or changed destination must update this audit and its regression
 coverage. Run `node tests/navigation_ui_test.js` for the controller and

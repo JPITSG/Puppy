@@ -33,7 +33,8 @@ const context = vm.createContext({
   backendHasCapability: (backend, name) => !!backend && backend.capabilities.includes(name),
   fetch: async (url, opts) => { calls.push({ url, opts }); return fetcher(url, opts); },
 });
-vm.runInContext(between("async function api(", "function wsUrl(") + "\n" +
+vm.runInContext(between("function xIcon(", "function bellIcon(") + "\n" +
+  between("async function api(", "function wsUrl(") + "\n" +
   between("const modalStack =", "/* ---- modal copy ----"), context);
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const advance = async ms => {
@@ -69,7 +70,7 @@ const controlReads = () => calls.filter(call => !call.opts.method && call.url.in
   assert.equal(calls.length, 1, "and asks for no operation state");
   assert.equal(document.activeElement, opener, "nor does it take the focus");
 
-  for (const dismissal of ["button", "escape", "backdrop"]) {
+  for (const dismissal of ["button", "header", "escape", "backdrop"]) {
     calls = []; reply = deferred(); let discarded = false;
     fetcher = (url, opts) => opts.method === "DELETE" ? response(200, { state: "cancelling" }) : reply.promise;
     const job = context.api(0, "work", { method: "POST", body: {}, operation: "Preparing task", cancelClose: () => { discarded = true; } });
@@ -81,6 +82,10 @@ const controlReads = () => calls.filter(call => !call.opts.method && call.url.in
     assert.equal(document.activeElement, cancel);
     assert.equal(controlReads().length, 1, "a dialog opening mid-operation reads its state at once");
     if (dismissal === "button") await cancel.onclick();
+    if (dismissal === "header") {
+      await root.querySelector(".modal-close").onclick();
+      await root.querySelector(".modal-close").onclick();
+    }
     if (dismissal === "escape") document.dispatchEvent(new FakeEvent("keydown", { key: "Escape" }));
     if (dismissal === "backdrop") root.querySelector(".modal-backdrop").dispatchEvent(new FakeEvent("mousedown"));
     await tick();
@@ -105,8 +110,9 @@ const controlReads = () => calls.filter(call => !call.opts.method && call.url.in
   const close = root.querySelector(".operation-cancel"); await close.onclick();
   assert.equal(close.textContent, "Close");
   assert(root.querySelector(".modal-copy").textContent.includes("can no longer be cancelled"));
-  await close.onclick();
+  await root.querySelector(".modal-close").onclick();
   assert.equal(root.children.length, 0);
+  assert.equal(calls.filter(call => call.opts.method === "DELETE").length, 1);
   reply.resolve(response(200, { applied: true }));
   assert.equal((await finishing).applied, true);
 
@@ -156,7 +162,7 @@ const controlReads = () => calls.filter(call => !call.opts.method && call.url.in
   await advance(1);
   const stop = root.querySelector(".read-cancel");
   assert.equal(document.activeElement, stop);
-  stop.onclick();
+  root.querySelector(".modal-close").onclick();
   assert.equal(root.children.length, 0);
   assert.equal(readSignal.aborted, true);
   reply.resolve(response(200, { ok: true }));
@@ -186,5 +192,5 @@ const controlReads = () => calls.filter(call => !call.opts.method && call.url.in
   assert.equal(view.canStopLoading(), false, "older nodes never receive unknown loading commands");
   view.setLoading(false);
 
-  console.log("PASS: deferred dialogs, Cancel/Escape/backdrop, cleanup waits, commit race, retry, errors, capability gating and read aborts");
+  console.log("PASS: deferred dialogs, Cancel/header close/Escape/backdrop, cleanup waits, commit race, retry, errors, capability gating and read aborts");
 })().catch(error => { console.error(error); process.exitCode = 1; });

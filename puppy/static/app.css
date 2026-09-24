@@ -2887,6 +2887,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   padding:18px;box-shadow:0 30px 80px -20px rgba(0,0,0,.9);
 }
 .modal h2{display:flex;align-items:center;gap:8px}
+.modal-head{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.modal .modal-head h2{flex:1;min-width:0;margin:0;overflow-wrap:anywhere}
+.modal-close{margin-left:auto}
 /* The row reads left to right from the least to the most consequential
    press: Cancel or Close first, any plain secondary verb next (Refresh,
    Terminal, Use shared draft), and the primary - the verb the dialog exists

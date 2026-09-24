@@ -26564,8 +26564,9 @@ class SettingsView {
 /* One frame for every dialog. It owns the stack, so only the topmost dialog
    answers Escape (a confirm raised over an editor closes alone), keeps Tab
    inside the open dialog, gives focus back to the control that opened it, and
-   closes on a backdrop press. Callers place their own first focus: a field
-   for a form, the safe or the primary button for a confirm. */
+   closes on a backdrop press or the shared header's close button. Callers
+   place their own first focus: a field for a form, the safe or the primary
+   button for a confirm. */
 const modalStack = [];
 const MODAL_FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),' +
   'select:not([disabled]):not(.choice-native),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
@@ -26607,6 +26608,21 @@ function modal(html, className = "", reopen = null) {
       try { opener.focus({ preventScroll: true }); } catch (error) { /* not focusable any more */ }
     }
   };
+  const head = el("div", "modal-head");
+  const heading = m.querySelector("h2");
+  if (heading) {
+    heading.parentNode.insertBefore(head, heading);
+    head.appendChild(heading);
+  } else m.insertBefore(head, m.firstChild);
+  const closeButton = el("button", "icon-btn modal-close");
+  closeButton.type = "button";
+  closeButton.setAttribute("aria-label", "Close dialog");
+  closeButton.title = "Close";
+  closeButton.appendChild(xIcon(20));
+  closeButton.onclick = () => {
+    if (modalStack[modalStack.length - 1] === record) return dismiss();
+  };
+  head.appendChild(closeButton);
   modalStack.push(record);
   releaseHistory = navigation.layer(dismiss, reopen);
   if (navigation.applying) m.focus({ preventScroll: true });
