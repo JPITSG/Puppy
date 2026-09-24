@@ -2584,9 +2584,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .modal-copy+.modal-copy{margin-top:-4px}
 .help+.modal-copy{margin-top:12px}
 .snapshot-warning{margin:0;color:var(--warn);font-size:var(--fs-xs);line-height:1.45}
-.snapshot-actions{display:flex;align-items:center;gap:8px;margin-top:13px;flex-wrap:wrap}
+.snapshot-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .snapshot-card .backup-directory{font-family:var(--mono)}
-.backup-history{max-height:280px;overflow-y:auto;margin-top:8px}
+.backup-history{max-height:280px;overflow-y:auto}
 .backup-history .timer-row{gap:10px 14px}
 .backup-history .timer-row-name{overflow-wrap:anywhere}
 .backup-download{font-family:var(--sans);font-size:var(--fs-sm);white-space:nowrap}
@@ -2594,6 +2594,19 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   margin-top:15px;padding-top:16px;border-top:1px solid var(--line);
 }
 .card .engine-updates-section h2{margin-bottom:12px}
+/* One vertical gap throughout the backup card, including either side of its
+   rules; shared field/paragraph/action margins must not add another step. */
+.snapshot-card{--backup-gap:12px;display:grid;gap:var(--backup-gap)}
+.snapshot-card>.notify-head,.snapshot-card>.snapshot-copy,
+.snapshot-card>.settings-form,.snapshot-card>.engine-updates-section,
+.snapshot-card .settings-form>*,.snapshot-card .engine-updates-section>*,
+.snapshot-card .engine-updates-section h2{margin:0}
+.snapshot-card>.settings-form{row-gap:var(--backup-gap)}
+.snapshot-card>.engine-updates-section{
+  display:grid;gap:var(--backup-gap);padding-top:var(--backup-gap);
+}
+.backup-history .timer-row:first-child{padding-top:0}
+.backup-history .timer-row:last-child{padding-bottom:0}
 
 /* ---------- generated titles ---------- */
 /* the card's four choices share the alert card's two-column grid; the
