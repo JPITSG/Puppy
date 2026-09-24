@@ -24,7 +24,7 @@ from tests.scratch import private_root  # noqa: E402
 TEST_ROOT = private_root("snapshot-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
-from puppy import (auth, cli_releases, config, db, listener_handoff, notices, notify, spelling,
+from puppy import (auth, backup_schedule, cli_releases, config, db, listener_handoff, notices, notify, spelling,
                    runner as session_runner, snapshots, terminal, token_usage, uploads,
                    web_tls, workspace_sync,
                    workspaces)  # noqa: E402
@@ -345,6 +345,10 @@ async def main() -> None:
         spelling.sent(["frobz"])
         saved_spelling = json.loads(db.query_one(
             "SELECT value FROM meta WHERE key=?", (spelling.META_KEY,))["value"])
+        saved_backups = backup_schedule._new_state()
+        saved_backups["settings"].update(enabled=True, at="04:15", keep=12)
+        saved_backups["next_at"] = backup_schedule.next_occurrence("04:15", time.time())
+        backup_schedule._save(saved_backups)
         assert saved_spelling["words"] == ["eval", "zorbium"] and \
             list(saved_spelling["tally"]) == ["frobz"]
         # And the token ledger: what every engine run used, one record a day,
@@ -693,6 +697,7 @@ async def main() -> None:
         db.execute("DELETE FROM meta WHERE key IN (?,?)", (
             "completion_log", "session_completion.{}".format(linked_id)))
         notices.record("mutated after export", "warn")
+        backup_schedule._save(backup_schedule._new_state())
         token_usage.store([["turn:{}:8".format(linked_id), 1790078400.0, linked_id, "turn",
                             "claude", "", 1, 1, 0, 0, 0]])
         assert list(usage_records()) == ["token_usage.2026-09-21", "token_usage.2026-09-22"]
@@ -986,6 +991,7 @@ async def main() -> None:
         assert json.loads(db.query_one(
             "SELECT value FROM meta WHERE key=?", (spelling.META_KEY,))["value"]) == saved_spelling
         assert usage_records() == saved_usage, "the ledger comes back as recorded, and only it"
+        assert backup_schedule._load() == saved_backups, "the daily backup settings come back as recorded"
         restored_mirror = Path(restored_linked["cwd"])
         assert restored_mirror.is_dir()
         assert not (restored_mirror / "clean-cache.txt").exists()

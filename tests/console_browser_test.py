@@ -5579,6 +5579,123 @@ async def navigation_checks(instance, url, sid):
     print("PASS: browser Back/Forward across tabs, search queries/results and live filters, tasks, nested dialogs, Host activity, Notifications and phone drawer; Settings backends/drafts/scroll, reload/citation routes, stale async results, and no replay of viewer close commands", flush=True)
 
 
+async def backup_schedule_checks(instance, app, capture=False):
+    """Actual settings routes and inputs, bounded history, links and navigation."""
+    from puppy import backup_schedule
+    folder = ROOT / "saved-backups"
+    folder.mkdir(exist_ok=True)
+    value = backup_schedule._new_state()
+    value["settings"]["directory"] = str(folder)
+    for number in range(1, 21):
+        identity = "{:032x}".format(number)
+        at = time.time() - (21 - number) * 3600
+        value["history"].append({"id": identity, "at": at, "source": "scheduled",
+                                 "tone": "ok", "message": "Backup saved"})
+        if number >= 19:
+            path = folder / ("puppy-backup-" + identity + ".tar.gz")
+            path.write_bytes(b"demo-download")
+            info = path.stat()
+            value["files"].append({"id": identity, "at": at, "directory": str(folder),
+                "filename": path.name, "size": info.st_size, "device": info.st_dev,
+                "inode": info.st_ino, "protection": "none"})
+    backup_schedule._save(value)
+
+    async def click(selector):
+        point = await evaluate(instance, """(() => { const n=document.querySelector(%s);
+            n.scrollIntoView({block:'center'}); const r=n.getBoundingClientRect();
+            return {x:r.x+r.width/2,y:r.y+r.height/2}; })()""" % json.dumps(selector))
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {
+                "type": kind, **point, "button": "left", "clickCount": 1}, session=instance.page_session)
+
+    try:
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        await evaluate(instance, "closeTab('settings'); openSettingsTab(); true")
+        await until(instance, "!!document.querySelector('#backup-run') && !document.querySelector('#backup-run').disabled")
+        await evaluate(instance, "window.backupView=state.views.settings; true")
+        # Genuine input and Save: the route receives the displayed daily time,
+        # retention count, path and switch, with no implied Run now.
+        await click("#backup-at")
+        await evaluate(instance, "document.querySelector('#backup-at').select(); true")
+        await instance.call("Input.insertText", {"text": "04:15"}, session=instance.page_session)
+        await click("#backup-keep")
+        await evaluate(instance, "document.querySelector('#backup-keep').select(); true")
+        await instance.call("Input.insertText", {"text": "3"}, session=instance.page_session)
+        await click("#backup-enabled + .be-auto-track")
+        assert await evaluate(instance, "document.querySelector('#backup-run').disabled")
+        await click("#backup-save")
+        await until(instance, "document.querySelector('#backup-save').disabled && !document.querySelector('#backup-run').disabled")
+        assert backup_schedule._load()["settings"] == {
+            "enabled": True, "at": "04:15", "directory": str(folder), "keep": 3}
+        assert backup_schedule._load()["pending"] is None
+        # Following history never repeats an action and preserves a form draft.
+        await evaluate(instance, """document.querySelector('#backup-at').value='05:20';
+            document.querySelector('.snapshot-card form').dispatchEvent(new Event('input',{bubbles:true}));
+            navigationRemember(); openSearchTab(); true""")
+        await until(instance, "!navigation.pending && !navigation.scheduled")
+        await evaluate(instance, "history.back(); true")
+        await until(instance, "state.active==='settings' && !navigation.pending && !navigation.scheduled")
+        assert await evaluate(instance, "document.querySelector('#backup-at').value==='05:20'")
+        await evaluate(instance, """document.querySelector('#backup-at').value='04:15';
+            document.querySelector('.snapshot-card form').dispatchEvent(new Event('input',{bubbles:true})); true""")
+        # Refresh keeps the identical history nodes/focus/scroll in place.
+        await evaluate(instance, """window.backupLink=document.querySelector('.backup-download');
+            backupLink.focus(); document.querySelector('#backup-history').scrollTop=100;
+            backupView.backupRefresh()""")
+        assert await evaluate(instance, "backupLink===document.querySelector('.backup-download') && document.activeElement===backupLink && document.querySelector('#backup-history').scrollTop===100")
+        assert await evaluate(instance, "fetch(backupLink.href).then(r=>r.text())") == "demo-download"
+        await evaluate(instance, "document.querySelector('#backup-history').scrollTop=0; true")
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width == 390}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); document.querySelector('.snapshot-card').scrollIntoView({block:'start'}); true" % json.dumps(theme))
+                await evaluate(instance, "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))")
+                result = await evaluate(instance, """(() => {
+                    const card=document.querySelector('.snapshot-card'), r=card.getBoundingClientRect();
+                    const field=card.querySelector('#backup-directory'), history=card.querySelector('#backup-history');
+                    return {fits:r.left>=0 && r.right<=innerWidth && card.scrollWidth<=card.clientWidth,
+                        controls:[...card.querySelectorAll('input:not(.hidden),button,a')].filter(n=>getComputedStyle(n).display!=='none')
+                            .every(n=>{const b=n.getBoundingClientRect();return b.left>=r.left && b.right<=r.right}),
+                        scrolls:history.scrollHeight>history.clientHeight,
+                        pathFont:getComputedStyle(field).fontFamily,
+                        mono:getComputedStyle(card).getPropertyValue('--mono').trim(),
+                        good:getComputedStyle(history.querySelector('.state-word.ok')).color,
+                        expected:getComputedStyle(card).getPropertyValue('--ok').trim()}; })()""")
+                assert result["fits"] and result["controls"] and result["scrolls"], (name, theme, result)
+                assert "mono" in result["pathFont"].lower(), result
+                # Shared token owns the status colour in both themes.
+                assert await evaluate(instance, """(() => {const n=document.createElement('span');
+                    n.style.color='var(--ok)'; document.body.append(n); const color=getComputedStyle(n).color;
+                    n.remove();return color===getComputedStyle(document.querySelector('#backup-history .ok')).color;})()""")
+                if capture:
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                    (BASE / "data" / ("backup-card-" + name + "-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
+        await click("#backup-run")
+        await until(instance, "document.querySelector('#backup-run').disabled")
+        assert backup_schedule._load()["pending"]["source"] == "manual"
+        await app["puppy_backups"].tick()  # fixture tasks are busy: wait, never interrupt
+        await evaluate(instance, "backupView.backupRefresh()")
+        assert await evaluate(instance, "document.querySelector('#backup-status').textContent.includes('Waiting for idle time')")
+        # A later error uses the same row and colour, beside previous downloads.
+        current = backup_schedule._load()
+        pending = current["pending"]
+        current["pending"] = None
+        current["history"] = current["history"][1:] + [{"id": pending["id"], "at": time.time(),
+            "source": "manual", "tone": "bad", "message": "Could not save backup · directory unavailable"}]
+        backup_schedule._save(current)
+        await evaluate(instance, "backupView.backupRefresh()")
+        await until(instance, "!!document.querySelector('#backup-history .bad') && document.querySelectorAll('.backup-download').length===2")
+    finally:
+        await evaluate(instance, "closeTab('settings'); closeTab('search'); activateTab('s:0:1'); applyTheme('dark'); delete window.backupView; delete window.backupLink; true")
+        db.execute("DELETE FROM meta WHERE key=?", (backup_schedule.META_KEY,))
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    print("PASS: Backup & restore card, real save and Run now routes, Back preserves edits, stable downloadable history and shared styles on desktop/phone in both themes", flush=True)
+
+
 async def main(args):
     instances = []
     server = None
@@ -5614,6 +5731,9 @@ async def main(args):
             if args.question_scroll_only:
                 await question_scroll_checks(instances[0], args.screenshots)
                 return
+            await backup_schedule_checks(instances[0], app, args.screenshots)
+            if args.backup_schedule_only:
+                return
             await sidebar_width_checks(instances[0], args.screenshots)
             if args.sidebar_width_only:
                 return
@@ -5647,4 +5767,5 @@ if __name__ == "__main__":
     parser.add_argument("--token-usage-only", action="store_true")
     parser.add_argument("--question-scroll-only", action="store_true")
     parser.add_argument("--sidebar-width-only", action="store_true")
+    parser.add_argument("--backup-schedule-only", action="store_true")
     asyncio.run(main(parser.parse_args()))

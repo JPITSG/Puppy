@@ -1354,7 +1354,7 @@ function fmtDateTime(ts, options = {}) {
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleString([], serverClockOptions(options));
 }
-/* Unattended-update schedules are persisted as canonical 24-hour HH:MM
+/* Daily schedules are persisted as canonical 24-hour HH:MM
    values because the node's scheduler consumes them. Only their WebUI face
    follows the server's clock, with a parser that converts edits back. */
 function fmtClockSetting(value) {
@@ -22779,6 +22779,8 @@ class SettingsView {
     this.notifyBackendsSync = null;
     this.titlesSync = null;
     this.titlesRetire = null;
+    this.backupRetire = null;
+    this.backupRefresh = null;
     this.systemPromptSync = null;
     this.timerSettingsSync = null;
     this.timeoutSettingsSync = null;
@@ -22788,6 +22790,8 @@ class SettingsView {
   }
   destroy() {
     this.renderGeneration++;
+    if (this.backupRetire) this.backupRetire();
+    this.backupRetire = this.backupRefresh = null;
     this.stopUpgradeReadinessPolling();
     this.stopEngineUpgradePolling();
     this.engineUpgradeState.clear();
@@ -22819,7 +22823,7 @@ class SettingsView {
       this.navigationBackends = backends;
       this.render();
     }
-    else { this.syncRemoteState(); this.startUpgradeReadinessPolling(); }
+    else { this.syncRemoteState(); this.startUpgradeReadinessPolling(); if (this.backupRefresh) this.backupRefresh(); }
   }
 
   stopUpgradeReadinessPolling() {
@@ -25449,7 +25453,246 @@ class SettingsView {
     return card;
   }
 
+  backupSettingsCard(generation) {
+    const c5 = el("div", "card snapshot-card");
+    c5.innerHTML = `<div class="notify-head">
+        <h2>Backup &amp; restore</h2>
+        <label class="be-auto notify-toggle">
+          <input type="checkbox" id="backup-enabled" aria-label="Schedule daily backups" disabled>
+          <span class="be-auto-track" aria-hidden="true"><span></span></span>
+          <span class="be-auto-label">Scheduled</span>
+        </label>
+      </div>
+      <p class="snapshot-copy">Back up this instance's settings, accounts, backend connections,
+        local sessions and transcripts, uploads, and managed workspaces in a compressed archive.</p>
+      <p class="snapshot-copy">Remote sessions, ordinary projects and engine sign-ins stay on their
+        machines. Export also includes this browser's tabs and local drafts.</p>
+      <p class="snapshot-copy" id="snapshot-storage" role="status">Stored data: measuring…</p>
+      <form class="settings-form">
+        <label>Daily at<input type="text" id="backup-at" autocomplete="off" spellcheck="false" required disabled></label>
+        <label>Copies to keep<input type="number" id="backup-keep" min="1" step="1" required disabled></label>
+        <label class="full">Save to directory<input type="text" id="backup-directory" class="backup-directory"
+          autocomplete="off" spellcheck="false" required disabled></label>
+        <p class="help full" id="backup-help">Loading backup settings…</p>
+        <p class="form-error full hidden" role="alert"></p>
+        <div class="settings-actions full">
+          <button type="submit" class="btn btn-pri btn-sm" id="backup-save" disabled>Save</button>
+          <button type="button" class="btn btn-sm" id="backup-run" disabled>Run now</button>
+          <button type="button" class="btn btn-sm hidden" id="backup-retry">Retry</button>
+          <span class="settings-status help" id="backup-note" role="status" aria-live="polite"></span>
+        </div>
+      </form>
+      <section class="engine-updates-section">
+        <h2>Recent backups</h2>
+        <p class="help state-word" id="backup-status" role="status" aria-live="polite">Loading history…</p>
+        <div class="backup-history" id="backup-history"></div>
+      </section>
+      <section class="engine-updates-section">
+        <p class="snapshot-warning">Archives contain private credentials and API tokens.
+          Only import a backup you trust, and store it securely.</p>
+        <div class="snapshot-actions">
+          <button class="btn btn-sm" id="snapshot-export">Export backup</button>
+          <button class="btn btn-sm" id="snapshot-import">Import backup</button>
+          <input class="hidden" type="file" id="snapshot-file"
+            accept=".tar.gz,application/gzip,application/x-gzip">
+        </div>
+      </section>`;
+    const enabled = c5.querySelector("#backup-enabled"), at = c5.querySelector("#backup-at");
+    const directory = c5.querySelector("#backup-directory"), keep = c5.querySelector("#backup-keep");
+    const save = c5.querySelector("#backup-save"), run = c5.querySelector("#backup-run");
+    const retry = c5.querySelector("#backup-retry"), note = c5.querySelector("#backup-note");
+    const status = c5.querySelector("#backup-status"), history = c5.querySelector("#backup-history");
+    const help = c5.querySelector("#backup-help"), errorBox = c5.querySelector(".form-error");
+    let payload = null, saved = "", busy = false, serial = 0, timer = null, retired = false, reading = false, readError = false;
+    const current = () => !retired && generation === this.renderGeneration && c5.isConnected;
+    const values = () => ({ enabled: enabled.checked, at: parseClockSetting(at.value),
+      directory: directory.value.trim(), keep: Number(keep.value) });
+    const signature = () => JSON.stringify(values());
+    const dirty = () => !!payload && signature() !== saved;
+    const showError = text => {
+      readError = false;
+      errorBox.textContent = text || ""; errorBox.classList.toggle("hidden", !text);
+    };
+    const hydrate = () => {
+      const cfg = payload.settings;
+      enabled.checked = cfg.enabled; at.value = fmtClockSetting(cfg.at);
+      directory.value = cfg.directory; keep.value = String(cfg.keep);
+      keep.max = String(payload.keep_max); saved = signature();
+    };
+    const paint = () => {
+      const running = !!payload && payload.status === "running";
+      for (const control of [enabled, at, directory, keep]) control.disabled = !payload || busy || running;
+      save.disabled = !payload || busy || running || !dirty();
+      run.disabled = !payload || busy || payload.status !== "idle" || dirty();
+      exportButton.disabled = importButton.disabled = busy || running;
+      note.textContent = busy ? "Saving…" : dirty() ? "Unsaved changes" : "";
+      note.classList.toggle("dirty", dirty());
+      at.placeholder = clockSettingExample();
+      at.setAttribute("aria-description", `Use ${state.clockFormat} time, for example ${clockSettingExample()}`);
+      if (!payload) return;
+      help.textContent = `Daily time uses this instance's clock (${payload.timezone}). ` +
+        "Save applies these settings. Run now uses the saved directory, even with scheduling off. " +
+        "Older copies rotate after a successful backup.";
+      status.textContent = running ? "Saving backup…" : payload.status === "waiting" ?
+        "Waiting for idle time" + (payload.waiting ? ` · ${payload.waiting}` : "") :
+        payload.settings.enabled ? `Next backup · ${fmtStamp(payload.next_at)}` : "Scheduled backups are off";
+      status.classList.toggle("busy", running || payload.status === "waiting");
+      const files = new Map(payload.files.map(item => [item.id, item]));
+      const entries = payload.history.concat(payload.files.filter(item => !payload.history.some(h => h.id === item.id))
+        .map(item => ({...item, tone: "ok", message: "Backup saved", source: ""})))
+        .sort((a, b) => b.at - a.at);
+      /* Key the rendered history: polling must preserve a reader's scroll,
+         focus and download link rather than replace an unchanged list. */
+      const key = JSON.stringify([entries, payload.files]);
+      if (history.dataset.signature === key) return;
+      history.dataset.signature = key;
+      history.replaceChildren();
+      if (!entries.length) history.appendChild(el("p", "help", "No saved backups yet"));
+      for (const item of entries) {
+        const row = el("div", "timer-row");
+        const copy = el("div", "timer-row-copy");
+        copy.appendChild(el("div", `timer-row-name state-word ${item.tone}`, item.message));
+        const file = files.get(item.id);
+        const detail = [fmtStamp(item.at), item.source === "scheduled" ? "Scheduled" : item.source === "manual" ? "Run now" : ""];
+        if (file) detail.push(fmtBytes(file.size));
+        copy.appendChild(el("div", "timer-row-description", detail.filter(Boolean).join(" · ")));
+        row.appendChild(copy);
+        if (file && file.available) {
+          const link = el("a", "backup-download", "Download");
+          link.href = file.download; link.download = file.filename;
+          link.setAttribute("aria-label", `Download backup from ${fmtStamp(file.at)}`);
+          row.appendChild(link);
+        } else if (file) row.appendChild(el("span", "help", "Unavailable"));
+        else if (item.tone !== "bad") row.appendChild(el("span", "help", "Rotated"));
+        history.appendChild(row);
+      }
+    };
+    const load = async () => {
+      if (!current() || busy || reading || document.hidden || !this.root.getClientRects().length) return;
+      reading = true;
+      const request = ++serial;
+      try {
+        const result = await api(0, "snapshot/backups");
+        if (!current() || request !== serial) return;
+        const changed = dirty(); payload = result;
+        if (!changed) hydrate();
+        if (readError) showError("");
+        retry.classList.add("hidden"); paint();
+      } catch (error) {
+        if (current() && request === serial) {
+          showError(error.message); readError = true; retry.classList.remove("hidden");
+        }
+      } finally { reading = false; }
+    };
+    const poll = async () => {
+      await load();
+      if (current()) timer = setTimeout(poll, 5000);
+    };
+    c5.querySelector("form").oninput = () => paint();
+    enabled.onchange = () => paint();
+    c5.querySelector("form").onsubmit = async event => {
+      event.preventDefault();
+      if (save.disabled) return;
+      const body = values();
+      if (!body.at) { showError(`Enter a time like ${clockSettingExample()}`); at.focus(); return; }
+      busy = true; ++serial; showError(""); paint();
+      try {
+        const result = await api(0, "snapshot/backups", { method: "PUT", body });
+        if (!current()) return;
+        payload = result; hydrate(); toast("Backup schedule saved", "ok");
+      } catch (error) { if (current()) showError(error.message); }
+      finally { busy = false; if (current()) paint(); }
+    };
+    run.onclick = async () => {
+      if (run.disabled) return;
+      busy = true; ++serial; showError(""); paint();
+      try {
+        const result = await api(0, "snapshot/backups/run", { method: "POST", body: {} });
+        if (!current()) return;
+        payload = result; toast("Backup queued · waiting for idle time", "busy");
+      } catch (error) { if (current()) showError(error.message); }
+      finally { busy = false; if (current()) { paint(); load(); } }
+    };
+    retry.onclick = () => { showError(""); load(); };
+    this.backupRefresh = load;
+    this.backupRetire = () => { retired = true; ++serial; if (timer !== null) clearTimeout(timer); };
+    Promise.resolve().then(poll);
+    const exportButton = c5.querySelector("#snapshot-export");
+    const importButton = c5.querySelector("#snapshot-import");
+    const fileInput = c5.querySelector("#snapshot-file");
+    const storageLine = c5.querySelector("#snapshot-storage");
+    api(0, "snapshot/storage").then(usage => {
+      storageLine.textContent = `Stored data: approximately ${fmtBytes(usage.bytes)} on this instance ` +
+        "(uncompressed, excluding remote data and caches).";
+    }).catch(() => {
+      storageLine.textContent = "Stored data: unavailable. Reopen Settings to try again.";
+    });
+    exportButton.onclick = async () => {
+      busy = true; ++serial; showError(""); paint();
+      exportButton.disabled = true;
+      importButton.disabled = true;
+      exportButton.textContent = "Preparing…";
+      try {
+        const prepared = await api(0, "snapshot/export", {
+          method: "POST", body: { ui: snapshotBrowserState() }, operation: "Preparing backup",
+        });
+        const link = el("a");
+        link.href = prepared.download;
+        link.download = prepared.filename || "puppy-snapshot.tar.gz";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        toast(`Backup ready · ${prepared.sessions} sessions · ${fmtBytes(prepared.size)}`, "ok");
+      } catch (error) {
+        if (!error.cancelled) showError(error.message);
+      } finally {
+        busy = false;
+        if (exportButton.isConnected) {
+          exportButton.disabled = false;
+          importButton.disabled = false;
+          exportButton.textContent = "Export backup";
+          paint();
+        }
+      }
+    };
+    importButton.onclick = () => fileInput.click();
+    fileInput.onchange = async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      const confirmed = await modalConfirm("Restore Puppy backup?",
+        `This replaces current Puppy settings and sessions with "${file.name}".\n\n` +
+        "Running turns, queued messages, and terminals must be stopped first.",
+        { confirmLabel: "Restore", destructive: true });
+      if (!confirmed) { fileInput.value = ""; return; }
+      busy = true; ++serial; showError(""); paint();
+      exportButton.disabled = true;
+      importButton.disabled = true;
+      importButton.textContent = "Restoring…";
+      try {
+        const result = await api(0, "snapshot/import", {
+          method: "POST", body: file, headers: { "Content-Type": "application/gzip" },
+          operation: "Restoring backup",
+        });
+        restoreBrowserState(result.ui || {});
+        location.reload();
+      } catch (error) {
+        busy = false;
+        if (!error.cancelled) showError(error.message);
+        if (importButton.isConnected) {
+          exportButton.disabled = false;
+          importButton.disabled = false;
+          importButton.textContent = "Import backup";
+          fileInput.value = "";
+          paint();
+        }
+      }
+    };
+    return c5;
+  }
+
   async render() {
+    if (this.backupRetire) this.backupRetire();
+    this.backupRetire = this.backupRefresh = null;
     this.stopUpgradeReadinessPolling();
     const generation = ++this.renderGeneration;
     let settings, engines, promptSettings;
@@ -26311,87 +26554,7 @@ class SettingsView {
     };
     this.inner.appendChild(c4);
 
-    /* backup and restore */
-    const c5 = el("div", "card snapshot-card");
-    c5.innerHTML = `<h2>Backup &amp; restore</h2>
-      <p class="snapshot-copy">A backup restores this instance's settings, accounts, backend
-        connections, local sessions and transcripts, uploads, scratch workspaces, tabs, and drafts.</p>
-      <p class="snapshot-copy">Remote sessions remain on their registered backends. Ordinary project
-        directories and engine sign-ins/native caches remain on their machines.</p>
-      <p class="snapshot-copy" id="snapshot-storage" role="status">Stored data: measuring…</p>
-      <p class="snapshot-warning">The archive contains private credentials and API tokens.
-        Only import a backup you trust, and store it securely.</p>
-      <div class="snapshot-actions">
-        <button class="btn btn-pri btn-sm" id="snapshot-export">Export backup</button>
-        <button class="btn btn-sm" id="snapshot-import">Import backup</button>
-        <input class="hidden" type="file" id="snapshot-file"
-          accept=".tar.gz,application/gzip,application/x-gzip">
-      </div>`;
-    const exportButton = c5.querySelector("#snapshot-export");
-    const importButton = c5.querySelector("#snapshot-import");
-    const fileInput = c5.querySelector("#snapshot-file");
-    const storageLine = c5.querySelector("#snapshot-storage");
-    api(0, "snapshot/storage").then(usage => {
-      storageLine.textContent = `Stored data: approximately ${fmtBytes(usage.bytes)} on this instance ` +
-        "(uncompressed, excluding remote data and caches).";
-    }).catch(() => {
-      storageLine.textContent = "Stored data: unavailable. Reopen Settings to try again.";
-    });
-    exportButton.onclick = async () => {
-      exportButton.disabled = true;
-      importButton.disabled = true;
-      exportButton.textContent = "Preparing…";
-      try {
-        const prepared = await api(0, "snapshot/export", {
-          method: "POST", body: { ui: snapshotBrowserState() }, operation: "Preparing backup",
-        });
-        const link = el("a");
-        link.href = prepared.download;
-        link.download = prepared.filename || "puppy-snapshot.tar.gz";
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        toast(`Backup ready · ${prepared.sessions} sessions · ${fmtBytes(prepared.size)}`, "ok");
-      } catch (error) {
-        if (!error.cancelled) toast(error.message, "bad", TOAST_LONG);
-      } finally {
-        if (exportButton.isConnected) {
-          exportButton.disabled = false;
-          importButton.disabled = false;
-          exportButton.textContent = "Export backup";
-        }
-      }
-    };
-    importButton.onclick = () => fileInput.click();
-    fileInput.onchange = async () => {
-      const file = fileInput.files && fileInput.files[0];
-      if (!file) return;
-      const confirmed = await modalConfirm("Restore Puppy backup?",
-        `This replaces current Puppy settings and sessions with "${file.name}".\n\n` +
-        "Running turns, queued messages, and terminals must be stopped first.",
-        { confirmLabel: "Restore", destructive: true });
-      if (!confirmed) { fileInput.value = ""; return; }
-      exportButton.disabled = true;
-      importButton.disabled = true;
-      importButton.textContent = "Restoring…";
-      try {
-        const result = await api(0, "snapshot/import", {
-          method: "POST", body: file, headers: { "Content-Type": "application/gzip" },
-          operation: "Restoring backup",
-        });
-        restoreBrowserState(result.ui || {});
-        location.reload();
-      } catch (error) {
-        if (!error.cancelled) toast(error.message, "bad", TOAST_LONG);
-        if (importButton.isConnected) {
-          exportButton.disabled = false;
-          importButton.disabled = false;
-          importButton.textContent = "Import backup";
-          fileInput.value = "";
-        }
-      }
-    };
-    this.inner.appendChild(c5);
+    this.inner.appendChild(this.backupSettingsCard(generation));
     this.syncRemoteState();
     this.startUpgradeReadinessPolling();
   }

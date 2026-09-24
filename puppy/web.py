@@ -14,7 +14,7 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import (__version__, agent_notes, auth, backends, bind_verify, browser,
+from puppy import (__version__, agent_notes, auth, backends, backup_schedule, bind_verify, browser,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
                    spelling, token_usage,
@@ -1431,9 +1431,11 @@ async def h_bind_handoff_claim(request: web.Request):
 
 # ---- backup / restore ----
 
-def _snapshot_conflict(app: web.Application):
+def _snapshot_conflict(app: web.Application, saved=False):
     if app.get("puppy_snapshot_busy"):
         return "another backup or restore is already in progress"
+    if not saved and app.get("puppy_backups") and app["puppy_backups"].running:
+        return "a saved backup is still being published"
     mutations = int(app.get("puppy_mutations", 0))
     if mutations:
         return "another state-changing request is still in progress"
@@ -1453,38 +1455,46 @@ async def h_snapshot_storage(request: web.Request):
                                  headers={"Cache-Control": "no-store"})
 
 
+async def _prepare_snapshot(app, ui_state, saved=False):
+    """One idle gate and freeze for manual exports and unattended backups."""
+    conflict = _snapshot_conflict(app, saved=saved)
+    if conflict:
+        raise snapshots.SnapshotBusy(conflict)
+    app["puppy_snapshot_busy"] = "export"
+    workspace_links.pause_for_snapshot()
+    notify.pause_for_snapshot()
+    result = None
+    try:
+        result = await operations.to_thread(snapshots.create_archive, ui_state)
+        blocked = snapshots.blockers()
+        if blocked:
+            raise snapshots.SnapshotBusy("backup could not obtain an idle snapshot: " + "; ".join(blocked))
+        operations.checkpoint()
+        return result
+    except BaseException:
+        if result:
+            snapshots.discard_export(result)
+        raise
+    finally:
+        app["puppy_snapshot_busy"] = None
+        workspace_links.resume_after_snapshot()
+        notify.resume_after_snapshot()
+        state_stream.wake()
+
+
 @operations.cancellable
 async def h_snapshot_export(request: web.Request):
     try:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid backup request"}, status=400)
-    try:
-        ui_state = snapshots.validate_ui_state(body.get("ui") if isinstance(body, dict) else None)
-    except snapshots.SnapshotError as exc:
-        return web.json_response({"error": str(exc)}, status=400)
-
-    conflict = _snapshot_conflict(request.app)
-    if conflict:
-        return web.json_response({"error": conflict}, status=409)
-    request.app["puppy_snapshot_busy"] = "export"
-    workspace_links.pause_for_snapshot()
-    notify.pause_for_snapshot()
     result = None
     try:
-        loop = asyncio.get_running_loop()
-        result = await operations.to_thread(snapshots.create_archive, ui_state)
-        blocked = snapshots.blockers()
-        if blocked:
-            snapshots.discard_export(result)
-            result = None
-            return web.json_response(
-                {"error": "backup could not obtain an idle snapshot: " + "; ".join(blocked)},
-                status=409)
-        operations.checkpoint()
+        ui_state = snapshots.validate_ui_state(body.get("ui") if isinstance(body, dict) else None)
+        result = await _prepare_snapshot(request.app, ui_state)
         operations.commit()
         token = snapshots.register_export(result, str(request["user"]))
-        loop.call_later(snapshots.EXPORT_TTL, snapshots.expire_export, token)
+        asyncio.get_running_loop().call_later(snapshots.EXPORT_TTL, snapshots.expire_export, token)
         return web.json_response({
             "ok": True, "download": "/api/snapshot/download/" + token,
             "filename": result["filename"], "size": result["size"],
@@ -1494,6 +1504,8 @@ async def h_snapshot_export(request: web.Request):
         if result:
             snapshots.discard_export(result)
         raise
+    except snapshots.SnapshotBusy as exc:
+        return web.json_response({"error": str(exc)}, status=409)
     except (snapshots.SnapshotError, ValueError) as exc:
         if result:
             snapshots.discard_export(result)
@@ -1503,11 +1515,6 @@ async def h_snapshot_export(request: web.Request):
             snapshots.discard_export(result)
         log.exception("snapshot export failed")
         return web.json_response({"error": "backup failed: {}".format(exc)}, status=500)
-    finally:
-        request.app["puppy_snapshot_busy"] = None
-        workspace_links.resume_after_snapshot()
-        notify.resume_after_snapshot()
-        state_stream.wake()
 
 
 async def h_snapshot_download(request: web.Request):
@@ -2287,6 +2294,7 @@ def build_app(runtime_web: dict = None,
     r.add_post("/api/snapshot/export", h_snapshot_export)
     r.add_get("/api/snapshot/download/{token:[A-Za-z0-9_-]+}", h_snapshot_download)
     r.add_post("/api/snapshot/import", h_snapshot_import)
+    backup_schedule.register(app, lambda app, ui: _prepare_snapshot(app, ui, saved=True), _snapshot_conflict)
     register_execution_api(app, include_terminal=True)
 
     async def on_shutdown(app):

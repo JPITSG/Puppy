@@ -50,6 +50,10 @@ class SnapshotError(RuntimeError):
     pass
 
 
+class SnapshotBusy(SnapshotError):
+    """A consistent snapshot must wait for existing work to finish."""
+
+
 def storage_usage() -> dict:
     """Approximate live file bytes in the backup scope, without making an archive.
 
@@ -379,6 +383,8 @@ def create_archive(ui_state: dict) -> dict:
         source_budget = {"members": 0, "bytes": 0}
 
         db.backup_to(str(stage / "puppy.db"), progress=operations.checkpoint)
+        from puppy import backup_schedule
+        backup_schedule.prepare_snapshot(stage / "puppy.db")
         _validate_database(stage / "puppy.db")
         cfg = config.export_data()
         (stage / "config.json").write_text(
@@ -735,6 +741,11 @@ def _validate_database(path: Path):
         except ValueError as exc:
             raise SnapshotError(
                 "snapshot database contains an invalid token usage ledger") from exc
+        from puppy import backup_schedule
+        try:
+            backup_schedule.validate_persisted(connection)
+        except ValueError as exc:
+            raise SnapshotError("snapshot database contains an invalid backup schedule") from exc
         orphan = connection.execute(
             "SELECT 1 FROM events e LEFT JOIN sessions s ON s.id=e.session_id "
             "WHERE s.id IS NULL LIMIT 1").fetchone()

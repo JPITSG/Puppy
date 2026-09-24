@@ -765,6 +765,18 @@ with a window of history around it.
   extracted, 1 GiB per file and 50,000 archive entries. Restore requires the
   current database, configuration and archive shapes; older shapes are refused
   without automatic migration.
+  The same card can save compressed backups on the instance's machine, daily
+  at a chosen local time or with **Run now**, even when scheduling is off.
+  Set an absolute destination directory and 1–100 retained copies; the switch,
+  time, path and count take effect with **Save**. Scheduling starts off, at
+  03:00 with 7 copies in the data directory's `backups/` folder. Busy work makes
+  a backup wait for idle time; a missed daily run is coalesced into one attempt.
+  Rotation removes only this feature's older copies after a successful backup.
+  A short history shows outcomes and repeatable **Download** links for saved
+  copies. Scheduled backups and Run now include server-side data without
+  browser-local tabs or drafts. The schedule and history are backed up; saved
+  archives themselves are excluded. Backups are not encrypted.
+  See [Backup and restore](docs/backups.md) for scheduling, retention and coverage.
   The card measures approximate uncompressed file storage for this instance's
   backup-covered data when Settings opens, including the database's live sidecars.
   It excludes remote data, ordinary projects, caches, logs, exported archives,
@@ -984,6 +996,8 @@ node tests/host_panel_ui_test.js     # the host box: charts, latency rows, proce
 python3 tests/host_metrics_test.py   # CPU history, the process tree and backend latency
 python3 tests/backend_test.py        # headless package, auth, protocol, capabilities
 python3 tests/snapshot_test.py       # backup export/import and rollback
+python3 tests/backup_schedule_test.py # daily backups, rotation, downloads and recovery
+node tests/backup_schedule_ui_test.js # backup settings, status polling and edits
 python3 tests/search_test.py         # the search index and query language
 node tests/search_ui_test.js         # the Search tab's results, Show all pages and their cancellation
 python3 tests/spawn_test.py          # spawned agents against a stub engine

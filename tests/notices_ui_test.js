@@ -94,7 +94,7 @@ function consoleFor(options = {}) {
     },
   });
   vm.runInContext([
-    between("function serverClockOptions(", "/* Unattended-update schedules"),
+    between("function serverClockOptions(", "function fmtClockSetting("),
     between("/* One stamp for \"when\"", "function fmtTokens("),
     between("/* The clear in the notification box's pill", "/* Same reason as the close cross above"),
     between("function acceptStateSnapshot(", "/* Every prompt box on that node"),

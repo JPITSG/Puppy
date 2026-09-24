@@ -433,11 +433,12 @@ function engineCatalog(fast = false) {
      every choice without pretending that an unanswered request was handled. */
   const approval = Object.create(SessionView.prototype), sent = [];
   Object.assign(approval, { tab: { bid: 0, sid: 1 }, root: mount(el("div")),
-    approvalEl: mount(el("div", "approval hidden")), reconnecting: false,
+    approvalEl: mount(el("div", "approval hidden")), queueEl: el("div"), reconnecting: false,
     scrollBottom() {}, renderStatus() {}, updateSteerControl() {},
     setBackgroundTasks(value) { assert.equal(value, null); },
     ws: { readyState: 1, send: text => sent.push(JSON.parse(text)) },
   });
+  approval.root.appendChild(approval.queueEl);
   const req = { request_id: "permission-1", tool_name: "Read", input: { file_path: "/demo/notes.txt" },
     suggestions: [{ type: "setMode", mode: "safe" }, { type: "allowAlways", label: "Always allow" }] };
   const choices = () => approval.approvalEl.querySelectorAll(".ap-btns button");
