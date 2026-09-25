@@ -5310,28 +5310,76 @@ function canMoveScratch(bid, session) {
     (!bid || backendHasCapability(state.backends.find(b => b.id === bid), "workspace-move"));
 }
 
+/* An ordinary project folder moves with every session working in it; a task
+   copy or a linked session's mirror is never the project itself. */
+function canMoveProject(bid, session) {
+  return !!session && session.workspace_kind === "directory" && !session.task &&
+    !sessionWorkspace(session) &&
+    (!bid || backendHasCapability(state.backends.find(b => b.id === bid), "project-move"));
+}
+
+/* The other sessions a project folder takes with it: every ordinary one on
+   that backend working in the folder or below it, archived ones too. The
+   node decides with real paths when it moves; this names them beforehand. */
+function projectMoveFollowers(bid, session) {
+  const root = String(session.cwd || "").replace(/\/+$/, "");
+  if (!root) return [];
+  return sessionsFor(bid).filter(s => s.id !== session.id && s.workspace_kind === "directory" &&
+    !s.task && !sessionWorkspace(s) && (s.cwd === root || String(s.cwd || "").startsWith(root + "/")));
+}
+
+function projectMoveNote(others) {
+  const names = others.map(s => s.name || `Session ${s.id}`);
+  const shown = names.length > 3 ? [...names.slice(0, 2), `${names.length - 2} more`] : names;
+  const list = shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}` :
+    shown[0];
+  const one = others.length === 1;
+  return (list ? `${list} ${one ? "works" : "work"} in this folder too and ${one ? "moves" : "move"} ` +
+    "with it. Every conversation stays" : "The conversation stays") +
+    " and starts fresh engine context with a transcript handoff on its next turn. " +
+    "Reopen terminals after moving.";
+}
+
 function modalMoveWorkspace(bid, session) {
-  const { m, close } = modal(`<h2>Move to directory</h2>
-    <p class="modal-copy">Move this scratch project's files to a permanent directory on ${esc(backendName(bid))}.</p>
+  const scratch = isScratchWorkspace(session);
+  const others = scratch ? [] : projectMoveFollowers(bid, session);
+  const { m, close } = modal(`<h2>${scratch ? "Move to directory" : "Move project"}</h2>
+    ${scratch ? "" : modalSubjectHtml(session.cwd)}
+    <p class="modal-copy">${scratch ?
+      `Move this scratch project's files to a permanent directory on ${esc(backendName(bid))}.` :
+      `Move this project's folder to a new directory on ${esc(backendName(bid))}.`}</p>
     <form>
       <label>Destination directory<input id="move-cwd" type="text" spellcheck="false"
         placeholder="/path/to/project" required></label>
       <div class="dirpick hidden"></div>
+      ${scratch ? "" : `<p class="hint move-note">${esc(projectMoveNote(others))}</p>`}
       <p class="form-error hidden" role="alert"></p>
       <div class="m-btns"><button type="button" class="btn" id="move-cancel">Cancel</button>
         <button type="submit" class="btn btn-pri" id="move-go">Move project</button></div>
     </form>`, "", () => navigationSessionDialog(bid, session.id, modalMoveWorkspace));
   const form = m.querySelector("form"), input = m.querySelector("#move-cwd");
   const error = m.querySelector(".form-error"), go = m.querySelector("#move-go");
+  const from = String(session.cwd || "");
   form.noValidate = true;
   let busy = false;
+  if (!scratch) {
+    /* The path to edit, whole and selected, with the folder list closed until
+       the path changes: it would only list the project's own folders. */
+    input.value = from;
+    input.focus();
+    input.select();
+  }
   wireDirectoryPicker(input, m.querySelector(".dirpick"), () => bid);
   m.querySelector("#move-cancel").onclick = close;
   form.onsubmit = async event => {
     event.preventDefault();
     if (busy) return;
-    if (!input.value.trim()) {
-      error.textContent = "Choose a destination directory";
+    const destination = input.value.trim();
+    const problem = !destination ? "Choose a destination directory" :
+      !scratch && destination.replace(/\/+$/, "") === from.replace(/\/+$/, "") ?
+        "Choose a different directory" : "";
+    if (problem) {
+      error.textContent = problem;
       error.classList.remove("hidden");
       input.focus();
       return;
@@ -5343,14 +5391,20 @@ function modalMoveWorkspace(bid, session) {
     go.textContent = "Moving…";
     try {
       const result = await api(bid, `sessions/${session.id}/workspace/move`, {
-        method: "POST", body: { destination: input.value.trim() },
-        operation: "Moving scratch workspace", cancelClose: close, timeoutMs: 180000,
+        method: "POST", body: scratch ? { destination } : { destination, expected_cwd: from },
+        operation: scratch ? "Moving scratch workspace" : "Moving project", cancelClose: close,
+        timeoutMs: scratch ? 180000 : 1800000,
       });
       const view = sessionViewFor(bid, session.id);
       if (view) { view.session = result.session; view.updateHead(); }
       refreshGroup(bid);
       close();
-      toast(`${backendName(bid)}: Project moved to ${result.session.cwd}`, "ok");
+      const moved = Array.isArray(result.moved) ? result.moved.length - 1 : 0;
+      const also = moved > 0 ? ` · ${moved} other session${moved === 1 ? "" : "s"} moved with it` : "";
+      if (result.retained)
+        toast(`${backendName(bid)}: Project moved to ${result.session.cwd}${also} · the original ` +
+          `folder could not be removed completely · remove ${result.retained} by hand`, "warn", TOAST_LONG);
+      else toast(`${backendName(bid)}: Project moved to ${result.session.cwd}${also}`, "ok");
     } catch (failure) {
       if (failure.cancelled) return;
       error.textContent = failure.message;
@@ -5362,7 +5416,7 @@ function modalMoveWorkspace(bid, session) {
       go.textContent = "Move project";
     }
   };
-  input.focus();
+  if (scratch) input.focus();
 }
 
 /* Independent workspace roles: host linked sessions (mirror) and/or share
@@ -7010,6 +7064,8 @@ function sessionContextMenu(ev, bid, s) {
   });
   if (canMoveScratch(bid, s))
     add("Move to directory", () => modalMoveWorkspace(bid, s));
+  if (canMoveProject(bid, s))
+    add("Move project", () => modalMoveWorkspace(bid, s));
   if (isScratchWorkspace(s)) add(s.workspace_missing ? "Recreate scratch workspace" :
     "Reset scratch workspace", async () => {
     const ok = await modalConfirm(
@@ -19753,6 +19809,8 @@ class SessionView {
       add("Copy native session id", () => copyWithToast(this.session.native_session_id));
     if (canMoveScratch(this.tab.bid, this.session))
       add("Move to directory", () => modalMoveWorkspace(this.tab.bid, this.session));
+    if (canMoveProject(this.tab.bid, this.session))
+      add("Move project", () => modalMoveWorkspace(this.tab.bid, this.session));
     if (isScratchWorkspace(this.session) && !this.session.task)
       add(this.session.workspace_missing ? "Recreate scratch workspace" :
         "Reset scratch workspace", () => this.resetWorkspace());

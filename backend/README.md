@@ -39,6 +39,25 @@ on the next turn, and `session_meta` plus session-list updates publish the new
 path. Moves share task-operation guards and shutdown draining. Permanent
 project files are outside snapshot coverage and survive session deletion.
 
+Nodes advertising `project-move` accept the same route for an ordinary
+directory session, optionally adding `"expected_cwd"`: the folder the request
+was made about, so a folder that has moved since is refused rather than moved
+again. The destination rules are the same. The folder is renamed on one
+filesystem; otherwise it is copied into the reserved destination (owners when
+running as root, modes, times, extended attributes, hard links within the
+tree, symlinks verbatim, FIFOs and sockets recreated), flushed to disk, and its
+original removed once the database names the copy. Cancel stops a copy before
+that commit. Every directory session on the node whose working directory is
+the folder or inside it, archived ones included, follows in one transaction:
+its path is rewritten, its native context cleared and a `workspace_move` info
+event recorded. The response adds `moved` (those session ids) and `retained`
+(the original's path when it could not be removed completely, else empty).
+Sessions in the folder must not be running or have queued work; held work
+stays held. Folders shared through a workspace lease, mount points and folders
+containing one, top-level system folders, and folders holding Puppy's data or
+program, its Python or the account's home folder are refused with 409. Git
+worktrees whose recorded paths named the old place are repaired best-effort.
+
 Nodes advertising `session-task-refresh` accept
 `POST /api/sessions/{sid}/tasks/{tid}/refresh` with `{}`. An unchanged, idle task
 is refreshed from its Main session's current local working files using the same

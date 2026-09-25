@@ -1988,27 +1988,68 @@ async def session_mention_checks(instance):
 
 
 async def workspace_move_checks(instance, capture=False):
-    await evaluate(instance, "modalMoveWorkspace(0, {id: 999, name: 'Harbor sketch', workspace_kind: 'temporary'}); true")
-    try:
-        for width, height, name in [(1440, 900, 'desktop'), (390, 844, 'phone'), (320, 640, 'narrow')]:
-            await instance.call('Emulation.setDeviceMetricsOverride', {
-                'width': width, 'height': height, 'deviceScaleFactor': 2 if width < 900 else 1,
-                'mobile': width < 900}, session=instance.page_session)
-            for theme in ('dark', 'light'):
-                await evaluate(instance, "applyTheme(%s); document.querySelector('#move-cwd').value='/home/mira/projects/harbor'; document.querySelector('#move-cwd').blur(); true" % json.dumps(theme))
-                await asyncio.sleep(.2)
+    dialogs = [("scratch", "modalMoveWorkspace(0, {id: 999, name: 'Harbor sketch', workspace_kind: 'temporary'}); true",
+                "/home/mira/projects/harbor"),
+               ("project", "modalMoveWorkspace(0, {...findSessionMeta(0, 1), cwd: '/home/mira/projects/' + "
+                           "'harbor-dashboard-with-a-long-folder-name/web/client'}); true",
+                "/home/mira/archive/harbor-dashboard-with-a-long-folder-name")]
+    for kind, opener, destination in dialogs:
+        await evaluate(instance, opener)
+        try:
+            for width, height, name in [(1440, 900, 'desktop'), (390, 844, 'phone'), (320, 640, 'narrow')]:
+                await instance.call('Emulation.setDeviceMetricsOverride', {
+                    'width': width, 'height': height, 'deviceScaleFactor': 2 if width < 900 else 1,
+                    'mobile': width < 900}, session=instance.page_session)
+                for theme in ('dark', 'light'):
+                    await evaluate(instance, "applyTheme(%s); document.querySelector('#move-cwd').value=%s; "
+                                   "document.querySelector('#move-cwd').blur(); true" % (
+                                       json.dumps(theme), json.dumps(destination)))
+                    await asyncio.sleep(.2)
+                    assert await evaluate(instance, """(() => {
+                        const m=document.querySelector('.modal'), go=m.querySelector('#move-go');
+                        const r=m.getBoundingClientRect(), b=go.getBoundingClientRect();
+                        const subject=m.querySelector('.modal-subject');
+                        const s=subject ? subject.getBoundingClientRect() : r;
+                        return m.scrollWidth<=m.clientWidth && r.left>=0 && r.right<=innerWidth &&
+                            b.left>=r.left && b.right<=r.right && go.form!==null &&
+                            s.left>=r.left && s.right<=r.right;
+                    })()"""), (kind, width, theme)
+                    if capture:
+                        shot=await instance.call('Page.captureScreenshot', {'format':'png'}, session=instance.page_session)
+                        (BASE/'data'/('workspace-move-'+kind+'-'+name+'-'+theme+'.png')).write_bytes(base64.b64decode(shot['data']))
+            if kind == "project":
+                # The path to edit arrives whole and selected, the list closed.
+                await instance.call('Emulation.setDeviceMetricsOverride', {
+                    'width': 1440, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False},
+                    session=instance.page_session)
+                await evaluate(instance, "document.querySelector('#move-cancel').click(); "
+                               "modalMoveWorkspace(0, findSessionMeta(0, 1)); true")
                 assert await evaluate(instance, """(() => {
-                    const m=document.querySelector('.modal'), go=m.querySelector('#move-go');
-                    const r=m.getBoundingClientRect(), b=go.getBoundingClientRect();
-                    return m.scrollWidth<=m.clientWidth && r.left>=0 && r.right<=innerWidth &&
-                        b.left>=r.left && b.right<=r.right && go.form!==null;
-                })()"""), (width, theme)
-                if capture:
-                    shot=await instance.call('Page.captureScreenshot', {'format':'png'}, session=instance.page_session)
-                    (BASE/'data'/('workspace-move-'+name+'-'+theme+'.png')).write_bytes(base64.b64decode(shot['data']))
-    finally:
-        await evaluate(instance, "document.querySelector('#move-cancel').click(); applyTheme('dark'); true")
-    print('PASS: scratch move dialog fits desktop and phones in both themes', flush=True)
+                    const input=document.querySelector('#move-cwd'), list=document.querySelector('.modal .dirpick');
+                    return document.activeElement===input && input.value===findSessionMeta(0, 1).cwd &&
+                        input.selectionStart===0 && input.selectionEnd===input.value.length &&
+                        list.classList.contains('hidden') &&
+                        /work in this folder too|works in this folder too|The conversation stays/
+                            .test(document.querySelector('.move-note').textContent);
+                })()""")
+                # A note under an open folder list keeps the gap it keeps under its field.
+                closed_gap = await evaluate(instance, """(() => {
+                    const input=document.querySelector('#move-cwd'), note=document.querySelector('.move-note');
+                    return note.getBoundingClientRect().top - input.getBoundingClientRect().bottom;
+                })()""")
+                await evaluate(instance, "const i=document.querySelector('#move-cwd'); i.value='/'; "
+                               "i.dispatchEvent(new Event('input')); true")
+                await until(instance, "!document.querySelector('.modal .dirpick').classList.contains('hidden') && "
+                                      "document.querySelectorAll('.modal .dirpick button').length > 1")
+                open_gap = await evaluate(instance, """(() => {
+                    const list=document.querySelector('.modal .dirpick'), note=document.querySelector('.move-note');
+                    return note.getBoundingClientRect().top - list.getBoundingClientRect().bottom;
+                })()""")
+                assert 5.5 <= open_gap <= 6.5 and abs(open_gap - closed_gap) < 1.5, (open_gap, closed_gap)
+        finally:
+            await evaluate(instance, "document.querySelector('#move-cancel').click(); applyTheme('dark'); true")
+    print('PASS: scratch and project move dialogs fit desktop and phones in both themes; the project path '
+          'arrives selected and a note keeps its gap under an open folder list', flush=True)
 
 
 async def message_reuse_checks(instance):

@@ -207,6 +207,7 @@ class FakeElement {
   blur() { if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = null; }
   click() { if (!this.disabled) this.dispatchEvent(new FakeEvent("click", { bubbles: true })); }
   setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
+  select() { this.selectionStart = 0; this.selectionEnd = String(this.value).length; }
   matches(selector) { return selector.split(",").some(part => matchesSelector(this, part)); }
   closest(selector) {
     for (let node = this; node instanceof FakeElement; node = node.parentNode)

@@ -13,6 +13,7 @@ workspace ownership, and both execution runtimes. The following gaps are fixed.
 | Task review/apply | Cancel Git diff, apply-check and conflict-snapshot preparation; preserve Main | File apply, review-baseline update or dispatch of conflict resolution |
 | Task removal/folding | Cancel Git inspection and transcript condensation | Appending the archive and deleting the task |
 | Move scratch project | Cancel copying; remove the unused destination, retain the original and its session path | Session path commit; source reclamation then finishes |
+| Move project | Cancel a cross-filesystem copy; remove the unused destination, keep the original and every session's path | The rename, or the session paths' commit after a copy; removing the original then finishes |
 | Backup export | Cancel database copy, file staging, hashing and compression; discard staging | Issuing its one-use download; the browser's download controls own the transfer |
 | Backup import | Cancel upload, extraction, validation and scratch preparation | Detaching clients and replacing live state; commit/rollback completes |
 | Add/edit/test backend | Cancel network probes before storing the new connection | Saving the registration/connection; test observations are advisory |

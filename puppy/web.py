@@ -17,7 +17,7 @@ from aiohttp import WSMsgType, web
 from puppy import (__version__, agent_notes, auth, backends, backup_schedule, bind_verify, browser, compression,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
-                   spelling, token_usage,
+                   project_move, spelling, token_usage,
                    live_websockets, localization, protocol, runner, search, session_git, snapshots,
                    session_titles, spawn_exec,
                    state_stream, system_prompts, terminal, uploads, vnc,
@@ -962,13 +962,22 @@ async def h_session_workspace_move(request: web.Request):
         body = await request.json()
     except (ValueError, UnicodeError):
         return web.json_response({"error": "Expected a destination path"}, status=400)
-    if not isinstance(body, dict) or set(body) != {"destination"}:
+    # expected_cwd, optional: the folder the request was made about.
+    if not isinstance(body, dict) or not {"destination"} <= set(body) <= {"destination", "expected_cwd"} \
+            or not isinstance(body.get("expected_cwd", ""), str):
         return web.json_response({"error": "Expected a destination path"}, status=400)
     try:
-        updated = await workspaces.move_session(s["id"], body["destination"])
+        if workspaces.is_temporary(s):
+            if body.get("expected_cwd", s["cwd"]) != s["cwd"]:
+                raise workspaces.WorkspaceError("This scratch workspace has changed; open the move again")
+            updated = await workspaces.move_session(s["id"], body["destination"])
+            return web.json_response({"ok": True, "session": runner.session_payload(updated)})
+        # An ordinary project folder moves with every session working in it.
+        result = await project_move.move(s["id"], body["destination"], body.get("expected_cwd"))
     except (workspaces.WorkspaceError, session_tasks.TaskError, OSError, shutil.Error) as exc:
         return web.json_response({"error": str(exc)}, status=409)
-    return web.json_response({"ok": True, "session": runner.session_payload(updated)})
+    return web.json_response({"ok": True, "session": runner.session_payload(result["session"]),
+                              "moved": result["moved"], "retained": result["retained"]})
 
 
 async def h_session_message(request: web.Request):

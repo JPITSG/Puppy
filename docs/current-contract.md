@@ -136,10 +136,22 @@ person's text; the driver keys it by question text into the allow's
 without one is the plain allow. No persisted shape or capability changes.
 
 Scratch promotion is additive `workspace-move`: both execution runtimes serve
-`POST /api/sessions/{sid}/workspace/move` with exactly `{destination: string}`
-and return `{ok: true, session}`. See the [backend contract](../backend/README.md).
+`POST /api/sessions/{sid}/workspace/move` with `{destination: string}` and
+return `{ok: true, session}`. See the [backend contract](../backend/README.md).
 No persisted shape changes: the existing session changes from `temporary` to
 `directory`; the transcript records a `workspace_move` info event.
+
+Project moves are additive `project-move`: the same route takes an ordinary
+`directory` session and answers `{ok: true, session, moved, retained}`. On such
+nodes the body may add an `expected_cwd` string for either kind of session,
+naming the folder the request was made about; a folder that has moved since is
+refused with 409, and any other key is still a 400. `moved` holds the ids of
+every session that followed the folder, `retained` the original's path when a
+cross-filesystem copy could not remove it completely, otherwise empty. Every
+directory session on the node working in the folder or below it follows in one
+transaction with its native context cleared and a `workspace_move` info event.
+A console shows **Move project** only for nodes that advertise this; the scratch
+contract above is unchanged. No persisted shape changes.
 
 The sidebar's Git mark is additive `session-git`: every session payload carries
 `git` (`null` until the node has looked, then a `repo`/`checked_at` record, with

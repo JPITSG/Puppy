@@ -2985,6 +2985,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 @media (hover:hover){.dirpick button:not(:disabled):hover{background:var(--hov);color:var(--txt)}}
 .dirpick button:active{background:var(--hov);filter:brightness(.95)}
 .hint{margin-top:-4px;margin-bottom:10px}
+/* An open folder list has no margin of its own to pull back into: a note
+   under it keeps the 6px a note keeps under its field. */
+.dirpick:not(.hidden)+.hint{margin-top:6px}
 .new-session-mkdir{margin:8px 0}
 /* the generated-title choice under a creation dialog's Name field */
 .auto-title{margin:-2px 0 12px}

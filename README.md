@@ -145,6 +145,21 @@ reading anywhere further up is never pulled away from it.
   engine context with a transcript handoff. Reopen terminals after moving.
   Deleting the session then leaves the project files intact. Permanent project
   directories are outside Puppy's backup coverage.
+- **Move a project.** Choose **Move project** in the session menu to move a
+  session's folder to a new path on its backend. On one filesystem it is a
+  single rename; otherwise the files are copied - permissions, times, links and
+  Git data included, and owners when Puppy runs as root, with **Cancel** until
+  the copy is done - and the original is removed once the sessions point at the
+  copy. Every session on that backend working in the folder or below it,
+  archived ones too, moves with it; the dialog names them first. Each keeps its
+  conversation, and its next turn starts fresh engine context with a transcript
+  handoff. The destination must not exist, its parent must, and it must be
+  outside Puppy's data directory. Those sessions must be idle with nothing
+  queued; held prompts stay held and run in the new place. A folder shared with
+  a linked session on another backend, a mount point or a folder containing one,
+  a top-level system folder, and any folder holding Puppy itself, the Python it
+  runs on or its account's home folder are refused. Git worktrees linked to or
+  from the folder are repaired. Reopen terminals after moving.
 - **Model, effort and permissions per session.** Each engine's model catalog
   and per-model effort levels are discovered from the CLI itself, with a
   provisional fallback list until a catalog loads. Claude offers its aliases
@@ -794,7 +809,7 @@ with a window of history around it.
   and browser-local tabs and drafts; the compressed download size will differ.
 
 Long operations use a shared progress dialog with **Cancel** during preparation,
-including task review/apply, scratch moves, backend add/edit/test, engine refresh,
+including task review/apply, scratch and project moves, backend add/edit/test, engine refresh,
 listener verification and workspace sync. It appears only once the work has run
 for five seconds, so anything that answers sooner never interrupts. Saves, file
 applies, remote-session creation and backend upgrade handoffs finish safely once

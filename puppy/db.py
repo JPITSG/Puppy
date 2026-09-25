@@ -815,6 +815,25 @@ def touch_session(session_id: int, **fields) -> None:
         _notify_change(session_id)
 
 
+def relocate_sessions(paths: dict) -> None:
+    """Point sessions at their project's new folder in one transaction.
+
+    ``paths`` maps a session id to its new working directory. Engines key a
+    native conversation by the path it ran in, so each session starts fresh
+    native context there and its next turn is seeded with a handoff."""
+    now = time.time()
+    with _lock:
+        conn = connect()
+        try:
+            for session_id, cwd in paths.items():
+                conn.execute("UPDATE sessions SET cwd=?,native_session_id='',last_model='',"
+                             "updated_at=? WHERE id=?", (cwd, now, int(session_id)))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
 def add_event(session_id: int, kind: str, data: dict) -> dict:
     with _lock:
         conn = connect()

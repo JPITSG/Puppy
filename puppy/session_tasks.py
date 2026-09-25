@@ -508,15 +508,24 @@ def _idle_project(root, exclude=0):
             raise TaskError("Main or another session is using this project; try again when it is idle")
 
 
+def overlaps_busy(root):
+    """Whether an operation owns this folder, one inside it or one around it.
+
+    Nested repositories and a moving project folder share files, so exact
+    roots alone cannot keep an apply from writing into a folder mid-move."""
+    return any(_project_contains(busy, root) or _project_contains(root, busy)
+               for busy in _busy_roots)
+
+
 @asynccontextmanager
 async def workspace_operation(root):
-    """Own project files during task applies and scratch promotion."""
+    """Own project files during task applies and project or scratch moves."""
     # Different Main sessions can name the same repository. Serialize by its
     # real root as well as parent id, and check idleness AFTER waiting. Each
     # apply (or conflict snapshot) then sees all previously applied tasks.
     async with operations.lock(_project_locks.setdefault(root, asyncio.Lock())):
         _idle_project(root)
-        if root in _busy_roots:
+        if overlaps_busy(root):
             raise TaskError("The project is preparing or applying another task")
         _busy_roots.add(root)
         try:
@@ -1019,7 +1028,7 @@ async def create(parent_id, args):
             raise TaskError(str(exc))
         root = await operations.to_thread(_repo, parent)
         _idle_project(root)
-        if root in _busy_roots:
+        if overlaps_busy(root):
             raise TaskError("The project is preparing or applying another task")
         _busy_roots.add(root)
         path, sid = "", None

@@ -39,6 +39,7 @@ const context = vm.createContext({
   backendSupportsEngineDefaults: () => false, backendSupportsSessionPinning: () => false,
   backendSupportsTaskRefresh: () => false,
   appendSessionTasksToggle() {}, sessionWorkspace: () => null, canMoveScratch: () => false,
+  canMoveProject: () => false,
   titlePending: () => false, taskActivityTitle: () => "", promptStatusLabel: (text) => {
     const node = document.createElement("span"); node.textContent = text; return node;
   },

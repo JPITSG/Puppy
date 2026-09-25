@@ -13,6 +13,10 @@ SUPPORTED_BACKEND_PROTOCOLS = (API_PROTOCOL,)
 # The wire name describes the session-owned lifecycle, not OS-temp storage.
 TEMPORARY_WORKSPACE_CAPABILITY = "temporary-workspaces"
 WORKSPACE_MOVE_CAPABILITY = "workspace-move"
+# The same move route also takes an ordinary directory session: its project
+# folder moves (a rename, or a copy across filesystems) and every session on
+# the node working in that folder follows, keeping its transcript.
+PROJECT_MOVE_CAPABILITY = "project-move"
 USAGE_REFRESH_CAPABILITY = "engine-usage-refresh"
 MANUAL_USAGE_REFRESH_CAPABILITY = "engine-usage-refresh-manual"
 SHARED_USAGE_CAPABILITY = "account-quota-v1"
@@ -292,6 +296,7 @@ BASE_CAPABILITIES = (
     "engine-switch",
     TEMPORARY_WORKSPACE_CAPABILITY,
     WORKSPACE_MOVE_CAPABILITY,
+    PROJECT_MOVE_CAPABILITY,
     USAGE_REFRESH_CAPABILITY,
     MANUAL_USAGE_REFRESH_CAPABILITY,
     SHARED_USAGE_CAPABILITY,
