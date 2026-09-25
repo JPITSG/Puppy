@@ -72,7 +72,12 @@ Actions returned by parse_line() (consumed by the runner):
     {"a": "approval", "req": {...}}                  interactive permission request
     {"a": "approval_cancel", "request_id": "..."}
     {"a": "stdin", "data": {...}}                    continue a JSONL handshake
-    {"a": "rate_limit", "info": {...}}
+    {"a": "rate_limit", "info": {...}, "notice": {...} | None}
+                                                     raw quota sample plus a normalized
+                                                     display notice, or explicitly quiet
+    {"a": "notice", "notice": {text, tone, resets_at?}}
+                                                     readable vendor notice; broadcast
+                                                     with engine identity, never a result
     {"a": "result", "data": {...}}                   turn finished (also persisted)
     {"a": "background_tasks", "tasks": [...]}        live engine background tasks as
                                                      {id, type, description}; REPLACE

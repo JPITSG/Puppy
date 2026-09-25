@@ -715,6 +715,12 @@ with a window of history around it.
   the row it already occupies (*2 ×*, *3 ×*) and restarts its timer instead of
   stacking copies; anything naming a next step stays up longer. On touch, hold
   a notice to keep it or swipe it right to dismiss it.
+  Engine notices use readable messages: approaching a usage limit is distinct
+  from reaching it, with the reported percentage and local reset time when
+  available. Native warning text is preserved, retries remain activity updates,
+  and unfamiliar codes get a cautious description. Diagnostic JSON stays out
+  of notices. See [Engine messages](docs/engine-messages.md) for each engine's
+  coverage and compatibility behavior.
 - **Notification history.** Every notice shown is also kept by the instance,
   so a line that scrolled away can be read later from any browser. The tray in
   the footer, between the usage chart and *Sign out*, slides open a box under the
@@ -1005,6 +1011,8 @@ node tests/status_bar_ui_test.js     # the status bar: one session setting, foll
 node tests/tool_result_ui_test.js    # tool results folded into their call's card
 node tests/toast_ui_test.js          # notice grammar, tones, lives, folded repeats and their reports
 node tests/notices_ui_test.js        # the notification box: its slide, rows, live arrivals, its clear
+python3 tests/engine_messages_test.py # native notices, safe fallbacks, both runtimes' session sockets
+node tests/engine_messages_ui_test.js # readable notices, reset clocks, safe text and notification history
 python3 tests/notices_test.py        # the notification history record, routes and stream topic
 node tests/spellcheck_ui_test.js     # the bundled dictionary, its marks and autocorrect
 python3 tests/spelling_test.py       # the added words: the record, the learning rule, routes and stream topic

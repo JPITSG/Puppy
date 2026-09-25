@@ -41,6 +41,7 @@ import time
 
 from puppy import __version__, quota
 from puppy.drivers import base as driver_base
+from puppy.drivers import messages
 from puppy.drivers.base import Driver, ToolUnavailable, tool_name
 from puppy.user_paths import service_home
 
@@ -677,16 +678,85 @@ def _item_kind(item: dict) -> str:
     return re.sub(r"[^a-z]", "", str(item.get("type") or "").lower())
 
 
+_ERROR_MESSAGES = {
+    "contextWindowExceeded": "The conversation exceeds the model's context limit",
+    "sessionBudgetExceeded": "The session has reached its spending limit",
+    "usageLimitExceeded": "Your usage limit has been reached",
+    "rateLimitExceeded": "Requests are being rate limited",
+    "serverOverloaded": "The service is temporarily overloaded",
+    "internalServerError": "The service could not complete the request",
+    "unauthorized": "Authentication is required",
+    "badRequest": "The service could not accept the request",
+    "threadRollbackFailed": "Could not restore the earlier conversation",
+    "sandboxError": "Could not run the operation in the configured sandbox",
+    "httpConnectionFailed": "Could not connect to the service",
+    "responseStreamConnectionFailed": "Could not connect to the response stream",
+    "responseStreamDisconnected": "The response connection was interrupted",
+    "responseTooManyFailedAttempts": "Could not complete the request after retrying",
+    "activeTurnNotSteerable": "This operation cannot accept another message while running",
+    "cyberPolicy": "The request was blocked by a service policy",
+    "misalignmentPolicyViolation": "The request was blocked by a service policy",
+}
+_LIMIT_MESSAGES = {
+    "rate_limit_reached": "Usage limit reached",
+    "workspace_owner_credits_depleted": "Your workspace has run out of credits",
+    "workspace_member_credits_depleted": "Your workspace credit allowance has run out",
+    "workspace_owner_usage_limit_reached": "Your workspace usage limit has been reached",
+    "workspace_member_usage_limit_reached": "Your workspace usage allowance has been reached",
+}
+
+
+def _rate_notice(limits, ctx):
+    code = messages.text(limits.get("rateLimitReachedType"))
+    if not code:
+        # Rolling updates can omit metadata. Percentages or a past reset time
+        # do not establish a warning, a rejection, or a recovery.
+        return None
+    sentence = _LIMIT_MESSAGES.get(code)
+    if sentence is None:
+        messages.unknown("usage limit", code)
+        sentence = "Usage limit reported"
+    resets = []
+    if code == "rate_limit_reached":
+        for name in ("primary", "secondary"):
+            window = limits.get(name)
+            if not isinstance(window, dict):
+                continue
+            used = messages.number(window.get("usedPercent"), 100)
+            if used is None:
+                continue
+            reset = messages.number(window.get("resetsAt"), 1, 8640000000000)
+            resets.append(reset)
+            minutes = messages.number(window.get("windowDurationMins"), 1)
+            if minutes is not None:
+                span = ("{:g}-day".format(minutes / 1440) if minutes % 1440 == 0 else
+                        "{:g}-hour".format(minutes / 60) if minutes % 60 == 0 else
+                        "{:g}-minute".format(minutes))
+                sentence += " · {:g}% of {} allowance used".format(used, span)
+    # A reset is useful only when every reported exhausted window names one.
+    reset = max(resets) if resets and all(item is not None for item in resets) else None
+    return messages.once(ctx, messages.notice(sentence, "warn", reset),
+                         ("usage", limits.get("limitId"), code, tuple(resets)))
+
+
 def _error_text(value, fallback="Codex request failed") -> str:
     if isinstance(value, dict):
-        message = value.get("message") or value.get("additionalDetails")
-        if message:
-            return str(message)[:4000]
         data = value.get("data")
-        if isinstance(data, dict) and data.get("message"):
-            return str(data["message"])[:4000]
-    elif value:
-        return str(value)[:4000]
+        message = messages.first_text(value.get("message"),
+                                      data.get("message") if isinstance(data, dict) else None,
+                                      value.get("additionalDetails"))
+        if message:
+            return message
+        code = value.get("codexErrorInfo")
+        if isinstance(code, dict) and len(code) == 1:
+            code = next(iter(code))
+        code = messages.text(code)
+        if code in _ERROR_MESSAGES:
+            return _ERROR_MESSAGES[code]
+        if code:
+            messages.unknown("request error", code)
+    elif messages.text(value):
+        return messages.text(value)
     return fallback
 
 
@@ -1418,8 +1488,20 @@ class CodexDriver(Driver):
             if isinstance(limits, dict):
                 self._observe_quota(limits, ctx.get("quota_identity"))
                 _cache_live_quota(limits)
-                return [{"a": "rate_limit", "info": limits}]
+                return [{"a": "rate_limit", "info": limits, "notice": _rate_notice(limits, ctx)}]
             return []
+
+        if method in ("warning", "configWarning"):
+            if not self._active_params(params, ctx):
+                return []
+            if method == "warning":
+                text = messages.text(params.get("message")) or "The engine reported a warning"
+            else:
+                text = messages.text(params.get("summary")) or "The engine reported a configuration warning"
+                detail = messages.text(params.get("details"))
+                if detail:
+                    text += " · " + detail
+            return messages.actions(ctx, messages.notice(text))
 
         if method == "model/rerouted":
             if not self._active_params(params, ctx, require_turn=True):
@@ -1431,7 +1513,7 @@ class CodexDriver(Driver):
             if not self._active_params(params, ctx, require_turn=True):
                 return []
             text = _error_text(params.get("error"), "Codex turn error")
-            if params.get("willRetry"):
+            if params.get("willRetry") is True:
                 if self._starting(ctx):
                     return [{"a": "transient", "msg": {
                         "type": "status", "text": _STARTING_STATUS}}]
@@ -1467,8 +1549,8 @@ class CodexDriver(Driver):
                     "ok": True, "usage": dict(ctx.get("usage") or {}),
                     "engine_duration_ms": duration, "stop_reason": "completed",
                 }}]
-            error = _error_text(turn.get("error"),
-                                "Codex turn {}".format(status or "failed"))
+            error = _error_text(turn.get("error"), "Request interrupted" if status == "interrupted"
+                                else "Could not complete the request")
             result = {"a": "result", "data": {
                 **identity,
                 "ok": False, "error": error,

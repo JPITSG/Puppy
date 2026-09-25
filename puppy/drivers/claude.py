@@ -52,10 +52,112 @@ import re
 
 from puppy import questions, quota
 from puppy.drivers import base as driver_base
+from puppy.drivers import messages
 from puppy.drivers.base import Driver, ToolUnavailable, stringify_content
 from puppy.user_paths import service_home
 
 log = logging.getLogger("puppy.drivers")
+
+
+# Public SDKRateLimitInfo / SDKResultError codes. Unrecognized windows retain
+# the general meaning of status without guessing a model or a time window.
+_LIMIT_NAMES = {
+    "five_hour": "five-hour usage limit",
+    "seven_day": "weekly usage limit",
+    "seven_day_opus": "weekly Opus usage limit",
+    "seven_day_sonnet": "weekly Sonnet usage limit",
+    "overage": "extra usage limit",
+}
+_OVERAGE_REASONS = {
+    "overage_not_provisioned": "extra usage is not enabled",
+    "org_level_disabled": "extra usage is disabled by your organization",
+    "org_level_disabled_until": "extra usage is temporarily disabled by your organization",
+    "out_of_credits": "extra usage credits have run out",
+    "seat_tier_level_disabled": "extra usage is disabled for your seat",
+    "member_level_disabled": "extra usage is disabled for your account",
+    "seat_tier_zero_credit_limit": "your seat has no extra usage allowance",
+    "group_zero_credit_limit": "your group has no extra usage allowance",
+    "member_zero_credit_limit": "your account has no extra usage allowance",
+    "org_service_level_disabled": "extra usage is disabled for this service",
+    "no_limits_configured": "extra usage has no configured allowance",
+    "fetch_error": "extra usage availability could not be checked",
+    "unknown": "extra usage is unavailable",
+}
+_RESULT_ERRORS = {
+    "error_during_execution": "Could not complete the request",
+    "error_max_turns": "Stopped after reaching the turn limit",
+    "error_max_budget_usd": "Stopped after reaching the configured spending limit",
+    "error_max_structured_output_retries": "Could not produce the requested response format after retrying",
+}
+
+
+def _rate_notice(info, ctx):
+    status = messages.text(info.get("status"))
+    using_extra = info.get("isUsingOverage") is True or info.get("overageInUse") is True
+    if status == "allowed" and not using_extra:
+        return None
+    if not status:
+        return None
+    window = messages.text(info.get("rateLimitType"))
+    name = _LIMIT_NAMES.get(window, "usage limit")
+    if window and window not in _LIMIT_NAMES:
+        messages.unknown("usage window", window)
+    extra = messages.text(info.get("overageStatus"))
+    tone = "warn"
+    if status == "allowed_warning":
+        sentence = "Approaching your " + name
+    elif status == "rejected":
+        sentence = name[:1].upper() + name[1:] + " reached"
+        if not using_extra and extra not in ("allowed", "allowed_warning"):
+            tone = "bad"
+    elif status == "allowed" and using_extra:
+        sentence = "Using extra usage allowance"
+    else:
+        messages.unknown("usage status", status)
+        return messages.once(ctx, messages.notice(
+            messages.first_text(info.get("message"), info.get("text")) or
+            "Usage status changed", "info"),
+            ("usage", status, window))
+    used = messages.number(info.get("utilization"), 0, 1)
+    if used is not None and status in ("allowed_warning", "rejected"):
+        sentence += " · {:g}% used".format(round(used * 100, 1))
+    if using_extra and status != "allowed":
+        sentence += " · using extra usage allowance"
+    elif status == "rejected" and extra in ("allowed", "allowed_warning"):
+        sentence += " · extra usage is available"
+    elif status == "rejected" and extra == "rejected":
+        reason = messages.text(info.get("overageDisabledReason"))
+        sentence += " · " + _OVERAGE_REASONS.get(reason, "extra usage is unavailable")
+        if reason and reason not in _OVERAGE_REASONS:
+            messages.unknown("extra usage", reason)
+    # An "using extra usage" notice does not identify an exhausted window.
+    # Its included-allowance reset must not be presented as the extra one.
+    reset = info.get("resetsAt") if status != "allowed" else None
+    return messages.once(ctx, messages.notice(sentence, tone, reset),
+                         ("usage", status, window, reset, using_extra, extra,
+                          info.get("overageDisabledReason"), info.get("surpassedThreshold")))
+
+
+def _retry_status(ev):
+    parts = ["Retrying request"]
+    attempt = messages.number(ev.get("attempt"), 1)
+    maximum = messages.number(ev.get("max_retries"), 1)
+    if attempt is not None and maximum is not None and attempt <= maximum:
+        parts.append("attempt {:g} of {:g}".format(attempt, maximum))
+    delay = messages.number(ev.get("retry_delay_ms"), 0)
+    if delay is not None:
+        parts.append("next attempt in {:g}s".format(round(delay / 1000, 1)))
+    return " · ".join(parts)
+
+
+def _result_error(ev):
+    errors = ev.get("errors")
+    detail = "\n".join(filter(None, map(messages.text, errors))) if isinstance(errors, list) else ""
+    subtype = messages.text(ev.get("subtype"))
+    fallback = _RESULT_ERRORS.get(subtype)
+    if not fallback:
+        messages.unknown("result error", subtype)
+    return messages.first_text(ev.get("result"), detail, fallback) or "Could not complete the request"
 
 
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens",
@@ -823,10 +925,25 @@ class ClaudeDriver(Driver):
                     acts.append({"a": "model", "model": ev["model"]})
                 return acts
             if sub == "status":
-                status = ev.get("status") or ""
-                if status == "requesting":
-                    status = "Requesting"
+                code = messages.text(ev.get("status"))
+                status = {"requesting": "Requesting", "compacting": "Compacting context", "": ""}.get(code)
+                if status is None:
+                    messages.unknown("activity status", code)
+                    status = "Working…"
                 return [{"a": "transient", "msg": {"type": "status", "text": status}}]
+            if sub == "api_retry":
+                return [{"a": "transient", "msg": {"type": "status", "text": _retry_status(ev)}}]
+            if sub == "notification":
+                tone = {"error": "bad", "warning": "warn", "success": "ok"}.get(messages.text(ev.get("color")), "info")
+                return messages.actions(ctx, messages.notice(ev.get("text"), tone))
+            if sub == "informational":
+                text = messages.text(ev.get("content"))
+                if not text:
+                    return []
+                if ev.get("level") == "info":
+                    return [{"a": "event", "kind": "info", "data": {"subtype": "engine_info", "text": text}}]
+                tone = "warn" if ev.get("level") in ("warning", "suggestion") or ev.get("prevent_continuation") is True else "info"
+                return messages.actions(ctx, messages.notice(text, tone))
             if sub == "thinking_tokens":
                 return [{"a": "transient", "msg": {"type": "thinking_tokens",
                                                    "tokens": ev.get("estimated_tokens", 0)}}]
@@ -1045,7 +1162,9 @@ class ClaudeDriver(Driver):
                     self._quota_monitor().observe(self._quota_identity(),
                         ctx.get("quota_identity"), quota.weekly_sample(
                             week["utilization"] * 100, week.get("resetsAt")))
-            return [{"a": "rate_limit", "info": info}]
+            if not isinstance(info, dict):
+                return []
+            return [{"a": "rate_limit", "info": info, "notice": _rate_notice(info, ctx)}]
 
         if t == "result":
             usage = ev.get("usage") if isinstance(ev.get("usage"), dict) else {}
@@ -1087,7 +1206,7 @@ class ClaudeDriver(Driver):
                 "stop_reason": ev.get("stop_reason", ""),
                 "num_turns": ctx.get("folded_turns"),
                 "usage": dict(folded),
-                "error": (ev.get("result") or "")[:2000] if ev.get("is_error") else "",
+                "error": _result_error(ev)[:2000] if ev.get("is_error") else "",
             }
             model_usage = _model_usage(ev.get("modelUsage"))
             if model_usage:

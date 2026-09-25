@@ -83,6 +83,11 @@ still contain a value written before that release.
   additive `engine` field.
 - Durable completion records drive notifications. Browser-reported completion
   `/api/notify/fire` and its deduplication cache are removed.
+- Engine notices are additive session-socket messages: `engine_notice` carries
+  `{engine, notice:{text,tone,resets_at?}}`, while `rate_limit` keeps native
+  `info` and adds a readable `notice` or explicit null for a quiet sample.
+  There is no durable-shape change. Older nodes' raw statuses get a general
+  usage update in the console. See [Engine messages](engine-messages.md).
 - Session reordering requires both starting-order and pin-cohort compare tokens.
   `session-order-recency` adds durable `order_at` timestamps for merging the
   sidebar across backends below all pins, and an optional `expected_recency`

@@ -22,6 +22,7 @@ from urllib.parse import quote
 
 from puppy import __version__
 from puppy.drivers import base as driver_base
+from puppy.drivers import messages
 from puppy.drivers.base import Driver, clean_env
 from puppy.drivers.opencode_compact import NativeCompaction, serve_command
 from puppy.user_paths import service_home
@@ -114,16 +115,36 @@ def _notification(method: str, params: dict) -> dict:
 
 def _json_error(value) -> str:
     if not isinstance(value, dict):
-        return str(value or "OpenCode protocol error")
-    message = str(value.get("message") or "OpenCode protocol error")
-    data = value.get("data")
-    if data not in (None, "", {}):
-        try:
-            detail = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-        except Exception:
-            detail = str(data)
-        message += ": " + detail
-    return message[:2000]
+        return messages.text(value) or "Could not complete the request"
+    message = messages.text(value.get("message"))
+    if message:
+        return message[:2000]
+    # ACP / JSON-RPC error.data is explicitly diagnostic, not display text.
+    code = value.get("code")
+    fallback = {
+        -32700: "Could not read the engine's response",
+        -32600: "The engine could not accept the request",
+        -32601: "This engine does not support the requested operation",
+        -32602: "The engine could not accept the request settings",
+        -32603: "The engine could not complete the request",
+        -32800: "Request cancelled",
+        -32000: "Sign in to the model provider to continue",
+        -32002: "The requested resource could not be found",
+    }
+    return fallback.get(code, "Could not complete the request") if isinstance(code, int) else "Could not complete the request"
+
+
+def _stop_error(stop):
+    known = {
+        "cancelled": "Request cancelled", "canceled": "Request cancelled",
+        "refusal": "The model declined the request",
+        "error": "Could not complete the request",
+        "max_tokens": "Stopped after reaching the response length limit",
+        "max_turn_requests": "Stopped after reaching the limit on requests in one turn",
+    }
+    if stop not in known:
+        messages.unknown("stop reason", stop)
+    return known.get(stop, "The engine stopped without confirming completion")
 
 
 def _display_provider(value: str) -> str:
@@ -875,10 +896,8 @@ class OpenCodeDriver(Driver):
                 actions.extend(self._protocol_failure(_json_error(ev.get("error"))))
                 return actions
             result = ev.get("result") if isinstance(ev.get("result"), dict) else {}
-            stop = str(result.get("stopReason") or "end_turn")
-            ok = stop not in (
-                "refusal", "cancelled", "canceled", "error", "max_tokens",
-                "max_turn_requests")
+            stop = messages.text(result.get("stopReason"))
+            ok = stop == "end_turn"
             request_usage = self._usage(result.get("usage"))
             usage = _usage_delta(
                 ctx.get("usage_baseline"),
@@ -892,8 +911,7 @@ class OpenCodeDriver(Driver):
             data = {
                 "ok": ok, "stop_reason": stop,
                 "usage": usage, "usage_scope": usage_scope,
-                "error": "" if ok else
-                         "OpenCode stopped before completing: {}".format(stop),
+                "error": "" if ok else _stop_error(stop),
             }
             if ctx.get("context_used") is not None and ctx.get("context_window") and \
                     "output_tokens" in request_usage:

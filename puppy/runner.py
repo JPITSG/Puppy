@@ -3366,13 +3366,17 @@ class SessionHub:
                         self._handle_side_question_result(act)
                     elif a == "side_question_progress":
                         self._handle_side_question_progress(act)
+                    elif a == "notice":
+                        self.broadcast(self._scrub_value({"type": "engine_notice",
+                            "engine": session["engine"], "notice": act["notice"]}))
                     elif a == "rate_limit":
                         # stamped so consoles can say how fresh the figure is;
                         # additive beside the CLI's own camelCase keys
                         info = dict(act["info"] or {})
                         info["captured_at"] = time.time()
                         db.meta_set(f"rate_limit.{session['engine']}", info)
-                        self.broadcast({"type": "rate_limit", "engine": session["engine"], "info": info})
+                        self.broadcast(self._scrub_value({"type": "rate_limit", "engine": session["engine"],
+                            "info": info, "notice": act.get("notice")}))
                     elif a == "result":
                         self._turn_result_seen = True
                         if self.interrupted and act["data"].get("stop_reason") in \

@@ -306,6 +306,18 @@ messages the CLI emits in the model's place arrive as `error` events with
 subtype `engine_api_error` and the vendor's `code`, never as assistant text,
 and never count as a model change.
 
+## Readable engine notices
+
+Both runtimes normalize engine messages in their drivers. The session socket
+can emit `{type:"engine_notice", engine, notice:{text,tone,resets_at?}}`;
+`rate_limit` retains its native `info` and adds `notice` (null for quiet samples).
+The controller displays those through its existing toast/history surface, with
+reset times formatted locally. Missing figures and unfamiliar codes never
+become invented quota facts; diagnostic error JSON stays out of display text.
+This is additive within protocol 2 and changes no persisted shape. Older nodes
+still get a general readable usage update until upgraded. See
+[Engine messages](../docs/engine-messages.md) for coverage and upgrade checks.
+
 ## Engine background work
 
 Claude's `run_in_background` commands, Monitor waits and backgrounded agents

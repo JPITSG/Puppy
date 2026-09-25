@@ -8605,6 +8605,21 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden && hostPanel.open) pollHostPanel();
 });
 
+/* Engine adapters own protocol meanings; presentation owns local clock text.
+   Keep these notices on the existing toast/history path, including repeats. */
+function showEngineNotice(bid, key, notice) {
+  if (!notice || typeof notice.text !== "string" || !notice.text.trim()) return;
+  const engine = engineInfo(bid, key);
+  const label = (engine && engine.label) || "Engine";
+  let text = notice.text.slice(0, 4000).trim();
+  const reset = notice.resets_at;
+  if (typeof reset === "number" && Number.isFinite(reset) && reset > Date.now() / 1000) {
+    const stamp = fmtStamp(reset);
+    if (stamp) text += ` · resets ${stamp}`;
+  }
+  toast(`${label}: ${text}`, toastTone(notice.tone), TOAST_LONG);
+}
+
 /* ================= notifications ================= */
 /* The footer's tray opens this box under the engine stats: the last hundred
    notices shown by this console and every other one, newest first, exactly
@@ -17692,12 +17707,17 @@ class SessionView {
         break;
       }
       case "rate_limit": {
-        const engine = engineInfo(this.tab.bid, d.engine);
-        if (d.info && d.info.status && d.info.status !== "allowed")
-          toast(`${(engine && engine.label) || d.engine}: Rate limit ${d.info.status}`,
-            "warn");
+        if (Object.prototype.hasOwnProperty.call(d, "notice"))
+          showEngineNotice(this.tab.bid, d.engine, d.notice);
+        else if (d.info && typeof d.info.status === "string" && d.info.status && d.info.status !== "allowed")
+          /* Older nodes have no display adapter. Do not interpret their raw
+             engine codes here or imply that the task has stopped. */
+          showEngineNotice(this.tab.bid, d.engine, {text: "Usage status changed", tone: "info"});
         break;
       }
+      case "engine_notice":
+        showEngineNotice(this.tab.bid, d.engine, d.notice);
+        break;
       case "toast":
         /* Session sockets report command refusals as an uncorrelated
            toast. Keep the approval visible and permit a retry after one. */
