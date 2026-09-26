@@ -416,7 +416,9 @@ housekeeping. This indicator is currently available for Claude Code. Codex and
 OpenCode do not yet supply a reliable complete background-task list through
 Puppy's integrations, so they show no counter.
 
-Interruptions, background waits and engine-reported model notices use the same
+Compaction confirmations and project-move confirmations use the same left-aligned
+cards, with green headings and any token counts, paths and handoff details below.
+Interruptions, background waits and engine-reported model notices also use these
 cards. Headings are green for success, blue for active work or waiting, amber
 for interruptions, stops and model mismatches, red for failures, and neutral
 for ordinary model-change notices. Engine switches and requested model/effort

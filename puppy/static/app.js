@@ -18808,6 +18808,14 @@ class SessionView {
           return taskUpdateNode(changed ? "Engine model changed" : "Engine model notice",
             changed ? "" : "warn", changed ? text.replace(/^engine model changed: /i, "") : text, "model-update");
         }
+        if (d.subtype === "compact") {
+          const text = String(d.text || "");
+          return taskUpdateNode("Context compacted", "ok",
+            text === "Context compacted" ? "" : text.replace(/^Context compacted · /, ""), "compaction-update");
+        }
+        if (d.subtype === "workspace_move")
+          return taskUpdateNode("Project moved", "ok",
+            String(d.text || "").replace(/^Project moved from /, "From "), "workspace-move-update");
         const warned = d.subtype === "workspace_reset" || d.subtype === "engine_retry";
         const n = el("div", "info-line" + (warned ? " warn" : ""));
         n.textContent = d.text || d.subtype || "";

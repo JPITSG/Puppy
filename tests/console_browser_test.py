@@ -207,6 +207,9 @@ async def fixture():
                   "text": "Task changes applied: Activity feed headings", "files": "M\tsrc/dashboard.css"}),
         ("info", {"subtype": "interrupted", "text": "Turn interrupted by user"}),
         ("info", {"subtype": "model_switch", "text": "engine model changed: preview-standard → preview-extended"}),
+        ("info", {"subtype": "compact", "text": "Context compacted · 184,200 tokens before"}),
+        ("info", {"subtype": "workspace_move", "text": "Project moved from /home/mira/scratch/harbor to /home/mira/projects/harbor. The next turn starts fresh engine context with a transcript handoff."}),
+        ("info", {"subtype": "workspace_move", "text": "Project moved from /home/mira/projects/harbor to /home/mira/projects/harbor-dashboard. The next turn starts fresh engine context with a transcript handoff."}),
         ("assistant", {"text": "The dashboard now uses consistent spacing and clearer card headings. The activity feed stays visible on smaller screens.\n\nAll 12 layout tests passed, including the phone navigation checks."}),
         ("result", {"ok": True, "duration_ms": 12400, "usage": {"input_tokens": 8400, "output_tokens": 1250}}),
     ]
