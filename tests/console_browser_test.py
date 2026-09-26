@@ -5270,6 +5270,38 @@ async def notices_panel_checks(instance, capture=False):
             [("Harbor dashboard: Session renamed", 1)], stored
         assert stored[0]["id"] > last_id, (stored, last_id)
         await evaluate(instance, "document.getElementById('toasts').replaceChildren(); true")
+        # The header dismisses the same panel as the tray. Its native button
+        # supports the keyboard, and the count shares the pointer target;
+        # none of these actions clears a recorded notice.
+        for width, height, theme, target in [(1440, 900, "dark", ".notices-close"),
+                                            (390, 844, "light", ".notices-count")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width < 900}, session=instance.page_session)
+            await evaluate(instance, "applyTheme(%s); if(innerWidth<900) $('app').classList.add('side-open'); true" % json.dumps(theme))
+            await until(instance, "!document.getElementById('foot-notices').classList.contains('disclosure-animating')")
+            await asyncio.sleep(.3)  # drawer reveal finishes before the pointer lands
+            hit = await evaluate(instance, """(() => {const r=document.querySelector(%s).getBoundingClientRect();
+                return {x:r.x+r.width/2,y:r.y+r.height/2};})()""" % json.dumps("#foot-notices " + target))
+            for kind in ("mousePressed", "mouseReleased"):
+                await instance.call("Input.dispatchMouseEvent", dict(hit, type=kind, button="left", clickCount=1), session=instance.page_session)
+            await until(instance, "!noticesPanel.open && document.getElementById('foot-notices').hidden")
+            assert await evaluate(instance, "document.activeElement.id==='btn-notices' && state.notices.items.length===1")
+            await evaluate(instance, "openNoticesPanel(); true")
+        await evaluate(instance, "$('app').classList.remove('side-open'); applyTheme('dark'); true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        for key, code in [("Enter", 13), (" ", 32)]:
+            await until(instance, "!document.getElementById('foot-notices').classList.contains('disclosure-animating')")
+            await evaluate(instance, "document.querySelector('#foot-notices .notices-close').focus(); true")
+            for kind in ("keyDown", "keyUp"):
+                await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": key,
+                    "code": "Enter" if code == 13 else "Space",
+                    "text": ("\r" if code == 13 else " ") if kind == "keyDown" else "",
+                    "windowsVirtualKeyCode": code}, session=instance.page_session)
+            await until(instance, "!noticesPanel.open && document.getElementById('foot-notices').hidden")
+            assert await evaluate(instance, "document.activeElement.id==='btn-notices' && state.notices.items.length===1")
+            await evaluate(instance, "openNoticesPanel(); true")
         # Opening the host box takes the notification box's place under the
         # engine stats, and the tray closes its box the way it opened it.
         await evaluate(instance, "openHostPanel(); true")
@@ -5900,7 +5932,10 @@ async def navigation_checks(instance, url, sid, capture=False):
     await travel(-1, "!noticesPanel.open")
     await travel(1, "noticesPanel.open")
     assert await evaluate(instance, "document.getElementById('btn-notices').getAttribute('aria-expanded')==='true'")
-    await run("closeNoticesPanel()")
+    await run("document.querySelector('#foot-notices .notices-close').click()")
+    assert await evaluate(instance, "!noticesPanel.open && document.activeElement.id==='btn-notices'")
+    await travel(1, "noticesPanel.open")
+    await travel(-1, "!noticesPanel.open")
 
     await instance.call("Emulation.setDeviceMetricsOverride", {
         "width": 390, "height": 844, "deviceScaleFactor": 2, "mobile": True},
@@ -6118,6 +6153,9 @@ async def main(args):
             if args.model_substitute_only:
                 await model_substitute_checks(instances[0], args.screenshots)
                 return
+            if args.notices_only:
+                await notices_panel_checks(instances[0], args.screenshots)
+                return
             if args.tool_clock_only:
                 await tool_clock_checks(instances[0], args.screenshots)
                 return
@@ -6166,6 +6204,7 @@ if __name__ == "__main__":
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--navigation-only", action="store_true")
     parser.add_argument("--model-substitute-only", action="store_true")
+    parser.add_argument("--notices-only", action="store_true")
     parser.add_argument("--tool-clock-only", action="store_true")
     parser.add_argument("--task-refresh-only", action="store_true")
     parser.add_argument("--token-usage-only", action="store_true")

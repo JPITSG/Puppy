@@ -725,7 +725,8 @@ a{color:var(--acc2)}
   padding:9px 6px 0 0;margin:var(--disclosure-gap) -6px 0 0;
 }
 .foot-notices[hidden]{display:none}
-.notices-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);user-select:none}
+.notices-head{display:flex;align-items:center;gap:6px;min-width:0;color:var(--txt3);user-select:none;cursor:pointer}
+.notices-close{flex:1;min-width:0;border:0;padding:0;background:transparent;text-align:left;line-height:inherit;cursor:pointer}
 /* The head's count is a pill: the number on the left, the clear on the right,
    a hairline between them. It stands a pixel proud of the head's line on
    either side without moving it, the way the CPU reading does in the footer

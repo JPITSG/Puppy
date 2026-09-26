@@ -8834,7 +8834,15 @@ function renderNoticesPanel(problem = "") {
   let head = root.querySelector(".notices-head");
   if (!head) {
     head = el("div", "notices-head");
-    head.appendChild(el("span", "host-sec-title", "Notifications"));
+    const close = el("button", "host-sec-title notices-close", "Notifications");
+    close.type = "button";
+    close.setAttribute("aria-label", "Hide notifications");
+    head.appendChild(close);
+    head.onclick = event => {
+      if (event.target.closest(".notices-clear")) return;
+      $("btn-notices").focus();
+      closeNoticesPanel();
+    };
     const pill = el("span", "notices-pill");
     pill.appendChild(el("span", "notices-count"));
     const clear = el("button", "notices-clear");

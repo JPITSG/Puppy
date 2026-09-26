@@ -756,8 +756,9 @@ with a window of history around it.
   so a line that scrolled away can be read later from any browser. The tray in
   the footer, between the usage chart and *Sign out*, slides open a box under the
   engine stats listing the last 100 notifications newest first - each with its
-  outcome dot, its text and the time it last arrived - and slides shut again
-  like the host box, with which it shares that space. A notice repeating the
+  outcome dot, its text and the time it last arrived. Clicking the tray again
+  or the box's Notifications header hides it, keeping the history. It shares
+  that space with the host box. A notice repeating the
   newest entry counts up on it (*2 ×*) rather than adding a row, and the
   oldest entry falls away past 100. The count in the box's head is a pill with
   a clear beside it, enabled only while there is something to clear: one press

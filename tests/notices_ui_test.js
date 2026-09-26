@@ -156,8 +156,14 @@ async function openingAndReading() {
   assert.equal(app.state.stateStreamRevisions["0:notices"], read.state_revision,
     "the read is accepted as the stream revision it carries");
 
-  app.context.closeNoticesPanel();
+  const close = app.box.querySelector(".notices-close");
+  assert.equal(close.tagName, "BUTTON");
+  assert.equal(close.type, "button");
+  assert.equal(close.getAttribute("aria-label"), "Hide notifications");
+  close.focus();
+  close.click();
   assert.equal(app.panel.open, false);
+  assert.equal(app.document.activeElement, app.button, "closing returns focus to the tray");
   assert.equal(app.button.getAttribute("aria-expanded"), "false");
   assert.ok(!app.foot.classList.contains("notices-open"));
   assert.deepEqual(app.calls.slides.at(-1), { collapsed: true, animate: true });
@@ -171,7 +177,9 @@ async function openingAndReading() {
   await settle();
   assert.equal(app.calls.reads, 1);
   assert.equal(app.rows().length, 2);
-  app.context.closeNoticesPanel();
+  app.box.querySelector(".notices-count").click();
+  assert.equal(app.panel.open, false, "the count is part of the clickable header");
+  assert.equal(app.calls.clears, 0, "closing never clears history");
 
   // Without the stream, opening re-reads even though a list is on the page.
   app.state.stateStreamReady[0] = false;
@@ -326,6 +334,7 @@ async function clearing() {
   assert.equal(app.document.activeElement, app.clear());
   app.clear().click();
   assert.equal(app.calls.clears, 1);
+  assert.equal(app.panel.open, true, "the clear button does not close its header");
   assert.equal(app.panel.clearing, true);
   assert.equal(app.clear().disabled, true, "disabled while the clear is on its way");
   assert.equal(app.document.activeElement, app.button, "focus passed to the tray");
