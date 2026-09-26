@@ -88,6 +88,12 @@ still contain a value written before that release.
   `info` and adds a readable `notice` or explicit null for a quiet sample.
   There is no durable-shape change. Older nodes' raw statuses get a general
   usage update in the console. See [Engine messages](engine-messages.md).
+- Session payloads add `model_substitute`, either null or
+  `{requested, served, baseline, note}`, for another model serving the request.
+  This state is in memory and clears on backend restart; `model_switch` and
+  `model_substituted` info events remain in the transcript. No protocol,
+  database or snapshot shape changes are required. See
+  [Model substitutions](engine-messages.md#model-substitutions).
 - Session reordering requires both starting-order and pin-cohort compare tokens.
   `session-order-recency` adds durable `order_at` timestamps for merging the
   sidebar across backends below all pins, and an optional `expected_recency`

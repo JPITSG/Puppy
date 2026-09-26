@@ -20,6 +20,7 @@ from puppy import (agent_notes, browser_agent, config, db, handoff, notify, spaw
                    workspaces, session_tasks, session_titles, token_usage)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
+from puppy.drivers import messages as engine_messages
 from puppy.drivers.base import clean_env
 
 log = logging.getLogger("puppy.runner")
@@ -272,6 +273,53 @@ def parse_used_config(raw):
     return {"model": str(data.get("model") or ""), "effort": str(data.get("effort") or "")}
 
 
+class _TurnModels:
+    """Which models answered one prompt, against the model it asked for.
+
+    One per prompt - a retry of the same prompt keeps adding to it - so the
+    summary ahead of its result names every model that stood in, even when
+    the requested one came back before the end. ``baseline`` stands in for
+    the request when the engine's default was asked for: whatever this turn
+    reported first, since nothing else says what that default is."""
+
+    def __init__(self, requested: str = ""):
+        self.requested = requested
+        self.baseline = ""
+        self.current = ""        # the model standing in right now, if one is
+        self.note = ""           # the engine's own words for that switch
+        self.substitutes = []    # each model that stood in, in order
+        self.summarized = False
+        self.requested_seen = False  # the request served any part of this prompt
+
+
+def _model_names(models) -> str:
+    names = [str(model) for model in models if model]
+    return names[0] if len(names) == 1 else \
+        ", ".join(names[:-1]) + " and " + names[-1] if names else ""
+
+
+def _requested_phrase(requested: str, baseline: str = "") -> str:
+    if requested:
+        return "the requested " + requested
+    return "the engine's default" + (", " + baseline if baseline else " model")
+
+
+def _model_substitute(session: dict):
+    """The live stand-in state for a session payload, or None.
+
+    It belongs to the request and the served model it was recorded for, so
+    a request changed while idle (not tried yet), an engine switch or a
+    cleared last_model all read as nothing to say rather than a stale claim."""
+    h = _hubs.get(session.get("id"))
+    state = h._model_substitute if h else None
+    if not state or state["engine"] != (session.get("engine") or "") or \
+            state["requested"] != (session.get("model") or "").strip() or \
+            not state["served"] or state["served"] != (session.get("last_model") or ""):
+        return None
+    return {"requested": state["requested"], "served": state["served"],
+            "baseline": state["baseline"], "note": state["note"]}
+
+
 def _starts_fresh_native_session(session: dict, workspace_reset: bool, driver) -> bool:
     """Whether this turn must allocate a new engine-native conversation."""
     return not session.get("native_session_id") or \
@@ -318,6 +366,9 @@ def session_payload(session):
     out["tasks_digest"] = session_tasks.digest_enabled(session["id"])
     out["auto_title"] = session_titles.public(session_titles.record(session["id"]))
     out["fast_mode"] = bool(out.get("fast_mode"))
+    # Another model answering in place of the requested one, while it is the
+    # one last_model names (see SessionHub._note_effective_model).
+    out["model_substitute"] = _model_substitute(session)
     # Raw descriptor JSON becomes a structured object on the wire, while the
     # private mirror cwd never leaves the node.
     descriptor = workspace_sync.session_workspace(out)
@@ -845,6 +896,13 @@ class SessionHub:
         # whether this turn's divider already announced a model move, so the
         # engine reporting that same move is not repeated as if it surprised us
         self._model_move_announced = False
+        # The models answering the current prompt (_TurnModels), and the live
+        # stand-in state session payloads carry: {engine, requested, served,
+        # baseline, note} from the report that started it until one serves
+        # the request again. In memory only - after a restart the next
+        # turn's own reports say again which model is answering.
+        self._turn_models = None
+        self._model_substitute = None
         # The browser MCP subprocess is authorized for exactly this engine
         # turn. Each distinct browser it touches is announced once to the UI.
         self._active_turn_id = ""
@@ -1982,6 +2040,7 @@ class SessionHub:
             effort=fields.get("effort") or "", last_model="", used_config="",
             permission_mode=permission_mode,
             fast_mode=1 if fast_mode == "on" else 0)
+        self._model_substitute = None
         self.broadcast({"type": "session_meta",
                         "session": session_payload(db.get_session(self.id))})
         broadcast_sessions()
@@ -2833,58 +2892,141 @@ class SessionHub:
         if previous is not None and current["model"] != previous["model"]:
             # The previous effective model belongs to the segment the divider
             # just closed. Until this turn's engine reports its model there is
-            # no confirmed effective value for the new request.
+            # no confirmed effective value for the new request - nor anything
+            # standing in for it.
             session["last_model"] = ""
             update["last_model"] = ""
+            self._model_substitute = None
         db.touch_session(self.id, **update)
         self.broadcast({"type": "session_meta",
                         "session": session_payload(db.get_session(self.id))})
 
-    def _note_effective_model(self, session, driver, ctx, new_model: str) -> None:
+    def _note_effective_model(self, session, driver, ctx, new_model: str,
+                              note: str = "") -> None:
         """Record an engine model report and surface only semantic moves.
 
         Requested aliases and effective ids belong to the driver protocol.
         The runner keeps their raw values for audit/display, but delegates
         equivalence so it never learns vendor families, versions or modifiers.
+
+        A reported model that does not serve this turn's request stands in
+        for it: the engine said it switched (``note``, in its own words), or
+        the model is not the one asked for - for the engine's default, not
+        the one this turn reported first. Each stand-in that starts, and the
+        requested model coming back within the turn, is a transcript card;
+        while one answers, session payloads carry model_substitute; and the
+        prompt's result is preceded by a summary (_note_turn_models). The
+        requested model returning at a later turn's start is expected - a
+        fallback lasts one turn - and passes quietly.
         """
         new_model = str(new_model or "")
         if not new_model:
             return
-        old_model = session.get("last_model") or ""
+        note = str(note or "")
         requested = (session.get("model") or "").strip()
-        mismatch = bool(requested) and not driver.model_request_matches(
-            requested, new_model, ctx)
+        turn = self._turn_models
+        if turn is None:
+            turn = self._turn_models = _TurnModels(requested)
+        if requested:
+            serves = driver.model_request_matches(requested, new_model, ctx)
+        else:
+            if not turn.baseline and not note:
+                turn.baseline = new_model
+            serves = bool(turn.baseline) and driver.models_equivalent(
+                turn.baseline, new_model, ctx)
+        standing_in = bool(note) or not serves
+        if not standing_in:
+            turn.requested_seen = True
+        old_model = session.get("last_model") or ""
         model_changed = bool(old_model) and not driver.models_equivalent(
             old_model, new_model, ctx)
         first_report = not old_model
-        if not (first_report or model_changed or mismatch):
-            return
-
         # This turn's own divider already announced a requested move, so only
         # an unasked-for effective move is worth another transcript line.
-        announced = self._model_move_announced and not mismatch
+        announced = self._model_move_announced
         self._model_move_announced = False
-        if not announced:
-            if mismatch:
+        previous = turn.current
+        moved = False
+        engine = session.get("engine") or ""
+        if standing_in:
+            if not previous or not driver.models_equivalent(previous, new_model, ctx):
+                moved = True
+                turn.note = note
                 self._emit("info", {
-                    "subtype": "model_switch",
-                    "text": "requested model '{}' but engine is serving {}".format(
-                        requested, new_model),
-                })
-            elif model_changed:
-                self._emit("info", {
-                    "subtype": "model_switch",
-                    "text": "engine model changed: {} → {}".format(
-                        old_model, new_model),
-                })
+                    "subtype": "model_switch", "state": "substituted",
+                    "engine": engine, "requested": requested,
+                    "baseline": turn.baseline if not requested else "",
+                    "served": new_model, "note": note,
+                    "text": note or "{} is answering instead of {}".format(
+                        new_model, _requested_phrase(requested, turn.baseline))})
+            elif note:
+                turn.note = note
+            if not any(driver.models_equivalent(model, new_model, ctx)
+                       for model in turn.substitutes):
+                turn.substitutes.append(new_model)
+            turn.current = new_model
+        elif previous:
+            moved = True
+            turn.current = ""
+            turn.note = ""
+            self._emit("info", {
+                "subtype": "model_switch", "state": "resumed",
+                "engine": engine, "requested": requested, "served": new_model,
+                "text": "{} is answering again".format(new_model)})
+        elif model_changed and not announced and self._model_substitute is None:
+            self._emit("info", {
+                "subtype": "model_switch", "state": "changed", "engine": engine,
+                "from_model": old_model, "to_model": new_model,
+                "text": "engine model changed: {} → {}".format(old_model, new_model),
+            })
 
         # Equivalent protocol spellings do not churn last_model or its
         # session_meta broadcast. The first report and a real move remain raw.
         if first_report or model_changed:
             session["last_model"] = new_model
             db.touch_session(self.id, last_model=new_model)
+            moved = True
+        state = {"engine": engine, "requested": requested,
+                 "served": session.get("last_model") or "",
+                 "baseline": turn.baseline if not requested else "",
+                 "note": turn.note} if standing_in else None
+        if state != self._model_substitute:
+            self._model_substitute = state
+            moved = True
+        # Every transition is published, even one leaving the payload as it
+        # was: a console moves the served name itself at a turn's start
+        # (turn_init) and needs the node's word on it that same turn.
+        if moved:
             self.broadcast({"type": "session_meta",
                             "session": session_payload(db.get_session(self.id))})
+
+    def _note_turn_models(self, session, tool: str = "") -> None:
+        """The summary ahead of a prompt's result when another model answered.
+
+        Written once, whenever any answer of the prompt came from a model
+        other than the one requested - also when the requested model came
+        back before the end (``throughout`` false). The cards where each
+        switch happened and the live state tell it as it happens; this is
+        what the finished prompt reads."""
+        turn = self._turn_models
+        if turn is None or not turn.substitutes or turn.summarized:
+            return
+        turn.summarized = True
+        requested = turn.requested
+        baseline = turn.baseline if not requested else ""
+        what = "this turn" if tool else "this prompt"
+        data = {
+            "subtype": "model_substituted", "engine": session.get("engine") or "",
+            "requested": requested, "baseline": baseline,
+            "models": list(turn.substitutes), "throughout": not turn.requested_seen,
+            "note": turn.note,
+            "text": "{} answered {}{} instead of {}".format(
+                _model_names(turn.substitutes), "part of " if turn.requested_seen else "",
+                what, _requested_phrase(requested, baseline)),
+        }
+        if tool:
+            data["tool"] = tool
+        self._emit("info", data)
 
     async def _retry_pause(self, fields: dict, attempt: int) -> bool:
         """Hold a retried prompt for its back-off. False when the wait was cut
@@ -3006,6 +3148,9 @@ class SessionHub:
             do_handoff = fresh_native_session and \
                 (workspace_reset or handoff.needs_handoff(session))
             user_ev = None
+            if retry_fields is None:
+                # one account per prompt: a retry of it keeps adding to it
+                self._turn_models = _TurnModels((session.get("model") or "").strip())
             if tool:
                 self._emit("info", {
                     "subtype": "tool", "tool": tool, "phase": "start",
@@ -3194,6 +3339,8 @@ class SessionHub:
                         session["engine"], str(data.get("error") or ""))
                 if tool:
                     data["tool"] = tool
+                # the last thing the prompt says before its result line
+                self._note_turn_models(session, tool)
                 token_usage.record_turn(session, self._emit("result", data))
                 # A turn result completes the model's work, not necessarily
                 # every protocol request. Drain outstanding acknowledgements
@@ -3340,7 +3487,8 @@ class SessionHub:
                             db.touch_session(self.id, native_session_id=nid)
                     elif a == "model":
                         self._note_effective_model(
-                            session, driver, ctx, act.get("model"))
+                            session, driver, ctx, act.get("model"),
+                            engine_messages.text(act.get("note")))
                     elif a == "approval":
                         # stored raw: the reply must echo the engine's own
                         # paths, so only the broadcast copy is rewritten

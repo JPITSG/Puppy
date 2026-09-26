@@ -14915,6 +14915,85 @@ function taskUpdateNode(label, tone, text, kind) {
   return n;
 }
 
+/* A model as its engine's catalog names it ("Sonnet 5"), else as spelled. */
+function modelDisplayName(bid, engine, model) {
+  const raw = String(model || "");
+  const match = raw ? engineModelOption(engineInfo(bid, engine), raw) : null;
+  return (match && match.label) || raw;
+}
+
+/* The models that stood in and the one requested, named apart: catalog
+   labels, unless one that stood in would read exactly like the request (a
+   context variant, say) - then every side keeps the engine's own spelling,
+   or the line would name one model twice. */
+function modelNamesApart(bid, engine, models, requested) {
+  const label = model => modelDisplayName(bid, engine, model);
+  const want = label(requested);
+  const clash = !!want && models.some(model => model !== requested && label(model) === want);
+  return clash ? { models: models.map(String), requested: String(requested || "") }
+    : { models: models.map(label), requested: want };
+}
+
+/* "the requested Opus 5.5", or the engine's default the turn first reported */
+function requestedModelPhrase(bid, engine, requested, baseline, name) {
+  if (requested) return `the requested ${name}`;
+  const base = baseline ? modelDisplayName(bid, engine, baseline) : "";
+  return base ? `the engine's default, ${base}` : "the engine's default model";
+}
+
+/* "Sonnet 5 is answering instead of the requested Opus 5.5" - the node's
+   model_substitute, or a card's own record of the same switch */
+function modelStandInWords(bid, engine, d) {
+  const names = modelNamesApart(bid, engine, [String(d.served || "")], d.requested);
+  return `${names.models[0]} is answering instead of ` +
+    requestedModelPhrase(bid, engine, d.requested, d.baseline, names.requested);
+}
+
+/* The model standing in for the one this session asked for, while it is the
+   model the head names: the node reports it for exactly the model its
+   payload calls served, and a turn's first report (turn_init) moves that
+   name here before the node's word on the new model arrives. */
+function sessionModelSubstitute(s) {
+  const sub = s && s.model_substitute;
+  return sub && typeof sub === "object" && typeof sub.served === "string" &&
+    !!sub.served && sub.served === s.last_model ? sub : null;
+}
+
+/* Where the answering model moved. A stand-in speaks in the engine's own
+   words when it gave them; rows written before the state field read as they
+   always did. */
+function modelSwitchNode(d, bid) {
+  const engine = String(d.engine || "");
+  if (d.state === "substituted")
+    return taskUpdateNode("Model switched", "warn",
+      String(d.note || "") || modelStandInWords(bid, engine, d), "model-update");
+  if (d.state === "resumed")
+    return taskUpdateNode("Requested model resumed", "ok",
+      `${modelDisplayName(bid, engine, d.served)} is answering again`, "model-update");
+  const text = String(d.text || "");
+  const changed = d.state === "changed" || /^engine model changed: /i.test(text);
+  return taskUpdateNode(changed ? "Engine model changed" : "Engine model notice",
+    changed ? "" : "warn", changed ? text.replace(/^engine model changed: /i, "") : text, "model-update");
+}
+
+/* The prompt's closing word when another model answered it, in whole or in
+   part: just above its result line, in the warn voice the model's name wore
+   while it happened, with the engine's own reason when it gave one. */
+function modelSubstitutedNode(d, bid) {
+  const engine = String(d.engine || "");
+  const models = (Array.isArray(d.models) ? d.models : []).map(String).filter(Boolean);
+  const label = "Answered by another model";
+  if (!models.length) return taskUpdateNode(label, "warn", String(d.text || ""), "model-summary");
+  const names = modelNamesApart(bid, engine, models, d.requested);
+  const who = names.models.length < 2 ? names.models[0] :
+    names.models.slice(0, -1).join(", ") + " and " + names.models[names.models.length - 1];
+  const text = `${who} answered ${d.throughout === false ? "part of " : ""}` +
+    `${d.tool ? "this turn" : "this prompt"} instead of ` +
+    requestedModelPhrase(bid, engine, d.requested, d.baseline, names.requested);
+  const note = String(d.note || "");
+  return taskUpdateNode(label, "warn", note ? `${text}\n${note}` : text, "model-summary");
+}
+
 function sessionTaskUpdateNode(d) {
   const text = String(d.text || "");
   // Session-task events carry their action in the existing text field.
@@ -17941,11 +18020,19 @@ class SessionView {
       : engLabel(s.engine);
     const modelText = String((eff.queuedEngine ? eff.model :
       (s.last_model || s.model)) || "auto").replace(/^claude-/, "");
-    const identityText = `${backendName(this.tab.bid)} · ${engineText} · ${modelText}`;
-    eng.querySelector(".eng-label").textContent = identityText;
+    /* Another model answering in place of the requested one: its name takes
+       the warn tone here, and the composer's Model value does too while it
+       still shows the request that model stands in for. */
+    const sub = eff.queuedEngine ? null : sessionModelSubstitute(s);
+    const standIn = sub ? modelStandInWords(this.tab.bid, s.engine, sub) : "";
+    const label = eng.querySelector(".eng-label");
+    label.textContent = `${backendName(this.tab.bid)} · ${engineText} · `;
+    label.appendChild(el("span", "eng-model" + (sub ? " substituted" : ""), modelText));
+    const identityText = label.textContent;
     if (eff.queuedEngine)
       eng.setAttribute("aria-label",
         `${identityText} · engine switch queued, applies after the queue`);
+    else if (sub) eng.setAttribute("aria-label", `${identityText} · ${standIn}`);
     else eng.removeAttribute("aria-label");
     const cwd = this.root.querySelector(".chip.cwd");
     cwd.textContent = workspaceLocationLabel(s, this.tab.bid);
@@ -17956,11 +18043,13 @@ class SessionView {
     cwd.classList.toggle("warn", !!s.workspace_missing);
     this.syncWorkspaceChip();
     this.syncBrowserChips();
-    const setMini = (cls, label, value, pending = false) => {
+    const setMini = (cls, label, value, pending = false, note = "") => {
       const control = this.root.querySelector(".mini." + cls);
       control.querySelector(".mini-value").textContent = value;
       control.classList.toggle("pending", pending);
-      const title = label + ": " + value + (pending ? " · applies after the queue" : "");
+      control.classList.toggle("substituted", !!note);
+      const title = label + ": " + value + (pending ? " · applies after the queue" : "") +
+        (note ? " · " + note : "");
       control.removeAttribute("title");
       control.removeAttribute("data-tip");
       const select = control.querySelector("select");
@@ -17968,7 +18057,8 @@ class SessionView {
     };
     setMini("perm", "Permission mode", eff.permission_mode || "auto",
       eff.queuedPermission);
-    setMini("model", "Model", eff.model || "auto", eff.queuedModel);
+    setMini("model", "Model", eff.model || "auto", eff.queuedModel,
+      sub && !eff.queuedModel && (eff.model || "") === sub.requested ? standIn : "");
     setMini("effort", "Reasoning effort", eff.effort || "auto", eff.queuedEffort);
     this.syncSwitchLines();   // the newest divider tracks the live selection
     this.syncNativeComposerChoices();
@@ -18802,12 +18892,8 @@ class SessionView {
         if (d.subtype === "interrupted" || d.subtype === "background_wait_stopped")
           return taskUpdateNode(d.subtype === "interrupted" ? "Interrupted" : "Background wait stopped",
             "warn", String(d.text || ""), "interruption-update");
-        if (d.subtype === "model_switch") {
-          const text = String(d.text || "");
-          const changed = /^engine model changed: /i.test(text);
-          return taskUpdateNode(changed ? "Engine model changed" : "Engine model notice",
-            changed ? "" : "warn", changed ? text.replace(/^engine model changed: /i, "") : text, "model-update");
-        }
+        if (d.subtype === "model_switch") return modelSwitchNode(d, this.tab.bid);
+        if (d.subtype === "model_substituted") return modelSubstitutedNode(d, this.tab.bid);
         if (d.subtype === "compact") {
           const text = String(d.text || "");
           return taskUpdateNode("Context compacted", "ok",

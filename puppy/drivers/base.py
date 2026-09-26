@@ -22,6 +22,18 @@ Normalized transcript event kinds (persisted):
                  them ends (the optional native tool id links its card), and
                  background_wait_stopped when the node ended such a wait
                  itself (turn timeout, or an engine that never continued).
+                 model_switch {state, engine, ...} marks where the answering
+                 model moved: state "substituted" {requested, baseline,
+                 served, note} where a model not serving the request starts
+                 answering, "resumed" {requested, served} where the requested
+                 one comes back within the turn, "changed" {from_model,
+                 to_model} for a move that still serves it (an alias now
+                 naming a newer release). Older rows carry text alone.
+                 model_substituted {engine, requested, baseline, models,
+                 throughout, note, tool?} precedes a result whose prompt was
+                 answered, in whole or (throughout false) in part, by models
+                 other than the one requested; baseline is the model first
+                 reported when the engine's default was requested.
     result       {ok, usage?, engine_duration_ms?,
                   api_duration_ms?, stop_reason?, error?}
                  The runner adds duration_ms as comparable elapsed wall time.
@@ -65,10 +77,16 @@ Actions returned by parse_line() (consumed by the runner):
                                                      verified successful result restores
                                                      it; failure/crash starts fresh with
                                                      a transcript handoff and holds work.
-    {"a": "model", "model": "..."}                   engine-confirmed effective model;
+    {"a": "model", "model": "...", "note"?: "..."}   engine-confirmed effective model;
                                                      the runner asks the driver
                                                      whether requested/reported
-                                                     names are equivalent
+                                                     names are equivalent. Only the
+                                                     model answering the main
+                                                     conversation, never a subagent's.
+                                                     note is the engine's own readable
+                                                     word that it switched to this
+                                                     model, which always makes it a
+                                                     stand-in for the request
     {"a": "approval", "req": {...}}                  interactive permission request
     {"a": "approval_cancel", "request_id": "..."}
     {"a": "stdin", "data": {...}}                    continue a JSONL handshake

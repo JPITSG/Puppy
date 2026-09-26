@@ -39,6 +39,15 @@ stdin ends every task (~5 s, reported as stopped) and exits; a later resume
 first reports such a task as stale and runs an empty wake-up whose result
 precedes the prompt's own. duration_api_ms accumulates over
 the process while usage and num_turns are per result.
+
+The model answering is read from system/init and from each assistant message
+of the main conversation, as claude 2.1.283's own SDK message schema defines
+them: a subagent's messages carry the parent_tool_use_id of its tool call and
+its own model, and never move the conversation's (the CLI's own served-model
+report skips them the same way). When the CLI moves the conversation to another
+model mid-turn it says so first in system/model_fallback (or
+model_consent_fallback) with fallback_model and readable content; that wording
+rides on the report of the model once it answers, as the model action's note.
 Compliance note: we only drive the unmodified official binary; auth stays inside
 the CLI's own login (subscription OAuth), which is the vendor-sanctioned path.
 """
@@ -607,6 +616,25 @@ class ClaudeDriver(Driver):
         return any(left.casefold() in right.casefold()
                    for left in requested_forms for right in reported_forms)
 
+    def _served_model(self, ctx, model) -> list:
+        """One report of the model answering the main conversation, or none
+        when it is the model already reported. The CLI's own words for a
+        switch to it (system/model_fallback) ride along as the report's note."""
+        model = str(model or "").strip()
+        if not model or model == "<synthetic>":
+            return []
+        switch = ctx.get("model_switch")
+        switched = switch and (self.models_equivalent(switch["model"], model, ctx) or
+                               self.model_request_matches(switch["model"], model, ctx))
+        if not switched and self.models_equivalent(model, ctx.get("model_seen"), ctx):
+            return []
+        ctx["model_seen"] = model
+        action = {"a": "model", "model": model}
+        if switched:
+            ctx.pop("model_switch", None)
+            action["note"] = switch["note"]
+        return [action]
+
     def tool_options(self):
         return [
             {"value": "compact", "label": "Compact context",
@@ -920,10 +948,19 @@ class ClaudeDriver(Driver):
                         {"a": "transient", "msg": {"type": "turn_init",
                                                    "model": ev.get("model", ""),
                                                    "tools": len(ev.get("tools") or [])}}]
-                if ev.get("model"):
-                    ctx["model_seen"] = ev["model"]
-                    acts.append({"a": "model", "model": ev["model"]})
+                acts.extend(self._served_model(ctx, ev.get("model")))
                 return acts
+            if sub in ("model_fallback", "model_consent_fallback"):
+                # The CLI moved the conversation to another model (claude
+                # 2.1.283's SDK schema: availability or a consent gate, with
+                # fallback_model and its own readable content). The move
+                # counts once that model answers; until then only its wording
+                # is kept, for the report of that model.
+                model = messages.text(ev.get("fallback_model"))
+                note = messages.text(ev.get("content"))
+                if model and note:
+                    ctx["model_switch"] = {"model": model, "note": note}
+                return []
             if sub == "status":
                 code = messages.text(ev.get("status"))
                 status = {"requesting": "Requesting", "compacting": "Compacting context", "": ""}.get(code)
@@ -1023,11 +1060,12 @@ class ClaudeDriver(Driver):
                     int(usage.get(k) or 0) for k in
                     ("input_tokens", "cache_read_input_tokens",
                      "cache_creation_input_tokens", "output_tokens"))
-            # per-response model id - catches mid-turn fallback (e.g. fable -> opus)
-            mdl = msg.get("model") or ""
-            if mdl and not self.models_equivalent(mdl, ctx.get("model_seen"), ctx):
-                ctx["model_seen"] = mdl
-                acts.append({"a": "model", "model": mdl})
+            # Per-response model id: catches a mid-turn fallback. Only the
+            # main conversation's - a subagent answers on its own model inside
+            # its tool call (parent_tool_use_id names that call), which is
+            # exactly how the CLI tells its own served model apart.
+            if not ev.get("parent_tool_use_id"):
+                acts.extend(self._served_model(ctx, msg.get("model")))
             for blk in msg.get("content") or []:
                 bt = blk.get("type")
                 if bt == "text" and blk.get("text"):

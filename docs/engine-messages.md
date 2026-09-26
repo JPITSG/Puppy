@@ -75,6 +75,43 @@ raw rate-limit status: the updated console shows a general usage update without
 exposing or guessing the code. Upgrade that node to receive the detailed text.
 No protocol bump, database migration, configuration or snapshot change is needed.
 
+## Model substitutions
+
+Both runtimes accept `{a:"model", model, note?}` for the model serving the main
+conversation. The driver compares requested aliases with reported model IDs.
+Claude Code ignores a subagent's `parent_tool_use_id` messages and synthetic
+model IDs; its `system/model_fallback` and `model_consent_fallback` wording is
+carried as `note` when that model reports, even when the catalog considers its
+name equivalent to the previous model. Codex's `model/rerouted` reports the
+destination model through the same action.
+
+Session payloads add `model_substitute`: `null`, or
+`{requested, served, baseline, note}`. It is live, in-memory state belonging to
+the session's engine, requested model and `last_model`; changing those values
+or restarting the backend clears its applicability. With an empty requested
+model, the turn's first unqualified model report supplies `baseline`.
+Transitions arrive through `session_meta`, and a late socket attachment gets
+the same state in its snapshot. Older nodes can omit the field.
+
+Persisted `info` events mark each transition as `model_switch`, with `state`
+`substituted`, `resumed` or `changed`. A substitute's event carries `engine`,
+`requested`, `baseline`, `served`, `note` and readable `text`; a resumed event
+carries `engine`, `requested`, `served` and `text`; an ordinary change carries
+`engine`, `from_model`, `to_model` and `text`. Older text-only events still render.
+Before the final result, `model_substituted` summarizes `engine`, `requested`,
+`baseline`, `models`, `throughout`, `note` and `text` (plus `tool` for an engine
+tool turn). Model reports accumulate across retries of the same prompt.
+`throughout` is false if any report served the requested model, including when
+the turn finished on a substitute. Returning to the requested model at the
+start of a later prompt clears the live warning without a resumed card.
+
+The console colors the current model name and its corresponding Model control
+amber, with switch and summary cards in the transcript. A queued selection
+retains its pending appearance. `tests/model_substitute_test.py` covers both
+runtimes, `tests/model_substitute_ui_test.js` covers rendering, and the console
+browser suite's `--model-substitute-only` lane checks the socket, colors,
+wrapping and reconnect behavior on desktop and phone in both themes.
+
 ## Checking engine upgrades
 
 The fixtures in `tests/engine_messages_test.py` cover Claude Code 2.1.282,

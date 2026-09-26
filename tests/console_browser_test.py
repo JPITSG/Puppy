@@ -674,6 +674,102 @@ async def model_alias_checks(instance):
     print("PASS: saved Fable context alias is named in New task, New session and Engine defaults on desktop and phone; request and Max effort preserved", flush=True)
 
 
+async def model_substitute_checks(instance, capture=False):
+    """Another model answering in place of the requested one, from the real
+    runner's reports over the session's real socket: the head's model name
+    and the composer's Model value take the warn tone (under the pointer too)
+    exactly while it applies, the cards land where each switch happened with
+    the summary just above the result line, and every line stays inside its
+    box in both themes on a desktop and a phone."""
+    from puppy.drivers.claude import parse_model_catalog
+
+    driver = next(item for item in all_drivers() if item.key == "claude")
+    models = parse_model_catalog([
+        {"value": "default", "displayName": "Default", "resolvedModel": "preview-main-1"},
+        {"value": "main", "displayName": "Main 1", "resolvedModel": "preview-main-1"},
+        {"value": "lite", "displayName": "Lite 2", "resolvedModel": "preview-lite-2"},
+    ])
+    note = "Switched to Lite 2 due to high demand for Main 1"
+    sid = db.create_session("Model switch preview", "claude", "/home/mira/projects/harbor",
+                            "main", "", "", "default")
+    hub = runner.hub(sid)
+    session = db.get_session(sid)
+    ctx = {"model_options": models}
+    hub._turn_models = runner._TurnModels("main")
+    runner.broadcast_sessions()
+    try:
+        await until(instance, "!!findSessionMeta(0,%d)" % sid)
+        await evaluate(instance, """openSessionTab(0,%d,findSessionMeta(0,%d));
+            window.modelView=state.views['s:0:%d'].activeView(); true""" % (sid, sid, sid))
+        await until(instance, "!!modelView.sharedDraft && modelView.draftReady")
+        hub._emit("user", {"text": "Check the dashboard layout."})
+        hub._note_effective_model(session, driver, ctx, "preview-main-1")
+        hub._emit("assistant", {"text": "Checking the shared layout."})
+        hub._note_effective_model(session, driver, ctx, "preview-lite-2", note)
+        hub._emit("assistant", {"text": "The dashboard fits the phone viewport."})
+        hub._note_turn_models(session)
+        hub._emit("result", {"ok": True, "duration_ms": 1200})
+        hub.broadcast({"type": "turn_done", "continued": False})
+        await until(instance, "modelView.root.querySelectorAll('.model-summary').length===1 && !!modelView.root.querySelector('.eng-model.substituted')")
+        assert await evaluate(instance, """(() => {
+            const summary=modelView.root.querySelector('.model-summary');
+            return summary.textContent.includes('part of this prompt') &&
+                summary.nextElementSibling.matches('.result-line') &&
+                modelView.root.querySelector('.model-update').textContent.includes(%s);
+        })()""" % json.dumps(note))
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 2,
+                "mobile": width < 900}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); modelView.scroll.scrollTop=modelView.scroll.scrollHeight; true" % json.dumps(theme))
+                await evaluate(instance, "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))")
+                result = await evaluate(instance, """(() => {
+                    const root=modelView.root, probe=document.createElement('span');
+                    probe.style.color='var(--warn)'; root.append(probe);
+                    const warn=getComputedStyle(probe).color; probe.remove();
+                    const head=root.querySelector('.eng-model'), mini=root.querySelector('.mini.model .mini-value');
+                    return {head:getComputedStyle(head).color===warn,
+                        mini:getComputedStyle(mini).color===warn,
+                        labels:[...root.querySelectorAll('.model-update .task-update-label,.model-summary .task-update-label')]
+                            .every(n=>getComputedStyle(n).color===warn),
+                        fits:modelView.scroll.scrollWidth<=modelView.scroll.clientWidth &&
+                            [...root.querySelectorAll('.model-update,.model-summary')].every(n=>n.scrollWidth<=n.clientWidth)};
+                })()""")
+                assert all(result.values()), (name, theme, result)
+                point = await evaluate(instance, """(() => {const r=modelView.root.querySelector('.mini.model').getBoundingClientRect();
+                    return {x:r.x+r.width/2,y:r.y+r.height/2};})()""")
+                await instance.call("Input.dispatchMouseEvent", dict(point, type="mouseMoved"), session=instance.page_session)
+                assert await evaluate(instance, """(() => {const root=modelView.root;
+                    return getComputedStyle(root.querySelector('.mini.model .mini-value')).color===
+                        getComputedStyle(root.querySelector('.eng-model')).color;})()""")
+                if capture:
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                    (BASE / "data" / ("model-substitute-" + name + "-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
+        # Reopening reads persisted cards and the same live state from snapshot.
+        await evaluate(instance, "closeTab('s:0:%d'); openSessionTab(0,%d,findSessionMeta(0,%d)); window.modelView=state.views['s:0:%d'].activeView(); true" % (sid, sid, sid, sid))
+        await until(instance, "!!modelView.root.querySelector('.model-summary') && !!modelView.root.querySelector('.eng-model.substituted')")
+        # Within a fresh turn, the requested model resuming gets a green card.
+        hub._turn_models = runner._TurnModels("main")
+        hub._note_effective_model(session, driver, ctx, "preview-lite-2")
+        hub._note_effective_model(session, driver, ctx, "preview-main-1")
+        await until(instance, "!modelView.root.querySelector('.substituted') && [...modelView.root.querySelectorAll('.model-update')].some(n=>n.textContent.includes('Requested model resumed'))")
+        for theme in ("dark", "light"):
+            await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+            assert await evaluate(instance, """(() => {const root=modelView.root, probe=document.createElement('span');
+                probe.style.color='var(--ok)'; root.append(probe); const ok=getComputedStyle(probe).color; probe.remove();
+                return getComputedStyle([...root.querySelectorAll('.model-update .task-update-label')].at(-1)).color===ok;
+            })()""")
+    finally:
+        await evaluate(instance, "closeTab('s:0:%d'); activateTab('s:0:1'); applyTheme('dark'); delete window.modelView; true" % sid)
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+        runner.broadcast_sessions()
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    print("PASS: model stand-ins reach the real console, keep amber names under hover, fit desktop/phone in both themes, survive reattach and clear on recovery", flush=True)
+
+
 async def reply_image_checks(instance, capture=False):
     await evaluate(instance, r"""(() => {
         const canvas=document.createElement('canvas');canvas.width=1200;canvas.height=600;
@@ -5681,12 +5777,12 @@ async def navigation_checks(instance, url, sid, capture=False):
     # The session with more matches than its first page carries the button;
     # a real press loads the rest over the node's own route: every row where
     # the preview stood, the button gone, and no notice raised.
-    await until(instance, "document.querySelector('.search-results .sh-more')?.textContent==='Show all 7 matches'"
+    await until(instance, "document.querySelector('.search-results .sh-more')?.textContent==='Show all 8 matches'"
                           " && document.querySelectorAll('.search-results .sh-matches .sh-match').length===5")
     await evaluate(instance, "document.getElementById('toasts').replaceChildren();"
                              " document.querySelector('.search-results .sh-more').click(); true")
     await until(instance, "!document.querySelector('.search-results .sh-more')"
-                          " && document.querySelectorAll('.search-results .sh-matches .sh-match').length===7")
+                          " && document.querySelectorAll('.search-results .sh-matches .sh-match').length===8")
     assert await evaluate(instance, "!document.querySelector('#toasts .toast') && state.views.search.pageRequests.size===0")
     # Results on display make the filters live. Typing in the box asks
     # nothing; a real press on the Tools chip runs the results' own query
@@ -5724,23 +5820,23 @@ async def navigation_checks(instance, url, sid, capture=False):
     }))()""")
     assert filtered == {"asked": ["dashboard"], "draft": "dashboard draft",
                         "kinds": "title,user,assistant,thinking,info", "tools": False,
-                        "count": "3 matches", "rows": ["Prompt", "Reply", "Title"],
+                        "count": "4 matches", "rows": ["Prompt", "Reply", "System", "Title"],
                         "more": False, "toasts": 0}, filtered
-    # Back restores the results the chip replaced - every kind, the seven
+    # Back restores the results the chip replaced - every kind, the eight
     # rows Show all loaded - without asking again; Forward the filtered
     # ones; the chip pressed back on searches once more and leaves the
     # saved kinds as they were found.
     await travel(-1, "state.views.search.kinds.has('tool')")
     assert await evaluate(instance, "navSearches.length===1 && state.views.search.input.value==='dashboard'"
-                                    " && document.querySelectorAll('.search-results .sh-match').length===7"
+                                    " && document.querySelectorAll('.search-results .sh-match').length===8"
                                     " && [...document.querySelectorAll('.search-kinds .search-chip')]"
                                     ".find(c=>c.textContent==='Tools').getAttribute('aria-pressed')==='true'")
     await travel(1, "!state.views.search.kinds.has('tool')")
     assert await evaluate(instance, "navSearches.length===1"
-                                    " && document.querySelectorAll('.search-results .sh-match').length===3")
+                                    " && document.querySelectorAll('.search-results .sh-match').length===4")
     await press_kind("Tools", "false")
     assert await evaluate(instance, "navSearches.length===2 && state.views.search.kinds.size===6"
-                                    " && document.querySelector('.search-results .sh-more')?.textContent==='Show all 7 matches'"
+                                    " && document.querySelector('.search-results .sh-more')?.textContent==='Show all 8 matches'"
                                     " && JSON.parse(lsGet('puppy.search')).kinds.length===6")
     await run("api=navSearchApi")
     await run("state.views.search.presetQuery('cards')")
@@ -6019,6 +6115,9 @@ async def main(args):
             if args.navigation_only:
                 await navigation_checks(instances[0], url, sid, args.screenshots)
                 return
+            if args.model_substitute_only:
+                await model_substitute_checks(instances[0], args.screenshots)
+                return
             if args.tool_clock_only:
                 await tool_clock_checks(instances[0], args.screenshots)
                 return
@@ -6043,6 +6142,7 @@ async def main(args):
             await quota_checks(instances[0])
             await engine_activity_checks(instances[0])
             await model_alias_checks(instances[0])
+            await model_substitute_checks(instances[0], args.screenshots)
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])
@@ -6065,6 +6165,7 @@ if __name__ == "__main__":
     parser.add_argument("--screenshots", action="store_true")
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--navigation-only", action="store_true")
+    parser.add_argument("--model-substitute-only", action="store_true")
     parser.add_argument("--tool-clock-only", action="store_true")
     parser.add_argument("--task-refresh-only", action="store_true")
     parser.add_argument("--token-usage-only", action="store_true")

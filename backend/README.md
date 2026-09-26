@@ -11,6 +11,13 @@ This directory contains the separately deployable, API-only Puppy runtime. It
 shares the console's database, runner and engine drivers at build time, but the
 resulting artifact exposes no web GUI, cookie login, settings, or backend proxy.
 
+Session payloads carry the additive `model_substitute` field: null, or
+`{requested, served, baseline, note}` when another model is serving the request.
+The live state is held in memory and published through `session_meta` and
+socket snapshots; restart clears it. Persisted `model_switch` and
+`model_substituted` info events record transitions and the prompt's summary.
+See [Model substitutions](../docs/engine-messages.md#model-substitutions).
+
 VNC viewer sockets include an additive `throughput` message about once a second
 for active viewers. Its `bytes_per_second` is incoming encoded RFB traffic at
 this backend, excluding TCP/IP overhead and the viewer WebSocket stream. See

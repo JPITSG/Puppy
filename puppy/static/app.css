@@ -1270,6 +1270,9 @@ select.choice-native{display:none!important}
 .chip.eng-opencode .dot{background:var(--opencode)}
 /* a queued engine switch: same voice as the pending configuration minis */
 .chip.eng.pending .eng-label{font-style:italic;color:var(--acc2)}
+/* another model answering in place of the requested one: its name takes the
+   console's warn tone, as the composer's Model value does below */
+.chip.eng .eng-model.substituted{color:var(--warn)}
 .chip.cwd.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-dim)}
 /* Live session activity shares one blue pill, including the count-only
    background-task indicator. Only browser/terminal pills are controls. */
@@ -1988,6 +1991,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* the pill shows what the NEXT prompt will use; italics while that value is
    still waiting in the queue behind the running turn */
 .composer-row .mini.pending .mini-value{font-style:italic;color:var(--acc2)}
+/* the model this pill requests is not the one answering: warn, even under the
+   pointer, for as long as the node says another model stands in */
+.composer-row .mini.substituted .mini-value,
+.composer-row .mini.substituted:hover .mini-value{color:var(--warn)}
 /* Touch devices get a real select stretched over the unchanged mini-pill.
    Its popup is therefore owned by Android/iOS while Puppy keeps the compact
    trigger geometry and the horizontally scrollable composer lane. */

@@ -416,13 +416,27 @@ housekeeping. This indicator is currently available for Claude Code. Codex and
 OpenCode do not yet supply a reliable complete background-task list through
 Puppy's integrations, so they show no counter.
 
+When the engine answers with a model other than the one requested (Claude Code
+falling back because the requested model is overloaded or unavailable, for
+example, or Codex rerouting a turn), the model's name in the session header and
+the composer's **Model** value turn amber for as long as that model is the one
+answering. A **Model switched** card marks where it happened, in the engine's own
+words when it gives them, and **Requested model resumed** marks the requested
+model coming back within the same turn. The prompt then ends with an **Answered
+by another model** card just above its result line, naming every model that
+stood in and whether it answered all or part of the prompt. Subagents running on
+their own models do not count. The next prompt tries the requested model again.
+Changing the session's model or engine clears the amber state once that change
+takes effect. The backend holds that state in memory, so a restart clears it
+too; the transcript cards remain.
+
 Compaction confirmations and project-move confirmations use the same left-aligned
 cards, with green headings and any token counts, paths and handoff details below.
 Interruptions, background waits and engine-reported model notices also use these
 cards. Headings are green for success, blue for active work or waiting, amber
-for interruptions, stops and model mismatches, red for failures, and neutral
-for ordinary model-change notices. Engine switches and requested model/effort
-changes remain centered dividers.
+for interruptions, stops and another model answering, red for failures, and
+neutral for ordinary model-change notices. Engine switches and requested
+model/effort changes remain centered dividers.
 
 ### Tasks: parallel work in isolated copies
 

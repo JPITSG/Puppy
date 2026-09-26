@@ -5696,16 +5696,22 @@ def exercise_claude_model_alias_provenance(runner, db) -> None:
         assert len(db.get_events(sid)) == before
         assert db.get_session(sid)["last_model"] == "vendor-future-9"
 
-        # A genuinely different resolved id is still detected and retained.
+        # A genuinely different resolved id is still detected and retained,
+        # as a model standing in for the request.
         hub._note_effective_model(session, driver, ctx, "vendor-other-1")
         warning = db.get_events(sid)[-1]
         assert warning["kind"] == "info"
         assert warning["data"] == {
-            "subtype": "model_switch",
-            "text": "requested model 'future-long[2m]' but engine is serving "
-                    "vendor-other-1",
+            "subtype": "model_switch", "state": "substituted", "engine": "claude",
+            "requested": "future-long[2m]", "baseline": "", "served": "vendor-other-1",
+            "note": "",
+            "text": "vendor-other-1 is answering instead of the requested "
+                    "future-long[2m]",
         }
         assert db.get_session(sid)["last_model"] == "vendor-other-1"
+        assert runner.session_payload(db.get_session(sid))["model_substitute"] == {
+            "requested": "future-long[2m]", "served": "vendor-other-1",
+            "baseline": "", "note": ""}
     finally:
         runner.drop_hub(sid)
         db.delete_session(sid)
