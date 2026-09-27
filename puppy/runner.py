@@ -17,7 +17,7 @@ import uuid
 from puppy import (agent_notes, browser_agent, config, db, handoff, notify, spawn_agent,
                    system_prompts, terminal_agent, vnc_agent,
                    session_agent, session_git, session_links, uploads, workspace_sync,
-                   workspaces, session_tasks, session_titles, token_usage)
+                   workspaces, session_tasks, session_titles, token_usage, tool_calls)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
 from puppy.drivers import messages as engine_messages
@@ -3073,7 +3073,9 @@ class SessionHub:
         engine_ran = False
         descriptor = None
         transport = None
+        stderr_task = None
         context_checkpoint = ""
+        pending_tools = tool_calls.PendingTools()
         self._block_status = "error"   # until a result says otherwise
         try:
             session = db.get_session(self.id)
@@ -3428,7 +3430,8 @@ class SessionHub:
                 for act in actions:
                     a = act.get("a")
                     if a == "event":
-                        self._emit(act["kind"], act["data"])
+                        event = self._emit(act["kind"], act["data"])
+                        pending_tools.observe(event["kind"], event["data"])
                     elif a == "transient":
                         msg = act["msg"]
                         if self._bg_wait_since is not None and \
@@ -3591,7 +3594,32 @@ class SessionHub:
                 pass
         finally:
             if transport is not None:
-                await transport.close()
+                try:
+                    await transport.close()
+                except Exception:
+                    log.exception("engine transport cleanup failed for session %s", self.id)
+            # Exceptions/cancellation can bypass the normal process wait.
+            # Retain ownership until the engine exits instead of dropping its
+            # handle while its children still own tools and native locks.
+            if self.proc is not None and self.proc.returncode is None:
+                self._signal_if_alive(self.proc, signal.SIGINT)
+                try:
+                    await asyncio.wait_for(self.proc.wait(), timeout=8)
+                except asyncio.TimeoutError:
+                    self._signal_if_alive(self.proc, signal.SIGKILL)
+                    await self.proc.wait()
+            if stderr_task is not None:
+                stderr_task.cancel()
+            # This attempt has stopped reading the engine. Persist the missing
+            # outcomes before turn_done or a queued/retried turn can start;
+            # background pauses and protocol grace periods never reach here.
+            try:
+                for data in pending_tools.results(tool_calls.TURN_ENDED):
+                    self._emit("tool_result", data)
+            except Exception:
+                # A storage failure must not skip engine/queue cleanup. The
+                # durable unmatched calls are recovered at the next startup.
+                log.exception("could not close tool calls for session %s", self.id)
             if context_checkpoint:
                 # The old native session may already contain a bad summary.
                 # Do not run queued prompts into it or silently spend them on

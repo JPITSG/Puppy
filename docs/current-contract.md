@@ -94,6 +94,11 @@ still contain a value written before that release.
   `model_substituted` info events remain in the transcript. No protocol,
   database or snapshot shape changes are required. See
   [Model substitutions](engine-messages.md#model-substitutions).
+- A `tool_result` can carry `interrupted: true` alongside `is_error: true`
+  when the runner or startup/restore recovery closes a call whose result was
+  never recorded. Its content names the interruption and unknown outcome;
+  recovery never reruns a call or replaces existing events. This additive
+  event field changes no database schema, snapshot format or protocol version.
 - Session reordering requires both starting-order and pin-cohort compare tokens.
   `session-order-recency` adds durable `order_at` timestamps for merging the
   sidebar across backends below all pins, and an optional `expected_recency`

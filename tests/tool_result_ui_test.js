@@ -153,6 +153,57 @@ const resultText = card => {
   assert.equal(v.scroll.scrollTop, 0, "and never moves a reader who is not");
 }
 
+/* Recovered calls are unknown outcomes, never successful completions. The
+   result must survive both directions of history paging and remain folded. */
+{
+  for (const backwards of [false, true]) {
+    const v = view();
+    const ended = result("lost", 70, {is_error: true, interrupted: true,
+      content: "Puppy restarted before this tool reported a result. Its outcome is unknown."});
+    if (backwards) {
+      v.renderEvent(ended, true);
+      v.inner.insertBefore(v.buildEventNode(call("lost", 10)), v.inner.firstChild);
+    } else [call("lost", 10), ended].forEach(ev => v.renderEvent(ev, true));
+    assert.equal(cards(v).length, 1);
+    const card = cards(v)[0];
+    assert.equal(card.querySelector(".t-state").className, "t-state warn");
+    assert.equal(card.querySelector(".t-state").textContent, "interrupted");
+    assert.equal(card.querySelector(".t-state").getAttribute("aria-label"), "interrupted");
+    assert.equal([...card.querySelectorAll(".tb-label")].pop().textContent, "interrupted");
+    assert.ok(!card.classList.contains("open") && !card.classList.contains("err"));
+    assert.ok(resultText(card).includes("outcome is unknown"));
+  }
+}
+
+/* Partial history is not evidence that a tool is still running or failed.
+   Calls in an idle session, before the current activity block, or behind a
+   known turn ending show ended until their authoritative result is loaded. */
+{
+  const v = view(); v.status = "idle";
+  v.renderEvent(call("old", 1), true);
+  assert.equal(v.toolCards.old.querySelector(".t-state").textContent, "ended");
+  v.renderEvent(result("old", 2), true);
+  assert.equal(v.toolCards.old.querySelector(".t-state").className, "t-state ok");
+  v.status = "running"; v.tab = {bid: 0, sid: 9};
+  sessionMeta = {active_since: 100};
+  v.renderEvent({...call("previous", 3), ts: 99}, true);
+  v.renderEvent({...call("current", 4), ts: 101}, true);
+  assert.equal(v.toolCards.previous.querySelector(".t-state").textContent, "ended");
+  assert.equal(v.toolCards.current.querySelector(".t-state").className, "t-state busy");
+  v.renderEvent({seq: 5, kind: "result", data: {ok: false}}, true);
+  assert.equal(v.toolCards.current.querySelector(".t-state").textContent, "ended");
+  const older = v.buildEventNode({...call("paged", 2), ts: 101});
+  assert.equal(older.querySelector(".t-state").textContent, "ended");
+  v.renderEvent({...call("next", 6), ts: 102}, true);
+  assert.equal(v.toolCards.next.querySelector(".t-state").className, "t-state busy");
+  // A reconnect while detached keeps the reading window but stops its old
+  // spinners using the snapshot's fresh idle state.
+  v.status = "idle";
+  context.refreshToolStates(v);
+  assert.equal(v.toolCards.next.querySelector(".t-state").textContent, "ended");
+  sessionMeta = null;
+}
+
 /* Each live bubble reads its own persisted call timestamp against the backend
    clock, even when that clock differs from this browser's by many minutes. */
 {

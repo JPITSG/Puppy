@@ -369,6 +369,16 @@ Session sockets receive an additive `background_tasks` message
 ends, and snapshots carry the same object as `background_tasks`; while
 `waiting` is true, `text` is the status line to show.
 
+The shared runner closes tool calls that have no result when their turn ends,
+including engine failure, cancellation and timeout. Startup reconciles missing
+results across all sessions before accepting work; snapshot restore does the
+same in the staged database. Cleanup appends ordinary `tool_result` events with
+`is_error: true`, `interrupted: true`, the native `tool_use_id`, the tool name,
+and content explaining that the outcome is unknown. Existing events and session
+ordering stay intact, repeated recovery adds nothing, and cleanup never reruns
+a call. Exceptions also terminate and reap an engine before releasing its handle.
+The optional interruption flag is additive; older consoles display an error.
+
 ## Active-turn steering transport
 
 `POST /api/sessions/{sid}/steer` sends an additional instruction to the

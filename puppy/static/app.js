@@ -14834,6 +14834,29 @@ function toolStateInto(stateEl, completed, isError) {
   stateEl.setAttribute("aria-label", completed ? (isError ? "failed" : "done") : "running");
   return stateEl;
 }
+function toolInterruptedInto(card, label = "interrupted") {
+  const mark = card.querySelector(".t-state");
+  mark.className = "t-state warn";
+  mark.textContent = label;
+  mark.setAttribute("aria-label", label === "ended" ? "Turn ended; result not loaded" : label);
+  card.classList.remove("err");
+}
+/* A history window may contain a call without its result. Only an active
+   turn can own a spinner; do not invent success or failure for an unloaded
+   result. A real result (including recovery's interruption) replaces this
+   neutral ending when paging reaches it. Never use the call's age alone. */
+function refreshToolStates(view, cards = Object.values(view.toolCards || {})) {
+  if (!cards.length) return;
+  const session = view.tab && findSessionMeta(view.tab.bid, view.tab.sid) || view.session;
+  const activeSince = Number(session && session.active_since);
+  for (const card of cards) {
+    if (!card.querySelector(".t-state").classList.contains("busy")) continue;
+    if (view.status === "idle" || card._toolSeq <= (view.toolClockEndSeq || 0) ||
+        (Number.isFinite(activeSince) && activeSince > 0 &&
+         card._toolStartedAt > 0 && card._toolStartedAt < activeSince))
+      toolInterruptedInto(card, "ended");
+  }
+}
 /* The event and active_since use the executing backend's clock. Its existing
    activity anchor translates that clock into this browser's without assuming
    the two machines agree. Subtract the call's own start, never the turn's. */
@@ -15022,13 +15045,14 @@ function backgroundTaskUpdateNode(d) {
    card's body until the reader opens it. */
 function fillToolResultInto(card, d) {
   toolStateInto(card.querySelector(".t-state"), true, d.is_error);
-  if (d.is_error) card.classList.add("err");
+  card.classList.toggle("err", !!d.is_error);
+  if (d.interrupted) toolInterruptedInto(card);
   if (card._backgroundTaskUpdate)
     backgroundTaskStateInto(card, card._backgroundTaskUpdate.data);
   const body = card.querySelector(".tool-body");
   if (card._questions && !d.is_error)
     questionMarkChosen(card._questions.list, card._questions.rows, d.content);
-  body.appendChild(el("div", "tb-label", d.is_error ? "error" : "result"));
+  body.appendChild(el("div", "tb-label", d.interrupted ? "interrupted" : d.is_error ? "error" : "result"));
   body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(Empty)"));
 }
 
@@ -17674,6 +17698,7 @@ class SessionView {
              the tail: keep the window; Load newer and the pill catch up
              through the cursor when asked. */
           this.syncTailPill();
+          refreshToolStates(this);
         } else {
           this.rebuildTranscript(d.events, {
             attached: true, mayHaveOlder: d.events.length >= 200 });
@@ -17816,6 +17841,7 @@ class SessionView {
         break;
       case "turn_done":
         this.toolClockEndSeq = Math.max(this.toolClockEndSeq || 0, this.newestSeq || 0);
+        refreshToolStates(this);
         this.setBackgroundTasks(null);
         /* The node reports whether this turn continued into queued work. */
         const queueWaiting = d.queue_waiting === true;
@@ -18784,6 +18810,8 @@ class SessionView {
       case "tool_use": {
         const n = toolCardNode(d);
         const mark = n.querySelector(".t-state"), startedAt = Number(ev.ts), seq = Number(ev.seq);
+        n._toolSeq = seq;
+        n._toolStartedAt = startedAt;
         tips.live(mark, () => mark.classList.contains("busy") ? toolRunningTip(this, startedAt, seq) : "");
         if (d.tool_use_id) {
           this.toolCards[d.tool_use_id] = n;
@@ -18797,6 +18825,7 @@ class SessionView {
           }
           this.orphanResults.delete(d.tool_use_id);
         }
+        refreshToolStates(this, [n]);
         return n;
       }
       case "tool_result": {
@@ -18843,8 +18872,10 @@ class SessionView {
         return orphan;
       }
       case "info": {
-        if (d.subtype === "interrupted")
+        if (d.subtype === "interrupted") {
           this.toolClockEndSeq = Math.max(this.toolClockEndSeq || 0, Number(ev.seq) || 0);
+          refreshToolStates(this);
+        }
         if (d.subtype === "task") {
           const node = backgroundTaskUpdateNode(d);
           node.dataset.seq = String(ev.seq);
@@ -18929,6 +18960,7 @@ class SessionView {
         // A stopped turn may have no individual tool result. Do not let its
         // old spinner acquire a new clock when the next queued turn starts.
         this.toolClockEndSeq = Math.max(this.toolClockEndSeq || 0, Number(ev.seq) || 0);
+        refreshToolStates(this);
         const n = el("div", "result-line");
         const outcome = el("span", d.ok ? "ok" : "bad");
         outcome.appendChild(d.ok ? checkIcon(13) : xIcon(13));

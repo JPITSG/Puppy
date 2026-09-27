@@ -4256,6 +4256,34 @@ async def tool_clock_checks(instance, capture=False):
         h.broadcast({"type": "event", "event": stopped})
         await until(instance, "document.querySelector('#tip').hidden")
         assert await evaluate(instance, "tips.text(clockView.toolCards['clock-other'].querySelector('.t-state'))==='' && clockView.status==='running'")
+        assert await evaluate(instance, "clockView.toolCards['clock-other'].querySelector('.t-state').textContent==='ended'")
+        # The actual missing-result payload persists and travels over the
+        # socket; it reads as an unknown interruption in every history window.
+        from puppy import tool_calls
+        pending = tool_calls.PendingTools()
+        pending.observe("tool_use", events[1]["data"])
+        h._emit("tool_result", next(pending.results(tool_calls.RESTARTED)))
+        await until(instance, "clockView.toolCards['clock-other'].querySelector('.t-state').textContent==='interrupted'")
+        for width in (1440, 390):
+            await instance.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": 900 if width == 1440 else 844,
+                "deviceScaleFactor": 1, "mobile": width == 390}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                assert await evaluate(instance, """(() => {
+                    const card=clockView.toolCards['clock-other'], mark=card.querySelector('.t-state');
+                    const box=card.getBoundingClientRect(), r=mark.getBoundingClientRect();
+                    const sample=document.createElement('span'); sample.style.color='var(--warn)'; document.body.append(sample);
+                    const colour=getComputedStyle(sample).color; sample.remove();
+                    return mark.classList.contains('warn') && mark.getAttribute('aria-label')==='interrupted' &&
+                        getComputedStyle(mark).color===colour && r.left>=box.left && r.right<=box.right &&
+                        !card.classList.contains('open') && !card.classList.contains('err') &&
+                        card.textContent.includes('outcome is unknown');
+                })()""")
+        await evaluate(instance, "window.recoveryReloadMarker=true; true")
+        await instance.call("Page.reload", session=instance.page_session)
+        await until(instance, "!window.recoveryReloadMarker")
+        await bind()
+        assert await evaluate(instance, "clockView.toolCards['clock-other'].querySelector('.t-state').textContent==='interrupted'")
     finally:
         h.status, h.active_since = "idle", None
         db.touch_session(2, status="idle")
@@ -4264,7 +4292,7 @@ async def tool_clock_checks(instance, capture=False):
         await evaluate(instance, "closeTab(%s); activateTab('s:0:1'); applyTheme('dark'); window.demoView=state.views['s:0:1'].activeView(); true" % json.dumps(key))
         await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
             "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
-    print("PASS: per-tool hover clocks tick under a still pointer, fit both themes and phone, survive reload/reconnect, and end on completion/interruption", flush=True)
+    print("PASS: per-tool hover clocks and recovered interruptions fit both themes and phone, survive reload/reconnect, and end on completion/interruption", flush=True)
 
 
 async def engine_activity_checks(instance):

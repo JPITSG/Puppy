@@ -10,6 +10,8 @@ Normalized transcript event kinds (persisted):
     thinking     {text}
     tool_use     {tool, input, tool_use_id}
     tool_result  {tool_use_id, content, is_error}
+                 Runner/startup recovery can add interrupted: true when a
+                 call's owner ended without a result; its outcome is unknown.
     info         {subtype, text, ...}
                  engine_retry {attempt, delay} records that the prompt runs
                  again after a back-off because the engine reported a

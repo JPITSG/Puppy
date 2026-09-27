@@ -848,6 +848,8 @@ def _prepare_scratch(candidate_db: Path, root: Path, manifest: dict) -> List[str
             connection.execute(
                 "UPDATE session_drafts SET text=replace(text, ?, ?)",
                 (source_data + "/uploads/", destination_data + "/uploads/"))
+        from puppy import tool_calls
+        tool_calls.recover(connection, tool_calls.RESTORED)
         connection.execute("UPDATE sessions SET status='idle'")
         connection.commit()
         return created

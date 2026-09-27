@@ -127,8 +127,14 @@ for their carets, icons and status marks, with equal spacing from the chevron to
 the tool icon and from the icon to its label. Hover a running tool's status
 spinner to see a live elapsed clock for that individual call, including shell
 commands. It uses the saved call timestamp, survives reloads and reconnects,
-and stops when the call or its turn finishes. Reading at the foot of a live
-transcript keeps you there: a card that grows where it stands - a background
+and stops when the call or its turn finishes. If a turn ends or Puppy restarts
+without a tool result, Puppy records the call as **interrupted**, with its
+outcome unknown. Restoring a snapshot closes unanswered calls the same way.
+This cleanup preserves recorded results and never reruns the missing calls.
+In a partial history window, an old call whose result has not loaded reads
+**ended** until its result is available, instead of spinning indefinitely.
+Reading at the foot of a live transcript keeps you there: a card that grows
+where it stands - a background
 task ending, an answer to a side question, a result dropped into a card you
 opened - carries the view down with it, exactly as a new message does, while a
 reading anywhere further up is never pulled away from it.
