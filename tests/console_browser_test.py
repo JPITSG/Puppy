@@ -770,6 +770,191 @@ async def model_substitute_checks(instance, capture=False):
     print("PASS: model stand-ins reach the real console, keep amber names under hover, fit desktop/phone in both themes, survive reattach and clear on recovery", flush=True)
 
 
+async def chat_filter_checks(instance, peer, capture=False):
+    """Inline personal filters through real history, sockets and rendered CSS."""
+    sid = db.create_session("Chat log preview", "claude", "/home/mira/projects/harbor", "", "", "", "default")
+    for index in range(18):
+        db.add_event(sid, "user", {"text": "Dashboard question {}: keep the activity feed readable.".format(index)})
+        db.add_event(sid, "assistant", {"text": "Dashboard answer {}: the cards share consistent spacing.".format(index)})
+    events = [
+        ("thinking", {"text": "Checking the layout."}),
+        ("tool_use", {"tool_use_id": "filter-read", "tool": "Read", "input": {"file_path": "/home/mira/projects/harbor/layout.css"}}),
+        ("tool_result", {"tool_use_id": "filter-read", "content": "Shared card spacing"}),
+        ("side_question", {"request_id": "filter-side", "question": "Does it fit a phone?"}),
+        ("side_question_result", {"request_id": "filter-side", "ok": True, "text": "Yes, the cards stack."}),
+        ("info", {"subtype": "task", "task_id": "filter-check", "status": "completed", "text": "Layout checks passed"}),
+        ("info", {"subtype": "compact", "text": "Context compacted"}),
+        ("error", {"text": "Preview error remains visible"}),
+        ("info", {"subtype": "session_task_archive", "task_id": 900, "name": "Earlier layout task",
+                  "engine": "claude", "outcome": "completed", "prompt": "Check the earlier layout", "entries": [
+                      {"kind": "user", "text": "Check the earlier layout"},
+                      {"kind": "assistant", "text": "The earlier layout fits"},
+                      {"kind": "tool", "tool": "Read", "text": "layout.css"}]}),
+        ("result", {"ok": True, "duration_ms": 1200}),
+    ]
+    for kind, data in events:
+        db.add_event(sid, kind, data)
+    hub = runner.hub(sid)
+    runner.broadcast_sessions()
+    setup = """openSessionTab(0,%d,findSessionMeta(0,%d));
+        window.filterView=sessionViewFor(0,%d); true""" % (sid, sid, sid)
+
+    async def click(selector):
+        point = await evaluate(instance, """(() => {
+            const n=[...document.querySelectorAll(%s)].find(n=>n.getBoundingClientRect().height>0);
+            n.scrollIntoView({block:'nearest'});
+            const r=n.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2};
+        })()""" % json.dumps(selector))
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1),
+                                session=instance.page_session)
+
+    try:
+        await until(instance, "!!findSessionMeta(0,%d)" % sid)
+        await evaluate(instance, setup)
+        await until(instance, "filterView.draftReady && !!filterView.inner.querySelector('.task-archive')")
+        await evaluate(instance, """filterView.inner.querySelector('.task-archive .tool-head').click();
+            window.filterVisible=n=>!!n && n.getBoundingClientRect().height>0; true""")
+        # All eight combinations, including both parts of a side question and
+        # entries in a folded task. Nothing is removed from history or paired twice.
+        for mask in range(8):
+            result = await evaluate(instance, """(() => {
+                setChatLogMask(0,%d,%d);
+                const root=filterView.inner, mask=%d, shown=selector=>[...root.querySelectorAll(selector)].every(filterVisible),
+                    hidden=selector=>[...root.querySelectorAll(selector)].every(n=>!filterVisible(n));
+                return {questions:(mask&1 ? shown : hidden)('.msg-user,.aside-q,.ta-prompt'),
+                    answers:(mask&2 ? shown : hidden)('.msg-assistant,.think,.aside-a,.ta-assistant'),
+                    tools:(mask&4 ? shown : hidden)('.tool-card:not(.task-archive),.background-task,.ta-tool'),
+                    notices:shown('.compaction-update,.err-card,.result-line,.task-archive'),
+                    paired:Object.keys(filterView.toolCards).length===1 && root.querySelectorAll('.tool-card:not(.task-archive)').length===1,
+                    indicator:filterView.root.querySelector('.menu-btn').classList.contains('chat-log-filtered')===(mask!==7)};
+            })()""" % (sid, mask, mask))
+            assert all(result.values()), (mask, result)
+        assert await evaluate(instance, "filterView.inner.querySelectorAll('.msg-user').length===19")
+        # Preserve a surviving message at the same height when content above
+        # it disappears; a reader at the tail keeps following it in both directions.
+        assert await evaluate(instance, """(() => {
+            setChatLogMask(0,%d,7);
+            const n=filterView.inner.querySelectorAll('.msg-assistant')[8], s=filterView.scroll;
+            s.scrollTop+=n.getBoundingClientRect().top-s.getBoundingClientRect().top+12;
+            const top=n.getBoundingClientRect().top;
+            setChatLogMask(0,%d,6);
+            const held=Math.abs(n.getBoundingClientRect().top-top)<1;
+            const place=filterView.captureScroll();
+            setChatLogMask(0,%d,7); filterView.restoreScroll(place);
+            const restored=Math.abs(n.getBoundingClientRect().top-top)<1;
+            filterView.scrollBottom(true); setChatLogMask(0,%d,2);
+            const tail=s.scrollHeight-s.scrollTop-s.clientHeight<1;
+            setChatLogMask(0,%d,7);
+            return held && restored && tail && s.scrollHeight-s.scrollTop-s.clientHeight<1;
+        })()""" % (sid, sid, sid, sid, sid))
+        assert await evaluate(instance, """(() => {
+            const s=filterView.scroll, question=filterView.inner.querySelectorAll('.msg-user')[8];
+            s.scrollTop+=question.getBoundingClientRect().top-s.getBoundingClientRect().top+10;
+            const place=filterView.captureScroll(); setChatLogMask(0,%d,6);
+            filterView.restoreScroll(place);
+            const landed=filterView.captureScroll(), node=filterView.findEventNode(landed.seq);
+            return landed.seq>place.seq && filterVisible(node) && Math.abs(landed.offset-place.offset)<1;
+        })()""" % sid), "a saved question anchor hidden later lands on the next visible answer"
+        # Menus fit on short windows and narrow phones in both themes. One
+        # disclosure adds no navigation stop, and its native chips keep focus.
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone"), (320, 480, "narrow")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 2,
+                "mobile": width < 900}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); closeAllMenus(null); setChatLogMask(0,%d,7); true" % (json.dumps(theme), sid))
+                await evaluate(instance, "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))")
+                before = await evaluate(instance, "history.length")
+                await click(".chat.on .menu-btn")
+                await click(".chat-log-toggle")
+                await click(".chat-log-chip[data-chat-log-type=tools]")
+                assert await evaluate(instance, """(() => {
+                    const m=document.querySelector('.menu.dyn'), options=m.querySelector('.chat-log-options'),
+                        chips=[...options.children], r=m.getBoundingClientRect();
+                    return r.left>=0 && r.right<=innerWidth && r.top>=0 && r.bottom<=innerHeight &&
+                        m.scrollWidth<=m.clientWidth && !options.hidden && !document.querySelector('.modal') &&
+                        chips.every(n=>n.scrollWidth<=n.clientWidth && n.getBoundingClientRect().width>=70) &&
+                        chips[2].getAttribute('aria-pressed')==='false' && document.activeElement===chips[2] &&
+                        m.querySelector('.chat-log-summary').textContent==='2 of 3' && history.length===%d;
+                })()""" % before), (name, theme)
+                if capture and name != "narrow":
+                    await evaluate(instance, "Promise.all(document.querySelector('.menu.dyn').getAnimations({subtree:true}).map(a=>a.finished.catch(()=>{})))")
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                    (BASE / "data" / ("chat-filters-" + name + "-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
+                # Enter uses the browser's native button activation; Escape
+                # closes this menu and returns to its opener.
+                for key, code in [("Enter", 13), ("Escape", 27)]:
+                    for kind in ("keyDown", "keyUp"):
+                        await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": key,
+                            "code": key, "windowsVirtualKeyCode": code,
+                            **({"text": "\r"} if key == "Enter" and kind == "keyDown" else {})}, session=instance.page_session)
+                assert await evaluate(instance, "filterView.chatLogMask===7 && !document.querySelector('.menu.dyn') && document.activeElement===filterView.root.querySelector('.menu-btn')")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        # Sidebar also owns one disclosure, at its pointer-based position.
+        await evaluate(instance, """sessionContextMenu({preventDefault(){},stopPropagation(){},clientX:250,clientY:870,
+            currentTarget:document.querySelector('.sess-item')},0,findSessionMeta(0,%d)); true""" % sid)
+        await click(".chat-log-toggle")
+        await click(".chat-log-chip[data-chat-log-type=questions]")
+        assert await evaluate(instance, "filterView.chatLogMask===6 && document.querySelector('.menu.dyn').getBoundingClientRect().bottom<=innerHeight")
+        await evaluate(instance, "closeAllMenus(null); setChatLogMask(0,%d,0); true" % sid)
+        hub._emit("tool_use", {"tool_use_id": "hidden-live", "tool": "Read", "input": {"file_path": "layout.css"}})
+        hub._emit("tool_result", {"tool_use_id": "hidden-live", "content": "Hidden result still attaches"})
+        await until(instance, "!!filterView.toolCards['hidden-live'] && filterView.toolCards['hidden-live'].textContent.includes('Hidden result still attaches')")
+        assert await evaluate(instance, "!filterVisible(filterView.toolCards['hidden-live']) && !filterView.toolCards['hidden-live'].querySelector('.t-state').classList.contains('busy')")
+        hub.broadcast({"type": "turn_done", "continued": True})
+        hub.broadcast({"type": "delta", "block": "thinking", "text": "Hidden live thinking"})
+        await until(instance, "!!filterView.liveEl")
+        assert await evaluate(instance, "!filterVisible(filterView.liveEl) && filterVisible(filterView.statusRow)")
+        hub._emit("assistant", {"text": "Hidden final answer"})
+        await until(instance, "!filterView.liveEl && filterView.inner.textContent.includes('Hidden final answer')")
+        assert await evaluate(instance, "[...filterView.inner.querySelectorAll('.msg-assistant')].every(n=>!filterVisible(n))")
+        hub.broadcast({"type": "turn_done", "continued": False})
+        for req in [
+            {"request_id": "filter-question", "kind": "question", "tool_name": "AskUserQuestion",
+             "questions": [{"header": "Layout", "question": "Which layout?", "options": [{"label": "Compact"}, {"label": "Wide"}]}]},
+            {"request_id": "filter-approval", "tool_name": "Read", "input": {"file_path": "layout.css"}},
+        ]:
+            await evaluate(instance, "filterView.showApproval(%s); true" % json.dumps(req))
+            assert await evaluate(instance, "filterVisible(filterView.approvalEl) && filterView.approvalEl.querySelectorAll('button').length>0")
+            await evaluate(instance, "filterView.hideApproval(); true")
+        # Reattach and reload use the persisted choices; another browser sees
+        # all categories, because these are each reader's preferences.
+        await until(peer, "!!findSessionMeta(0,%d)" % sid)
+        await evaluate(peer, setup)
+        await until(peer, "filterView.draftReady")
+        assert await evaluate(peer, "filterView.chatLogMask===7")
+        await instance.call("Page.reload", session=instance.page_session)
+        await until(instance, "typeof state!=='undefined' && !!sessionViewFor(0,%d) && sessionViewFor(0,%d).draftReady" % (sid, sid))
+        await evaluate(instance, "window.filterView=sessionViewFor(0,%d); true" % sid)
+        assert await evaluate(instance, "filterView.chatLogMask===0 && filterView.inner.querySelector('.msg-user').getBoundingClientRect().height===0")
+        # Explicit message links temporarily reveal the target without saving a
+        # different filter; Back and Forward keep the preference and destination.
+        await evaluate(instance, "filterView.jumpToSeq(1)")
+        await until(instance, "filterView.findEventNode(1).getBoundingClientRect().height>0")
+        assert await evaluate(instance, "chatLogMask(0,%d)===0 && filterView.inner.querySelectorAll('.chat-filter-reveal').length===1" % sid)
+        await evaluate(instance, "filterView.jumpToSeq(2)")
+        await until(instance, "filterView.navigationSeq===2 && filterView.findEventNode(2).getBoundingClientRect().height>0")
+        await evaluate(instance, "history.back(); true")
+        await until(instance, "filterView.navigationSeq===1 && filterView.findEventNode(1).getBoundingClientRect().height>0")
+        await evaluate(instance, "history.forward(); true")
+        await until(instance, "filterView.navigationSeq===2 && filterView.findEventNode(2).getBoundingClientRect().height>0")
+        assert await evaluate(instance, "chatLogMask(0,%d)===0 && chatLogMask(0,1)===7" % sid)
+    finally:
+        for console in (instance, peer):
+            await evaluate(console, """closeAllMenus(null); setChatLogMask(0,%d,7); closeTab('s:0:%d');
+                activateTab('s:0:1'); window.demoView=sessionViewFor(0,1); applyTheme('dark');
+                delete window.filterView; delete window.filterVisible; true""" % (sid, sid))
+            await until(console, "!!demoView && demoView.draftReady")
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+        runner.broadcast_sessions()
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    print("PASS: chat filters cover eight combinations, live and folded history, scroll anchors, pointer/keyboard menus, pending input, reload, independent readers and Back/Forward on desktop/phone in both themes", flush=True)
+
+
 async def reply_image_checks(instance, capture=False):
     await evaluate(instance, r"""(() => {
         const canvas=document.createElement('canvas');canvas.width=1200;canvas.height=600;
@@ -6184,6 +6369,9 @@ async def main(args):
             if args.notices_only:
                 await notices_panel_checks(instances[0], args.screenshots)
                 return
+            if args.chat_filter_only:
+                await chat_filter_checks(*instances, args.screenshots)
+                return
             if args.tool_clock_only:
                 await tool_clock_checks(instances[0], args.screenshots)
                 return
@@ -6209,6 +6397,7 @@ async def main(args):
             await engine_activity_checks(instances[0])
             await model_alias_checks(instances[0])
             await model_substitute_checks(instances[0], args.screenshots)
+            await chat_filter_checks(*instances, args.screenshots)
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])
@@ -6233,6 +6422,7 @@ if __name__ == "__main__":
     parser.add_argument("--navigation-only", action="store_true")
     parser.add_argument("--model-substitute-only", action="store_true")
     parser.add_argument("--notices-only", action="store_true")
+    parser.add_argument("--chat-filter-only", action="store_true")
     parser.add_argument("--tool-clock-only", action="store_true")
     parser.add_argument("--task-refresh-only", action="store_true")
     parser.add_argument("--token-usage-only", action="store_true")

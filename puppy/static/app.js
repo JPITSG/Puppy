@@ -2404,6 +2404,100 @@ function menuCheckRow(label, on, fn) {
   return button;
 }
 
+/* Personal transcript presentation, per backend/conversation in this browser.
+   Three bits are the entire persisted shape; all shown is the absent default.
+   Keep a memory copy so blocked browser storage never disables the controls. */
+const CHAT_LOG_ALL = 7;
+const CHAT_LOG_TYPES = [
+  {key: "questions", label: "Questions", bit: 1},
+  {key: "answers", label: "Answers", bit: 2},
+  {key: "tools", label: "Tools", bit: 4},
+];
+const chatLogMasks = new Map();
+const chatLogKey = (bid, sid) => `puppy.chatLog.${bid}.${sid}`;
+function chatLogMask(bid, sid) {
+  const key = chatLogKey(bid, sid);
+  if (chatLogMasks.has(key)) return chatLogMasks.get(key);
+  let raw = null;
+  try { raw = lsGet(key); } catch (_) { /* optional browser storage */ }
+  if (raw !== null && !/^[0-7]$/.test(raw)) throw new Error("Invalid saved chat log filters");
+  const mask = raw === null ? CHAT_LOG_ALL : Number(raw);
+  chatLogMasks.set(key, mask);
+  return mask;
+}
+function setChatLogMask(bid, sid, mask) {
+  if (!Number.isInteger(mask) || mask < 0 || mask > CHAT_LOG_ALL)
+    throw new Error("Invalid chat log filters");
+  const key = chatLogKey(bid, sid);
+  chatLogMasks.set(key, mask);
+  try { if (mask === CHAT_LOG_ALL) lsDel(key); else lsSet(key, String(mask)); } catch (_) {}
+  const view = sessionViewFor(bid, sid);
+  if (view) view.applyChatLogMask(mask);
+}
+
+/* One disclosure row, with three independent chips inside the same menu.
+   Native buttons retain focus across picks; no dialog or navigation entry. */
+function chatLogMenu(bid, sid, menu, anchor, place = () => positionAnchoredMenu(menu, anchor)) {
+  const section = el("div", "chat-log-menu");
+  const toggle = el("button", "chat-log-toggle");
+  toggle.type = "button";
+  toggle.appendChild(el("span", "", "Chat log"));
+  const summary = el("span", "chat-log-summary");
+  const arrow = el("span", "chat-log-arrow");
+  arrow.appendChild(choiceSvg());
+  toggle.append(summary, arrow);
+  toggle.setAttribute("aria-expanded", "false");
+  const options = el("div", "chat-log-options");
+  options.id = `chat-log-${bid}-${sid}`;
+  options.hidden = true;
+  options.setAttribute("role", "group");
+  options.setAttribute("aria-label", "Messages shown in this chat");
+  toggle.setAttribute("aria-controls", options.id);
+  const paint = () => {
+    const mask = chatLogMask(bid, sid);
+    const count = CHAT_LOG_TYPES.filter(type => mask & type.bit).length;
+    summary.textContent = count === 3 ? "All" : count === 0 ? "None" : `${count} of 3`;
+    section.classList.toggle("filtered", mask !== CHAT_LOG_ALL);
+    for (const [index, button] of [...options.children].entries())
+      button.setAttribute("aria-pressed", String(!!(mask & CHAT_LOG_TYPES[index].bit)));
+  };
+  for (const type of CHAT_LOG_TYPES) {
+    const button = el("button", "chat-log-chip");
+    button.type = "button";
+    button.dataset.chatLogType = type.key;
+    button.append(checkIcon(11), el("span", "", type.label));
+    button.setAttribute("aria-label", `Show ${type.key === "tools" ? "tool calls" : type.label.toLowerCase()}`);
+    button.onclick = event => {
+      event.stopPropagation();
+      setChatLogMask(bid, sid, chatLogMask(bid, sid) ^ type.bit);
+      paint();
+    };
+    options.appendChild(button);
+  }
+  toggle.onclick = event => {
+    event.stopPropagation();
+    options.hidden = !options.hidden;
+    toggle.setAttribute("aria-expanded", String(!options.hidden));
+    place();
+    if (!options.hidden) options.scrollIntoView({block: "nearest"});
+  };
+  section.onkeydown = event => {
+    if (event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation();
+      closeAllMenus(null);
+      if (anchor) anchor.focus({preventScroll: true});
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      const buttons = [...options.children], index = buttons.indexOf(document.activeElement);
+      if (index < 0) return;
+      event.preventDefault(); event.stopPropagation();
+      buttons[(index + (event.key === "ArrowRight" ? 1 : buttons.length - 1)) % buttons.length].focus();
+    }
+  };
+  paint();
+  section.append(toggle, options);
+  return section;
+}
+
 /* A linked remote workspace rides on the session as a structured descriptor.
    Everything user-facing shows its authoritative project path, never the
    node-private mirror directory the engine actually runs in. */
@@ -7044,6 +7138,9 @@ function sessionContextMenu(ev, bid, s) {
   const shown = sessionShowsMeta(sessionMetaOwner(bid, s));
   menu.appendChild(menuCheckRow("Show status bar", shown,
     () => setSessionShowsMeta(bid, s, !shown)));
+  const {clientX, clientY, currentTarget} = ev;
+  menu.appendChild(chatLogMenu(bid, s.id, menu, currentTarget,
+    () => positionContextMenu(menu, clientX, clientY)));
   appendSessionTasksToggle(menu, bid, s);
   menu.appendChild(el("div", "menu-sep"));
   const sessionWs = sessionWorkspace(s);
@@ -17043,6 +17140,8 @@ class SessionView {
     this.syncMetaVisibility();
     this.scroll = root.querySelector(".chat-scroll");
     this.inner = root.querySelector(".chat-inner");
+    this.chatLogMask = chatLogMask(this.tab.bid, this.tab.sid);
+    this.paintChatLogMask();
     /* Floats over the bottom of a detached history window and leads back to
        the live tail; zero-height and sticky, so it displaces no message. */
     this.tailPill = el("div", "tail-pill hidden");
@@ -17360,7 +17459,7 @@ class SessionView {
       for (const node of this.inner.children) {
         if (!node.dataset.seq) continue;
         const rect = node.getBoundingClientRect();
-        if (rect.bottom <= edge) continue;
+        if (rect.bottom <= rect.top || rect.bottom <= edge) continue;
         seq = Number(node.dataset.seq);
         offset = rect.top - edge;
         break;
@@ -17394,7 +17493,14 @@ class SessionView {
       this.scroll.scrollTop = place.top;
       return true;
     }
-    const node = this.findEventNode(place.seq);
+    let node = this.findEventNode(place.seq);
+    if (node && node.getBoundingClientRect().bottom <= node.getBoundingClientRect().top) {
+      // A preference can hide a saved anchor. Land on the nearest surviving
+      // event, while explicit message jumps reveal their exact target below.
+      const visible = [...this.inner.children].filter(n => n.dataset.seq &&
+        n.getBoundingClientRect().bottom > n.getBoundingClientRect().top);
+      node = visible.find(n => Number(n.dataset.seq) >= place.seq) || visible[visible.length - 1];
+    }
     if (!node) return false;
     this.scroll.scrollTop += node.getBoundingClientRect().top -
       this.scroll.getBoundingClientRect().top - place.offset;
@@ -18462,6 +18568,7 @@ class SessionView {
         toast("That message is no longer in this transcript", "info", TOAST_LONG);
         return;
       }
+      this.revealChatEvent(target);
       target.scrollIntoView({ block: "center" });
       target.classList.remove("search-flash");
       void target.offsetWidth;   // restart the animation on repeated jumps
@@ -19058,7 +19165,8 @@ class SessionView {
       return;
     }
     const text = this.visibleStatusText() || thinkingLabel(0);
-    const thinking = this.liveEl && this.liveKind === "thinking";
+    const thinking = this.liveEl && this.liveKind === "thinking" &&
+      (this.chatLogMask === undefined || !!(this.chatLogMask & 2));
     if (thinking) {
       const lab = this.liveEl.querySelector(".think-label");
       if (lab) lab.replaceWith(promptStatusLabel(text, "think-label"));
@@ -19888,6 +19996,48 @@ class SessionView {
   }
 
   /* ---- menus / meta ops ---- */
+  paintChatLogMask() {
+    for (const type of CHAT_LOG_TYPES)
+      this.root.classList.toggle(`chat-hide-${type.key}`, !(this.chatLogMask & type.bit));
+    const button = this.root.querySelector(".menu-btn");
+    const filtered = this.chatLogMask !== CHAT_LOG_ALL;
+    button.classList.toggle("chat-log-filtered", filtered);
+    button.setAttribute("aria-label", filtered ? "Session menu · chat log filtered" : "Session menu");
+  }
+
+  applyChatLogMask(mask) {
+    const edge = this.scroll.getBoundingClientRect().top;
+    const bottom = this.scroll.scrollHeight - this.scroll.scrollTop - this.scroll.clientHeight < 1;
+    const anchors = [...this.inner.children].filter(n => n.dataset.seq).map(node => ({
+      node, rect: node.getBoundingClientRect(),
+    })).filter(({rect}) => rect.bottom > rect.top);
+    this.chatLogMask = mask;
+    this.inner.querySelectorAll(".chat-filter-reveal").forEach(node => node.classList.remove("chat-filter-reveal"));
+    this.paintChatLogMask();
+    this.syncLiveStatus();
+    if (!this.scroll.clientHeight) return;
+    if (bottom) this.scrollBottom(true);
+    else {
+      const surviving = anchors.filter(({node}) => {
+        const r = node.getBoundingClientRect(); return r.bottom > r.top;
+      });
+      const anchor = surviving.find(({rect}) => rect.bottom > edge) || surviving[surviving.length - 1];
+      if (anchor) this.scroll.scrollTop += anchor.node.getBoundingClientRect().top - anchor.rect.top;
+    }
+    this.captureScroll();
+  }
+
+  revealChatEvent(target) {
+    // One temporary exception for an explicit link/search/history jump. The
+    // saved choices stay intact; the next filter pick or rebuild clears it.
+    let card = target;
+    while (card.parentElement && card.parentElement !== this.inner) card = card.parentElement;
+    if (card.parentElement === this.inner) {
+      this.inner.querySelectorAll(".chat-filter-reveal").forEach(node => node.classList.remove("chat-filter-reveal"));
+      card.classList.add("chat-filter-reveal");
+    }
+  }
+
   syncTaskReviewMenu() {
     const review = this.taskReviewMenuButton;
     if (!review || !review.isConnected) return;
@@ -19933,6 +20083,7 @@ class SessionView {
     menu.appendChild(menuCheckRow("Show status bar", shown,
       () => setSessionShowsMeta(this.tab.bid,
         this.session || findSessionMeta(this.tab.bid, this.tab.sid), !shown)));
+    menu.appendChild(chatLogMenu(this.tab.bid, this.tab.sid, menu, anchor));
     appendSessionTasksToggle(menu, this.tab.bid, this.session);
     menu.appendChild(el("div", "menu-sep"));
     const sessionWs = sessionWorkspace(this.session);

@@ -1193,6 +1193,24 @@ select.choice-native{display:none!important}
    rather than as off */
 .menu-check-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .menu .menu-sep{height:1px;background:var(--line);margin:4px 6px}
+/* The chat filter is one row until opened, then one strip of toggles. Keep
+   its width fixed across states so a pick never shifts the next target. */
+.menu:has(.chat-log-menu){min-width:min(274px,calc(100vw - 16px))}
+.chat-log-summary{margin-left:auto;color:var(--txt3);font-size:var(--fs-sm)}
+.chat-log-menu.filtered .chat-log-summary{color:var(--acc2)}
+.chat-log-arrow{display:flex;color:var(--txt3);transition:transform var(--t-fast) var(--ease)}
+.chat-log-toggle[aria-expanded=true] .chat-log-arrow{transform:rotate(180deg)}
+.chat-log-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:4px 6px 7px}
+.chat-log-options[hidden]{display:none}
+.menu button.chat-log-chip{
+  justify-content:center;gap:4px;min-height:var(--btn-h-sm);padding:0 5px;
+  border:1px solid var(--line2);border-radius:var(--r-sm);color:var(--txt2);
+  font-size:var(--fs-sm);white-space:nowrap;overflow-wrap:normal;
+}
+.chat-log-chip svg{flex-shrink:0;opacity:0}
+.menu button.chat-log-chip[aria-pressed=true]{background:var(--acc-dim);border-color:var(--acc-line-soft);color:var(--acc2)}
+.chat-log-chip[aria-pressed=true] svg{opacity:1}
+@media (hover:hover){.menu button.chat-log-chip:hover{background:var(--hov-strong)}}
 .menu.color-menu{display:grid;grid-template-columns:repeat(5,auto);gap:2px;padding:8px}
 /* .menu button.swatch specificity must beat the generic .menu button block rule */
 .swatch,.menu button.swatch{
@@ -1333,12 +1351,27 @@ select.choice-native{display:none!important}
 /* match the tabbar's + button: 26px, centers on the same vertical axis
    (head pad 14 - 4 = 10px edge gap, same as the tabbar's 10px) */
 .chat-head .menu-btn{width:26px;height:26px;font-size:var(--fs-2xl);margin-right:-4px}
+.chat-head .menu-btn.chat-log-filtered{position:relative;color:var(--acc2)}
+.chat-log-filtered::after{
+  content:"";position:absolute;right:1px;top:2px;width:var(--dot-sm);height:var(--dot-sm);
+  border-radius:50%;background:var(--acc);border:1px solid var(--panel);
+}
 /* no scroll-behavior:smooth - animated programmatic pins land short while
    content is still growing (clipped last message) and cause typing wobble.
    scrollbar-gutter keeps the width constant; --sbw (JS-measured scrollbar width)
    lets the composer/approval/queue columns line up with the transcript exactly */
 .chat-scroll{flex:1;overflow-y:auto;padding:18px 16px 8px;scrollbar-gutter:stable}
 .chat-inner{max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:10px}
+/* Keep every event and live block mounted: pairing, history cursors, folded
+   cards and incoming answers continue normally even while their type hides.
+   A message explicitly opened from search/history gets a temporary exception.
+   Active approval/question forms and system notices are never filtered. */
+.chat-hide-questions .chat-inner :is(.msg-user,.aside-q,.ta-prompt,.tb-label:has(+.ta-prompt),.ta-aside:has(.ta-aside-q)):not(.chat-filter-reveal):not(.chat-filter-reveal *),
+.chat-hide-answers .chat-inner :is(.msg-assistant,.think,.aside-a,.ta-assistant,.tb-label:has(+.ta-assistant),.ta-aside:not(:has(.ta-aside-q))):not(.chat-filter-reveal):not(.chat-filter-reveal *),
+.chat-hide-tools .chat-inner :is(.tool-card:not(.task-archive),.background-task,.ta-tool):not(.chat-filter-reveal):not(.chat-filter-reveal *),
+.chat-hide-questions.chat-hide-answers .chat-inner .aside-card:not(.chat-filter-reveal),
+.chat-hide-questions .chat-inner .aside-card:not(:has(.aside-a)):not(.chat-filter-reveal),
+.chat-hide-answers .chat-inner .aside-card:not(:has(.aside-q)):not(.chat-filter-reveal){display:none}
 .load-older{align-self:center;transition:opacity var(--t-base) var(--ease),color var(--t-base) var(--ease)}
 /* the pause before it fetches itself: a quiet pulse says "about to happen"
    without moving anything, so the reading position stays legible */

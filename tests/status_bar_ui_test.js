@@ -27,7 +27,7 @@ let sidebarRenders = 0, failNext = null;
 const icon = () => document.createElement("svg");
 const context = vm.createContext({
   document, state, console, dragTab: null,
-  checkIcon: icon, xIcon: icon,
+  checkIcon: icon, xIcon: icon, choiceSvg: icon,
   closeAllMenus() { document.querySelectorAll(".menu").forEach(menu => menu.remove()); return false; },
   createContextMenu() {
     const menu = document.createElement("div");

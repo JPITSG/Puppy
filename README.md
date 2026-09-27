@@ -139,6 +139,17 @@ task ending, an answer to a side question, a result dropped into a card you
 opened - carries the view down with it, exactly as a new message does, while a
 reading anywhere further up is never pulled away from it.
 
+- **Choose what the chat shows.** Open **Chat log** in the session's **…** menu
+  to reveal one compact row of **Questions**, **Answers** and **Tools** toggles.
+  Picks take effect immediately and keep the menu open. Questions covers your
+  prompts and side questions; Answers includes replies and thinking; Tools
+  includes tool results and background-task updates. The choices also apply
+  to entries inside folded tasks. Each conversation, including each task,
+  remembers its own choices in your browser; the sidebar's session context
+  menu offers the same control for Main. A dot on **…** marks an active filter.
+  Notices, errors and pending questions or approvals remain visible. Filtering
+  keeps the transcript intact; opening a search hit or message link temporarily
+  reveals its target without changing the saved choices.
 - **Three workspaces to choose from.** Point a session at a project directory,
   start it in a private disposable **Scratch** workspace with no folder to
   choose, or work on a project that lives on another backend

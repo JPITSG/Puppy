@@ -22,6 +22,7 @@ const context = vm.createContext({
   closeAllMenus() { document.querySelectorAll(".menu").forEach(menu => menu.remove()); return false; },
   backendSupportsEngineDefaults: () => false,
   menuCheckRow: () => document.createElement("button"),
+  chatLogMenu: () => document.createElement("div"),
   sessionViewShowsMeta: () => true, setSessionShowsMeta() {}, appendSessionTasksToggle() {},
   sessionWorkspace: () => null, isScratchWorkspace: () => true,
   positionAnchoredMenu() {},

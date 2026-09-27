@@ -14,6 +14,7 @@ There is no extra entry trapping the reader at the console's starting page.
 | Refresh from Main in a task's menu | A command with no destination entry; Back/Forward never refresh again. Back on delayed progress requests cancellation and waits for cleanup |
 | Submit a search, or change a filter once one has run | Records query, filters, backend selection and result list together; a filter changed before the first search or typing alone adds no stop. A session's "Show all" page lands in the result list it was pressed in, so Back and Forward show what was loaded; a new search or closing the tab cancels pages still loading and hands their buttons back |
 | Open a search hit, session citation, or jump to latest | Records the conversation and message location; Back restores the prior reading position or search results |
+| Chat log disclosure and its Questions, Answers and Tools toggles | Personal presentation choices; no history entry and no change to the saved transcript. Picks keep the menu open; history traversal dismisses it and keeps the chosen filters |
 | Settings backend selectors in Timeouts, Timers and System prompt | Records the backend being viewed; restores it through the existing read and draft-handling paths |
 | New session/task/terminal/browser/VNC, Open session, Tasks, Review task, Agent notes, Git repository, linked workspace, Move to directory, Move project, Edit backend, engine defaults/switch, VNC shortcut, draft conflict review, request/workflow detail, notices, Token usage | Dialog entries; Back dismisses the top layer; Forward opens a fresh dialog using current data |
 | Confirmations, one-field prompts and Remove task confirmation | Back cancels the pending choice; Forward cannot revive a resolved promise or repeat its action |
@@ -66,6 +67,11 @@ re-laying out the box never confuses an old pixel offset with new content.
 History restores that place unconditionally; plain tab selection restores the
 same place for an idle conversation (a running turn, or newer messages than the
 place knew of, land on the tail) without adding a history stop.
+Chat log filters preserve a surviving visible message at its current height,
+or the exact tail. A saved anchor hidden by a later preference lands on the
+nearest visible event. An explicit search, citation or history message jump
+temporarily reveals its target card, keeping the saved filters intact; the
+next filter pick, message jump or transcript rebuild clears that exception.
 Async links and transcript windows check their request/revision before landing.
 
 `modal(html, className, reopen)` registers every dialog with the shared layer
