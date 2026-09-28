@@ -57,7 +57,10 @@ There is no build step, no npm, no daemon besides Puppy itself: Python 3.9+,
 - **Built for the phone.** A responsive layout, a swipeable sidebar drawer, and
   light and dark themes. Overflowing tab and chip strips fade their contents at
   the edges while surrounding borders stay visible. Menus close when you tap or
-  move focus elsewhere, including when you open the sidebar.
+  move focus elsewhere, including when you open the sidebar. On a touch screen,
+  opening a session or switching tabs leaves the on-screen keyboard down until
+  you tap the message box or terminal; with a mouse or trackpad the caret lands
+  in the box as before.
 
 <p align="center">
   <img src="assets/mobile-dark.png" alt="Puppy on a phone in dark mode, showing a transcript with tool cards and the composer" width="270">

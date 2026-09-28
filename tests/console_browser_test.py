@@ -770,6 +770,85 @@ async def model_substitute_checks(instance, capture=False):
     print("PASS: model stand-ins reach the real console, keep amber names under hover, fit desktop/phone in both themes, survive reattach and clear on recovery", flush=True)
 
 
+async def show_focus_checks(instance):
+    """Switching sessions and tabs puts the caret in the prompt box only on a
+    mouse device. On a touch screen - Chromium's own touch emulation on a
+    phone's viewport, real taps - opening a session from the drawer, choosing
+    another tab and coming back leave every text field alone, so no on-screen
+    keyboard rises by itself, while a tap on the box still focuses it. The same
+    tab switch with a precise pointer focuses the box as it always has."""
+    sid = db.create_session("Keyboard preview", "claude", "/home/mira/projects/harbor", "", "", "", "default")
+    db.add_event(sid, "user", {"text": "Open me on a phone"})
+    db.add_event(sid, "assistant", {"text": "The keyboard stays down until the box is tapped."})
+    runner.broadcast_sessions()
+    # the drawer's slide and the tab strip's motion, never a spinner that turns forever
+    settled = ("Promise.all(document.getAnimations().filter(a=>a.effect && a.effect.getTiming().iterations!==Infinity)"
+               ".map(a=>a.finished.catch(()=>{})))")
+    typing = "(() => { const a=document.activeElement; return !!a && a.matches('textarea,input,[contenteditable]'); })()"
+    row = "document.querySelector('#sess-groups .sess-item[data-bid=\"0\"][data-session-id=\"%d\"]')" % sid
+    tab = lambda tab_id: "document.querySelector('.tab[data-tab-id=\"%s\"]')" % tab_id
+    box = "sessionViewFor(0,%d).composer.ta" % sid
+    point_of = """(() => { const n=%s; n.scrollIntoView({block:'nearest', inline:'nearest'});
+        const r=n.getBoundingClientRect(); return {x:r.x+r.width/2, y:r.y+r.height/2}; })()"""
+
+    async def tap(expression):
+        point = await evaluate(instance, point_of % expression)
+        await instance.call("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [point]},
+                            session=instance.page_session)
+        await instance.call("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []},
+                            session=instance.page_session)
+
+    async def click(expression):
+        point = await evaluate(instance, point_of % expression)
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1),
+                                session=instance.page_session)
+
+    await until(instance, "!!findSessionMeta(0,%d)" % sid)
+    await instance.call("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844,
+        "deviceScaleFactor": 2, "mobile": True}, session=instance.page_session)
+    await instance.call("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 5},
+                        session=instance.page_session)
+    try:
+        assert await evaluate(instance, "!precisePointer() && matchMedia('(pointer:coarse)').matches"), "Chromium answers as a touch screen"
+        await evaluate(instance, "openSessionTab(0,1,findSessionMeta(0,1)); document.activeElement.blur(); openDrawer(); true")
+        await until(instance, "(() => { const r=%s.getBoundingClientRect(); return r.left>=0 && r.right<=innerWidth; })()" % row)
+        await evaluate(instance, settled)
+        await tap(row)
+        await until(instance, "state.active==='s:0:%d' && !!sessionViewFor(0,%d) && sessionViewFor(0,%d).draftReady"
+                    " && !document.getElementById('app').classList.contains('side-open')" % (sid, sid, sid))
+        assert not await evaluate(instance, typing), "a session opened from the drawer leaves the keyboard down"
+        await evaluate(instance, settled)
+        await tap(tab("s:0:1"))
+        await until(instance, "state.active==='s:0:1'")
+        assert not await evaluate(instance, typing), "switching tabs leaves the keyboard down"
+        await tap(tab("s:0:%d" % sid))
+        await until(instance, "state.active==='s:0:%d'" % sid)
+        assert not await evaluate(instance, typing), "and so does coming back"
+        await tap(box)
+        await until(instance, "document.activeElement===%s" % box)
+    finally:
+        await instance.call("Emulation.setTouchEmulationEnabled", {"enabled": False}, session=instance.page_session)
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    # Pipe-driven headless Chromium reports hover:none even with touch off, so
+    # the page answers the precise-pointer query as a mouse would while the
+    # same switch is made with real clicks.
+    await evaluate(instance, """window.showFocusMedia=window.matchMedia;
+        window.matchMedia=q=>q==='(hover:hover) and (pointer:fine)' ? {matches:true} : showFocusMedia.call(window,q);
+        document.activeElement.blur(); true""")
+    try:
+        assert await evaluate(instance, "precisePointer() && focusOnShow()")
+        await click(tab("s:0:1"))
+        await until(instance, "state.active==='s:0:1'")
+        await click(tab("s:0:%d" % sid))
+        await until(instance, "state.active==='s:0:%d' && document.activeElement===%s" % (sid, box))
+    finally:
+        await evaluate(instance, "window.matchMedia=showFocusMedia; delete window.showFocusMedia; true")
+    await evaluate(instance, "closeTab('s:0:%d'); true" % sid)
+    print("PASS: switching sessions and tabs on a touch screen leaves the prompt box and its keyboard alone until tapped; a mouse device still lands in the box", flush=True)
+
+
 async def chat_filter_checks(instance, peer, capture=False):
     """Inline personal filters through real history, sockets and rendered CSS."""
     sid = db.create_session("Chat log preview", "claude", "/home/mira/projects/harbor", "", "", "", "default")
@@ -6398,6 +6477,9 @@ async def main(args):
             if args.chat_filter_only:
                 await chat_filter_checks(*instances, args.screenshots)
                 return
+            if args.show_focus_only:
+                await show_focus_checks(instances[0])
+                return
             if args.tool_clock_only:
                 await tool_clock_checks(instances[0], args.screenshots)
                 return
@@ -6424,6 +6506,7 @@ async def main(args):
             await model_alias_checks(instances[0])
             await model_substitute_checks(instances[0], args.screenshots)
             await chat_filter_checks(*instances, args.screenshots)
+            await show_focus_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])
@@ -6449,6 +6532,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-substitute-only", action="store_true")
     parser.add_argument("--notices-only", action="store_true")
     parser.add_argument("--chat-filter-only", action="store_true")
+    parser.add_argument("--show-focus-only", action="store_true")
     parser.add_argument("--tool-clock-only", action="store_true")
     parser.add_argument("--task-refresh-only", action="store_true")
     parser.add_argument("--token-usage-only", action="store_true")

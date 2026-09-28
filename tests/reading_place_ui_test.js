@@ -24,8 +24,11 @@ const el = (tag, cls = "", text = "") => {
 const sessions = [];
 const storage = new Map();
 let remembered = 0, changed = 0;
+// The primary pointer: a mouse unless a section turns it into a touch screen.
+const pointer = { fine: true };
 const context = vm.createContext({
   document, el, console,
+  window: { matchMedia: query => ({ matches: pointer.fine && query === "(hover:hover) and (pointer:fine)" }) },
   state: { views: {} },
   localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
   lsKey: key => key,
@@ -41,6 +44,8 @@ const context = vm.createContext({
   promptStatusLabel: label => el("span", "t-state", label),
   modalNewTask() {}, modal() { throw new Error("no dialog expected"); },
 });
+// The real rule for whether a pane coming onto the screen takes the caret.
+vm.runInContext(between("function precisePointer()", "function choiceSvg("), context);
 // The real SessionView keeps its name inside a closure so the harness can
 // build a small view on its prototype's place, landing and transcript methods.
 vm.runInContext("(() => {" + between("class SessionView {", "/* ================= TermView") +
@@ -378,4 +383,36 @@ const { SessionView } = context;
   assert.equal(main.scroll.scrollTop, 250, "the tab selected again lands its conversation on the reader's place");
   assert.equal(remembered > 0 && changed > 0, true, "selections went through the history hooks");
 }
-console.log("PASS: the reader's place across tab switches - anchored message and exact tail, re-shows, running turns, newer messages, detached windows, rebuilt transcripts, Main and task tabs, closed and vanished tasks, and the workspace rebuild hand-over");
+/* ---- a touch screen: the same landings, and no box raises the keyboard ---- */
+{
+  pointer.fine = false;
+  const geometry = { 4: [100, 100, 100, 100, 100, 100], 5: [100, 100, 100, 100] };
+  context.built = view => layout(view, geometry[view.tab.sid]);
+  sessions.push({ id: 4, name: "Phone", status: "idle", engine: "codex" },
+    { id: 5, name: "Phone task", status: "idle", engine: "codex", task: { parent: 4, state: "ready", result_seq: 1, created_at: 3 } });
+  const workspace = new context.SessionWorkspaceView({ id: "s:0:4", type: "session", bid: 0, sid: 4, title: "Phone" });
+  context.state.views["s:0:4"] = workspace;
+  const main = workspace.taskViews.get(4);
+  workspace.root.classList.add("on");
+  document.body.appendChild(workspace.root);
+  workspace.onVisibility(true);
+  workspace.onShow(true);
+  assert.equal(main.scroll.scrollTop, 300, "the tab opened on a phone still lands on its tail");
+  assert.equal(main.composer.focused, 0, "but its box waits for a tap instead of raising the keyboard");
+  main.scroll.scrollTop = 120;
+  workspace.select(5);
+  const task = workspace.taskViews.get(5);
+  assert.equal(task.scroll.scrollTop, 100, "a task selected on a phone lands on its tail");
+  assert.equal(task.composer.focused, 0, "without focusing its box");
+  workspace.select(4);
+  assert.equal(main.scroll.scrollTop, 120, "back on Main, the reader's place is restored");
+  assert.equal(main.composer.focused, 0, "and the box is still left alone");
+  workspace.select(5);
+  workspace.closeTask(5);
+  assert.equal(main.composer.focused, 0, "nor does Main take a closed tab's focus on a phone");
+  pointer.fine = true;
+  workspace.select(4);
+  assert.equal(main.composer.focused, 1, "with a mouse again, a selection focuses the box as before");
+  workspace.root.remove();
+}
+console.log("PASS: the reader's place across tab switches - anchored message and exact tail, re-shows, running turns, newer messages, detached windows, rebuilt transcripts, Main and task tabs, closed and vanished tasks, the workspace rebuild hand-over, and a touch screen's landings that leave the keyboard down");

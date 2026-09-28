@@ -1766,9 +1766,26 @@ let openChoiceControl = null;
 let choiceMenuSeq = 0;
 
 function prefersNativeChoices() {
+  return !precisePointer();
+}
+
+/* The primary pointer hovers and aims precisely: a mouse or a trackpad.
+   Anything else is a touch screen, where the native picker is the better
+   control and a text field focused from script raises an on-screen keyboard
+   over a third of the page. */
+function precisePointer() {
   if (window.matchMedia)
-    return !window.matchMedia("(hover:hover) and (pointer:fine)").matches;
-  return typeof navigator !== "undefined" && !!navigator.maxTouchPoints;
+    return window.matchMedia("(hover:hover) and (pointer:fine)").matches;
+  return !(typeof navigator !== "undefined" && navigator.maxTouchPoints);
+}
+
+/* Whether a pane coming onto the screen takes the caret into its text field.
+   Only where that costs nothing to look at: on a touch screen the field waits
+   for a tap, so switching sessions, tasks or tabs never raises the keyboard by
+   itself. A press on a control that exists to type (Reconnect, a dialog opened
+   to type into) still focuses as it always has. */
+function focusOnShow() {
+  return precisePointer();
 }
 
 function choiceSvg(kind) {
@@ -17414,7 +17431,7 @@ class SessionView {
       this.onScreen = true;
       this.land();
     }
-    if (focus) this.composer.focus();
+    if (focus && focusOnShow()) this.composer.focus();
   }
 
   /* Leaving the screen. A task tab switched away from is still laid out, so
@@ -20496,7 +20513,7 @@ class TermView {
       // Another viewer may have resized the shared PTY while this tab was hidden.
       this.sendResize();
     }, 30);
-    if (focus && this.term && !this.isDead()) this.term.focus();
+    if (focus && focusOnShow() && this.term && !this.isDead()) this.term.focus();
   }
   isDead() { return !!this.root.querySelector(".term-dead"); }
 
@@ -20781,7 +20798,7 @@ class TermView {
       noteRemoteSocketReachable(this.tab.bid);
       this.deadReason = "";
       this.sendResize();
-      if (state.active === this.tab.id && isTabVisible(this.tab.id)) this.term.focus();
+      if (state.active === this.tab.id && isTabVisible(this.tab.id) && focusOnShow()) this.term.focus();
       this.dataSub = this.term.onData(d => { if (ws.readyState === 1) ws.send(enc.encode(d)); });
     };
     ws.onmessage = (ev) => {
@@ -21106,7 +21123,9 @@ class BrowserView {
     if (!this.started) { this.started = true; this.start(); }
     else this.queueViewport();
     if (!focus || this.isDead()) return;
-    if (this.typeRow.classList.contains("hidden")) this.stage.focus({ preventScroll: true });
+    /* the stage takes keys without raising a keyboard; the typing row's field
+       raises one, so only a precise pointer's return lands in it */
+    if (this.typeRow.classList.contains("hidden") || !focusOnShow()) this.stage.focus({ preventScroll: true });
     else this.ime.focus({ preventScroll: true });
   }
   onVisibility(visible) {
@@ -22877,7 +22896,7 @@ class SearchView {
 
   onShow(focus) {
     this.renderNodeChips();   // reachability may have changed while hidden
-    if (focus && !this.focusedOnce) {
+    if (focus && !this.focusedOnce && focusOnShow()) {
       this.focusedOnce = true;
       this.input.focus();
     }
