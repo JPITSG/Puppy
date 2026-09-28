@@ -1196,11 +1196,10 @@ select.choice-native{display:none!important}
 /* The chat filter is one row until opened, then one strip of toggles. Keep
    its width fixed across states so a pick never shifts the next target. */
 .menu:has(.chat-log-menu){min-width:min(274px,calc(100vw - 16px))}
-.chat-log-summary{margin-left:auto;color:var(--txt3);font-size:var(--fs-sm)}
-.chat-log-menu.filtered .chat-log-summary{color:var(--acc2)}
-.chat-log-arrow{display:flex;color:var(--txt3);transition:transform var(--t-fast) var(--ease)}
+.chat-log-summary{margin-left:auto;color:var(--acc);font-size:var(--fs-sm)}
+.chat-log-arrow{display:flex;color:var(--acc);transition:transform var(--t-fast) var(--ease)}
 .chat-log-toggle[aria-expanded=true] .chat-log-arrow{transform:rotate(180deg)}
-.chat-log-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:4px 6px 7px}
+.chat-log-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:7px 0}
 .chat-log-options[hidden]{display:none}
 .menu button.chat-log-chip{
   justify-content:center;gap:4px;min-height:var(--btn-h-sm);padding:0 5px;
