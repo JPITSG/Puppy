@@ -4180,6 +4180,7 @@ async def checks(a, b, hub, capture=False):
     await usage_error_checks(a, capture)
     await host_panel_checks(a, capture)
     await notices_panel_checks(a, capture)
+    await notice_wrapping_checks(a, capture)
     await token_usage_checks(a, capture)
     # Measure real layout: an idle status must not reserve a row below tools.
     for width, height in [(1440, 900), (390, 844)]:
@@ -5652,6 +5653,84 @@ async def notices_panel_checks(instance, capture=False):
           flush=True)
 
 
+async def notice_wrapping_checks(instance, capture=False):
+    """Long backend prose and unbroken text stay readable inside live toasts
+    and their history rows, with and without a folded repeat count."""
+    message = ("Workshop: Could not load the preview helper from PATH. "
+               "See https://docs.example.test/runner/concepts/sandboxing"
+               "#prerequisites-for-unprivileged-sandboxing for setup instructions. "
+               "File /home/mira/projects/" + "preview" * 16 + "/settings.json "
+               "could not be read. Reference " + "a9c7" * 40 + " · try again after setup")
+    try:
+        for width, height, scale, name in ((1440, 900, 1, "desktop"),
+                                           (390, 844, 2, "phone"),
+                                           (320, 640, 2, "narrow-phone")):
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": scale,
+                "mobile": name != "desktop"}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); $('app').classList.add('side-open'); "
+                               "openNoticesPanel(); true" % json.dumps(theme))
+                for count in (1, 2):
+                    if count == 1:
+                        await evaluate(instance, "liveToasts.clear(); $('toasts').replaceChildren(); true")
+                    await evaluate(instance, "toast(%s, 'warn', TOAST_LONG); true" % json.dumps(message))
+                    await until(instance, "document.querySelector('#foot-notices .notice-text')"
+                                "?.textContent === %s" % json.dumps(message))
+                    await until(instance, "!noticeFlush && noticeOutbox.length === 0 && "
+                                "!$('foot-notices').classList.contains('disclosure-animating')")
+                    measured = await evaluate(instance, """(() => {
+                        const toast=$('toasts').querySelector('.toast');
+                        for (const node of [toast, ...toast.children])
+                            for (const animation of node.getAnimations()) animation.finish();
+                        const rect=toast.getBoundingClientRect();
+                        const fits=(row, selector)=>{
+                            const label=row.querySelector(selector), r=label.getBoundingClientRect();
+                            const box=row.getBoundingClientRect(), css=getComputedStyle(row);
+                            const range=document.createRange(); range.selectNodeContents(label);
+                            const lines=[...range.getClientRects()];
+                            return {inside:r.left>=box.left+parseFloat(css.paddingLeft) &&
+                                           r.right<=box.right-parseFloat(css.paddingRight)+1,
+                                    readable:lines.length>1 && lines.every(line=>
+                                        line.left>=r.left-1 && line.right<=r.right+1 &&
+                                        line.top>=r.top-1 && line.bottom<=r.bottom+1),
+                                    scrolls:row.scrollWidth>row.clientWidth+1,
+                                    text:label.textContent};
+                        };
+                        const badge=toast.querySelector('.toast-count');
+                        const history=$('foot-notices'); history.scrollTop=0;
+                        return {viewport:rect.left>=0 && rect.right<=innerWidth &&
+                                         rect.top>=0 && rect.bottom<=innerHeight,
+                                toast:fits(toast,'.toast-text'),
+                                history:fits(history.querySelector('.notice-row'),'.notice-text'),
+                                historyScrolls:history.scrollWidth>history.clientWidth+1,
+                                count:badge ? badge.textContent : null,
+                                countFits:!badge || badge.getBoundingClientRect().right<
+                                    toast.querySelector('.toast-text').getBoundingClientRect().left};
+                    })()""")
+                    context = (name, theme, count, measured)
+                    assert measured["viewport"] and measured["countFits"], context
+                    assert measured["count"] == ("2 ×" if count == 2 else None), context
+                    assert not measured["historyScrolls"], context
+                    for surface in ("toast", "history"):
+                        assert measured[surface] == {"inside": True, "readable": True,
+                                                    "scrolls": False, "text": message}, context
+                if capture:
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                               session=instance.page_session)
+                    (BASE / "data" / ("notice-wrapping-" + name + "-" + theme + ".png")).write_bytes(
+                        base64.b64decode(shot["data"]))
+    finally:
+        await evaluate(instance, "closeNoticesPanel(); $('app').classList.remove('side-open'); "
+                       "applyTheme('dark'); liveToasts.clear(); $('toasts').replaceChildren(); true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1,
+            "mobile": False}, session=instance.page_session)
+    print("PASS: long prose, URLs, paths and unbroken identifiers wrap inside toasts and "
+          "notification history, including repeat counts, on desktop and two phone widths "
+          "in both themes", flush=True)
+
+
 # The chart palette the validator passed on the console's two surfaces
 # (#12141a dark, #ffffff light): the Engine grouping wears each engine's slot.
 USAGE_PALETTE = {
@@ -6473,6 +6552,7 @@ async def main(args):
                 return
             if args.notices_only:
                 await notices_panel_checks(instances[0], args.screenshots)
+                await notice_wrapping_checks(instances[0], args.screenshots)
                 return
             if args.chat_filter_only:
                 await chat_filter_checks(*instances, args.screenshots)

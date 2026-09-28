@@ -769,7 +769,6 @@ a{color:var(--acc2)}
    of a notice that wraps rather than in the middle of it */
 .notice-row .foot-ico{height:1.4em}
 .notice-row .toast-count{line-height:inherit}
-.notice-text{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
 .notice-time{
   flex:0 0 auto;margin-left:auto;font:var(--fs-2xs) var(--mono);line-height:1.4;
   color:var(--txt3);font-variant-numeric:tabular-nums;white-space:nowrap;
@@ -3052,6 +3051,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   box-shadow:0 14px 40px -14px rgba(0,0,0,.9);animation:toast-in var(--t-slow) var(--ease);
   touch-action:pan-y pinch-zoom;
 }
+/* Notice text can shrink beside a repeat count or timestamp; long URLs,
+   paths and identifiers wrap inside both the toast and its history row. */
+.toast-text,.notice-text{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
 /* the one status tone vocabulary, as everywhere else in the console */
 .toast.ok{border-left-color:var(--ok)}
 .toast.warn{border-left-color:var(--warn)}

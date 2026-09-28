@@ -761,11 +761,13 @@ with a window of history around it.
   sampling in the background, retaining up to half an hour of CPU history in
   memory; none of these readings is written to disk.
 - **Notices that stay readable.** Confirmations, warnings and failures appear
-  as one line in the bottom-right corner, coloured by outcome and worded the
-  same way wherever they came from. The same notice arriving again counts up on
-  the row it already occupies (*2 ×*, *3 ×*) and restarts its timer instead of
-  stacking copies; anything naming a next step stays up longer. On touch, hold
-  a notice to keep it or swipe it right to dismiss it.
+  as compact messages in the bottom-right corner, coloured by outcome and worded
+  the same way wherever they came from. Long text, including URLs, paths and
+  unbroken identifiers, wraps inside the notice on desktop and phone. The same
+  notice arriving again counts up on the row it already occupies (*2 ×*, *3 ×*)
+  and restarts its timer instead of stacking copies; anything naming a next
+  step stays up longer. On touch, hold a notice to keep it or swipe it right to
+  dismiss it.
   Engine notices use readable messages: approaching a usage limit is distinct
   from reaching it, with the reported percentage and local reset time when
   available. Native warning text is preserved, retries remain activity updates,
