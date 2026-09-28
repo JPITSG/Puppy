@@ -857,7 +857,9 @@ async def chat_filter_checks(instance, peer, capture=False):
             return landed.seq>place.seq && filterVisible(node) && Math.abs(landed.offset-place.offset)<1;
         })()""" % sid), "a saved question anchor hidden later lands on the next visible answer"
         # Menus fit on short windows and narrow phones in both themes. One
-        # disclosure adds no navigation stop, and its native chips keep focus.
+        # disclosure adds no navigation stop, and its native rows keep focus.
+        # Its choices hang indented from the rail under the row's label, their
+        # tick boxes in the one column every other setting row's box stands in.
         for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone"), (320, 480, "narrow")]:
             await instance.call("Emulation.setDeviceMetricsOverride", {
                 "width": width, "height": height, "deviceScaleFactor": 2,
@@ -868,14 +870,22 @@ async def chat_filter_checks(instance, peer, capture=False):
                 before = await evaluate(instance, "history.length")
                 await click(".chat.on .menu-btn")
                 await click(".chat-log-toggle")
-                await click(".chat-log-chip[data-chat-log-type=tools]")
+                await click(".chat-log-choice[data-chat-log-type=tools]")
                 assert await evaluate(instance, """(() => {
                     const m=document.querySelector('.menu.dyn'), options=m.querySelector('.chat-log-options'),
-                        chips=[...options.children], r=m.getBoundingClientRect();
+                        choices=[...options.children], r=m.getBoundingClientRect(),
+                        box=[...m.querySelectorAll(':scope > .menu-check .menu-check-mark')].map(n=>n.getBoundingClientRect()),
+                        marks=choices.map(n=>n.querySelector('.menu-check-mark').getBoundingClientRect()),
+                        label=m.querySelector('.chat-log-toggle span').getBoundingClientRect(),
+                        rail=options.getBoundingClientRect();
                     return r.left>=0 && r.right<=innerWidth && r.top>=0 && r.bottom<=innerHeight &&
                         m.scrollWidth<=m.clientWidth && !options.hidden && !document.querySelector('.modal') &&
-                        chips.every(n=>n.scrollWidth<=n.clientWidth && n.getBoundingClientRect().width>=70) &&
-                        chips[2].getAttribute('aria-pressed')==='false' && document.activeElement===chips[2] &&
+                        box.length>0 && marks.every(b=>Math.abs(b.right-box[0].right)<0.5 && Math.abs(b.width-box[0].width)<0.5) &&
+                        rail.left>label.left && choices.every(n=>n.querySelector('.menu-check-label').getBoundingClientRect().left>rail.left) &&
+                        choices.every(n=>n.scrollWidth<=n.clientWidth) &&
+                        choices[2].getAttribute('aria-checked')==='false' && !choices[2].querySelector('svg') &&
+                        choices[0].getAttribute('aria-checked')==='true' && !!choices[0].querySelector('.menu-check-mark svg') &&
+                        document.activeElement===choices[2] &&
                         m.querySelector('.chat-log-summary').textContent==='2 of 3' && history.length===%d;
                 })()""" % before), (name, theme)
                 if capture and name != "narrow":
@@ -896,7 +906,7 @@ async def chat_filter_checks(instance, peer, capture=False):
         await evaluate(instance, """sessionContextMenu({preventDefault(){},stopPropagation(){},clientX:250,clientY:870,
             currentTarget:document.querySelector('.sess-item')},0,findSessionMeta(0,%d)); true""" % sid)
         await click(".chat-log-toggle")
-        await click(".chat-log-chip[data-chat-log-type=questions]")
+        await click(".chat-log-choice[data-chat-log-type=questions]")
         assert await evaluate(instance, "filterView.chatLogMask===6 && document.querySelector('.menu.dyn').getBoundingClientRect().bottom<=innerHeight")
         await evaluate(instance, "closeAllMenus(null); setChatLogMask(0,%d,0); true" % sid)
         hub._emit("tool_use", {"tool_use_id": "hidden-live", "tool": "Read", "input": {"file_path": "layout.css"}})

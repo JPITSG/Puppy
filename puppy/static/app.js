@@ -2435,8 +2435,9 @@ function setChatLogMask(bid, sid, mask) {
   if (view) view.applyChatLogMask(mask);
 }
 
-/* One disclosure row, with three independent chips inside the same menu.
-   Native buttons retain focus across picks; no dialog or navigation entry. */
+/* One disclosure row whose three choices open beneath it as check rows, the
+   menu's own tick box in the menu's own column, hung from a rail under the
+   row's label. Picks keep focus and the menu; no dialog or navigation entry. */
 function chatLogMenu(bid, sid, menu, anchor, place = () => positionAnchoredMenu(menu, anchor)) {
   const section = el("div", "chat-log-menu");
   const toggle = el("button", "chat-log-toggle");
@@ -2458,14 +2459,18 @@ function chatLogMenu(bid, sid, menu, anchor, place = () => positionAnchoredMenu(
     const count = CHAT_LOG_TYPES.filter(type => mask & type.bit).length;
     summary.textContent = count === 3 ? "All" : count === 0 ? "None" : `${count} of 3`;
     section.classList.toggle("filtered", mask !== CHAT_LOG_ALL);
-    for (const [index, button] of [...options.children].entries())
-      button.setAttribute("aria-pressed", String(!!(mask & CHAT_LOG_TYPES[index].bit)));
+    for (const [index, button] of [...options.children].entries()) {
+      const on = !!(mask & CHAT_LOG_TYPES[index].bit);
+      button.setAttribute("aria-checked", String(on));
+      button.querySelector(".menu-check-mark").replaceChildren(...(on ? [checkIcon(13)] : []));
+    }
   };
   for (const type of CHAT_LOG_TYPES) {
-    const button = el("button", "chat-log-chip");
+    const button = el("button", "menu-check chat-log-choice");
     button.type = "button";
     button.dataset.chatLogType = type.key;
-    button.append(checkIcon(11), el("span", "", type.label));
+    button.setAttribute("role", "menuitemcheckbox");
+    button.append(el("span", "menu-check-label", type.label), el("span", "menu-check-mark"));
     button.setAttribute("aria-label", `Show ${type.key === "tools" ? "tool calls" : type.label.toLowerCase()}`);
     button.onclick = event => {
       event.stopPropagation();
@@ -2486,11 +2491,11 @@ function chatLogMenu(bid, sid, menu, anchor, place = () => positionAnchoredMenu(
       event.preventDefault(); event.stopPropagation();
       closeAllMenus(null);
       if (anchor) anchor.focus({preventScroll: true});
-    } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       const buttons = [...options.children], index = buttons.indexOf(document.activeElement);
       if (index < 0) return;
       event.preventDefault(); event.stopPropagation();
-      buttons[(index + (event.key === "ArrowRight" ? 1 : buttons.length - 1)) % buttons.length].focus();
+      buttons[(index + (event.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length].focus();
     }
   };
   paint();

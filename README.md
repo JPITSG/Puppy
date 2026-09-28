@@ -140,7 +140,7 @@ opened - carries the view down with it, exactly as a new message does, while a
 reading anywhere further up is never pulled away from it.
 
 - **Choose what the chat shows.** Open **Chat log** in the session's **…** menu
-  to reveal one compact row of **Questions**, **Answers** and **Tools** toggles.
+  to reveal **Questions**, **Answers** and **Tools** as check rows beneath it.
   Picks take effect immediately and keep the menu open. Questions covers your
   prompts and side questions; Answers includes replies and thinking; Tools
   includes tool results and background-task updates. The choices also apply

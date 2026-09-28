@@ -1193,23 +1193,16 @@ select.choice-native{display:none!important}
    rather than as off */
 .menu-check-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .menu .menu-sep{height:1px;background:var(--line);margin:4px 6px}
-/* The chat filter is one row until opened, then one strip of toggles. Keep
-   its width fixed across states so a pick never shifts the next target. */
-.menu:has(.chat-log-menu){min-width:min(274px,calc(100vw - 16px))}
+/* The chat filter is one row until opened, then its three choices hang from
+   a rail under the row's label: indented, one step quieter, but on the menu's
+   own tick box in the same right-hand column as every other setting row. */
 .chat-log-summary{margin-left:auto;color:var(--acc);font-size:var(--fs-sm)}
 .chat-log-arrow{display:flex;color:var(--acc);transition:transform var(--t-fast) var(--ease)}
 .chat-log-toggle[aria-expanded=true] .chat-log-arrow{transform:rotate(180deg)}
-.chat-log-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:7px 0}
+.chat-log-options{margin:0 0 3px 16px;padding-left:4px;border-left:1px solid var(--line2)}
 .chat-log-options[hidden]{display:none}
-.menu button.chat-log-chip{
-  justify-content:center;gap:4px;min-height:var(--btn-h-sm);padding:0 5px;
-  border:1px solid var(--line2);border-radius:var(--r-sm);color:var(--txt2);
-  font-size:var(--fs-sm);white-space:nowrap;overflow-wrap:normal;
-}
-.chat-log-chip svg{flex-shrink:0;opacity:0}
-.menu button.chat-log-chip[aria-pressed=true]{background:var(--acc-dim);border-color:var(--acc-line-soft);color:var(--acc2)}
-.chat-log-chip[aria-pressed=true] svg{opacity:1}
-@media (hover:hover){.menu button.chat-log-chip:hover{background:var(--hov-strong)}}
+.menu button.chat-log-choice{min-height:30px;padding-left:9px;color:var(--txt2)}
+@media (hover:hover){.menu button.chat-log-choice:hover{color:var(--txt)}}
 .menu.color-menu{display:grid;grid-template-columns:repeat(5,auto);gap:2px;padding:8px}
 /* .menu button.swatch specificity must beat the generic .menu button block rule */
 .swatch,.menu button.swatch{
