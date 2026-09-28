@@ -860,6 +860,9 @@ async def chat_filter_checks(instance, peer, capture=False):
         # disclosure adds no navigation stop, and its native rows keep focus.
         # Its choices hang indented from the rail under the row's label, their
         # tick boxes in the one column every other setting row's box stands in.
+        # Each row draws its own piece of the rail: the pieces meet up the
+        # column, a tee branches into every choice but the last at its middle
+        # and ends at the row's edge, and the last takes an elbow instead.
         for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone"), (320, 480, "narrow")]:
             await instance.call("Emulation.setDeviceMetricsOverride", {
                 "width": width, "height": height, "deviceScaleFactor": 2,
@@ -877,11 +880,24 @@ async def chat_filter_checks(instance, peer, capture=False):
                         box=[...m.querySelectorAll(':scope > .menu-check .menu-check-mark')].map(n=>n.getBoundingClientRect()),
                         marks=choices.map(n=>n.querySelector('.menu-check-mark').getBoundingClientRect()),
                         label=m.querySelector('.chat-log-toggle span').getBoundingClientRect(),
-                        rail=options.getBoundingClientRect();
+                        rows=choices.map(n=>n.getBoundingClientRect()),
+                        pieces=choices.map((n,i)=>{ const b=getComputedStyle(n,'::before'), a=getComputedStyle(n,'::after');
+                            return {rail:rows[i].left+parseFloat(b.left), bar:b.borderLeftWidth, top:parseFloat(b.top),
+                                foot:b.borderBottomWidth, tall:parseFloat(b.height), wide:parseFloat(b.width),
+                                branch:a.content==='none' ? null : {from:rows[i].left+parseFloat(a.left),
+                                    to:rows[i].left+parseFloat(a.left)+parseFloat(a.width), at:parseFloat(a.top), line:a.borderTopWidth}}; }),
+                        rail=pieces[0].rail;
                     return r.left>=0 && r.right<=innerWidth && r.top>=0 && r.bottom<=innerHeight &&
                         m.scrollWidth<=m.clientWidth && !options.hidden && !document.querySelector('.modal') &&
                         box.length>0 && marks.every(b=>Math.abs(b.right-box[0].right)<0.5 && Math.abs(b.width-box[0].width)<0.5) &&
-                        rail.left>label.left && choices.every(n=>n.querySelector('.menu-check-label').getBoundingClientRect().left>rail.left) &&
+                        rail>label.left && choices.every(n=>n.querySelector('.menu-check-label').getBoundingClientRect().left>rail) &&
+                        pieces.every(p=>Math.abs(p.rail-rail)<0.5 && p.bar==='1px' && p.top===0) &&
+                        rows.slice(1).every((r,i)=>Math.abs(r.top-rows[i].bottom)<0.5) &&
+                        pieces.slice(0,-1).every((p,i)=>p.branch && p.foot==='0px' && p.branch.line==='1px' &&
+                            Math.abs(p.branch.from-rail)<0.5 && Math.abs(p.branch.to-rows[i].left)<0.5 &&
+                            Math.abs(p.branch.at-rows[i].height/2)<0.5) &&
+                        !pieces[2].branch && pieces[2].foot==='1px' && Math.abs(pieces[2].tall-(rows[2].height/2+1))<0.5 &&
+                        Math.abs(pieces[2].rail+pieces[2].wide-rows[2].left)<0.5 &&
                         choices.every(n=>n.scrollWidth<=n.clientWidth) &&
                         choices[2].getAttribute('aria-checked')==='false' && !choices[2].querySelector('svg') &&
                         choices[0].getAttribute('aria-checked')==='true' && !!choices[0].querySelector('.menu-check-mark svg') &&

@@ -1195,13 +1195,28 @@ select.choice-native{display:none!important}
 .menu .menu-sep{height:1px;background:var(--line);margin:4px 6px}
 /* The chat filter is one row until opened, then its three choices hang from
    a rail under the row's label: indented, one step quieter, but on the menu's
-   own tick box in the same right-hand column as every other setting row. */
+   own tick box in the same right-hand column as every other setting row. Like
+   the host tree, each row draws its own piece of the rail in the gutter to its
+   left - a tee while choices follow, a rounded elbow into the last - so the
+   line turns into every choice at its middle and the pieces join up the
+   column. The branch ends where the row's hover wash begins. */
 .chat-log-summary{margin-left:auto;color:var(--acc);font-size:var(--fs-sm)}
 .chat-log-arrow{display:flex;color:var(--acc);transition:transform var(--t-fast) var(--ease)}
 .chat-log-toggle[aria-expanded=true] .chat-log-arrow{transform:rotate(180deg)}
-.chat-log-options{margin:0 0 3px 16px;padding-left:4px;border-left:1px solid var(--line2)}
+.chat-log-options{--branch-w:8px;margin-bottom:3px;padding-left:24px}
 .chat-log-options[hidden]{display:none}
-.menu button.chat-log-choice{min-height:30px;padding-left:9px;color:var(--txt2)}
+.menu button.chat-log-choice{position:relative;overflow:visible;min-height:30px;padding-left:7px;color:var(--txt2)}
+.chat-log-choice::before,.chat-log-choice::after{
+  content:"";position:absolute;left:calc(-1 * var(--branch-w));box-sizing:border-box;
+  border:0 solid var(--line2);pointer-events:none;
+}
+.chat-log-choice::before{top:0;bottom:0;border-left-width:1px}
+.chat-log-choice::after{top:50%;width:var(--branch-w);border-top-width:1px}
+.chat-log-choice:last-child::before{
+  bottom:auto;width:var(--branch-w);height:calc(50% + 1px);
+  border-bottom-width:1px;border-bottom-left-radius:var(--r-xs);
+}
+.chat-log-choice:last-child::after{content:none}
 @media (hover:hover){.menu button.chat-log-choice:hover{color:var(--txt)}}
 .menu.color-menu{display:grid;grid-template-columns:repeat(5,auto);gap:2px;padding:8px}
 /* .menu button.swatch specificity must beat the generic .menu button block rule */
