@@ -799,6 +799,19 @@ async def _safe_send(ws, payload, pool=None) -> None:
 # How long every background task may be gone without the engine waking the
 # model before the wait is ended anyway (the CLI normally continues at once).
 BACKGROUND_WAKE_GRACE = 60.0
+# A wait on background work after the model has answered is checked with the
+# model itself: once it has lasted BACKGROUND_CHECK_AFTER, or at once when a
+# prompt is waiting in the queue, one side question asks whether any task is
+# still needed, and only a plain STOP ends the wait early. An answer is given
+# BACKGROUND_CHECK_TIMEOUT; any doubt keeps waiting, and no wait after an
+# answer outlasts BACKGROUND_WAIT_LIMIT.
+BACKGROUND_CHECK_AFTER = 120.0
+BACKGROUND_CHECK_TIMEOUT = 120.0
+BACKGROUND_WAIT_LIMIT = 3600.0
+# how often a wait looks at the queue and its own clocks
+BACKGROUND_WAIT_POLL = 2.0
+# request ids of Puppy's own checks, apart from the user's side questions
+BACKGROUND_CHECK_PREFIX = "bgcheck-"
 TYPING_LEASE_SECONDS = 6.0
 _UNSET_DRAFT_REVISION = object()
 
@@ -833,10 +846,58 @@ def _background_wait_text(tasks) -> str:
         len(names), "" if len(names) == 1 else "s", shown)
 
 
-def _background_wait_status(tasks) -> str:
+def _background_wait_status(tasks, note: str = "") -> str:
     if not tasks:
         return "Background tasks finished; waiting for the model to continue..."
-    return _background_wait_text(tasks) + " · Stop ends the wait"
+    return _background_wait_text(tasks) + (" · " + note if note else "") + \
+        " · Stop ends the wait"
+
+
+def _background_task_names(tasks) -> str:
+    names = [" ".join(str(row.get("description") or row.get("id") or "task").split())[:80]
+             for row in tasks if isinstance(row, dict)]
+    shown = "; ".join(names[:3])
+    if len(names) > 3:
+        shown += " and {} more".format(len(names) - 3)
+    return shown
+
+
+def _background_check_question(tasks) -> str:
+    """The side question that asks the model whether the background work
+    still running after its answer is needed. Only an answer that is exactly
+    STOP ends the wait; everything else keeps it."""
+    rows = []
+    for row in tasks:
+        if not isinstance(row, dict):
+            continue
+        ident = " ".join(str(row.get("id") or "").split())[:40]
+        text = " ".join(str(row.get("description") or "").split())[:200]
+        rows.append("- " + (ident + ": " if ident else "") + (text or "(no description)"))
+    return (
+        "This question comes from Puppy, the app running this session, not from "
+        "the user. Your last reply ended your turn, but background tasks you "
+        "started are still running:\n" + "\n".join(rows) + "\n"
+        "Is any of them still needed? A task is still needed if you will continue "
+        "this work when it finishes, if it keeps something running that the user "
+        "is using (a server, for example), or if stopping it now could leave work "
+        "half done (a deploy, a build, an install or a copy still in progress). "
+        "Tasks that are not needed will be stopped.\n"
+        "Answer with exactly one word: KEEP if any of these tasks is still "
+        "needed, or STOP if none is and all of them can be stopped now.")
+
+
+def _wait_length(seconds: float) -> str:
+    if seconds >= 60 and seconds % 60 == 0:
+        minutes = int(seconds // 60)
+        return "{} minute{}".format(minutes, "" if minutes == 1 else "s")
+    return "{:g} second{}".format(seconds, "" if seconds == 1 else "s")
+
+
+def _background_check_verdict(text) -> str:
+    """'stop' or 'keep' for an answer that is that one word, allowing only
+    emphasis, quotes and a full stop around it; '' for anything else."""
+    word = str(text or "").strip(" \t\r\n`*_\"'.!").upper()
+    return {"STOP": "stop", "KEEP": "keep"}.get(word, "")
 
 
 class SessionHub:
@@ -938,6 +999,10 @@ class SessionHub:
         # idle-but-attached phase for the stop path and for consoles.
         self._bg_tasks = []
         self._bg_wait_since = None
+        # The side question Puppy has put to the model about that work, while
+        # it is unanswered, and what the status line says about the check.
+        self._bg_check_id = ""
+        self._bg_note = ""
 
     # ---- watchers ----
 
@@ -1381,6 +1446,7 @@ class SessionHub:
         ready = supported and bool(turn_id) and not self.interrupted and \
             (not self._turn_result_seen or self._bg_wait_since is not None) and \
             not self._turn_stopping and not self._side_questions_pending() and \
+            not self._bg_check_id and \
             self._proc_ready and proc is not None and proc.returncode is None and \
             proc.stdin is not None and not proc.stdin.is_closing() and \
             bool(driver.side_question_ready(session, self._driver_ctx))
@@ -2366,6 +2432,8 @@ class SessionHub:
             str(item["fields"].get("text") or "") if _is_queued_retry(item) else ""
         self._bg_tasks = []
         self._bg_wait_since = None
+        self._bg_check_id = ""
+        self._bg_note = ""
         self.turn_task = asyncio.ensure_future(self._run_turn(item))
         # Publish the active block immediately, before process startup and the
         # first persisted event have a chance to yield the event loop.
@@ -2381,6 +2449,16 @@ class SessionHub:
         self._broadcast_queue()
         self._start_turn(next_turn)
         return True
+
+    def _prompt_waiting(self) -> bool:
+        """Whether the queue holds a prompt or tool row that would start as
+        soon as the running turn ends: not paused, and no reorder holding
+        the queue still."""
+        if self._queue_reorder is not None or _draining:
+            return False
+        return any(index not in self.paused_queue and
+                   (not isinstance(item, dict) or _is_queued_tool(item))
+                   for index, item in enumerate(self.queue))
 
     def _take_next_turn(self):
         """Advance within an activity block, or close it when the queue is
@@ -2812,7 +2890,7 @@ class SessionHub:
         tasks = self._scrub_value([dict(row) for row in self._bg_tasks])
         waiting = self._bg_wait_since is not None and self.status == "running"
         return {"tasks": tasks, "waiting": waiting,
-                "text": _background_wait_status(tasks) if waiting else ""}
+                "text": _background_wait_status(tasks, self._bg_note) if waiting else ""}
 
     def _publish_background(self) -> None:
         payload = self._background_payload()
@@ -2832,6 +2910,8 @@ class SessionHub:
         # question outright, so nothing may be left waiting on an answer that
         # can no longer arrive. This is the single choke point for that.
         self._fail_side_questions("the turn ended before the engine answered")
+        self._bg_check_id = ""
+        self._bg_note = ""
         proc = self.proc
         if proc is None or proc.stdin is None or proc.stdin.is_closing():
             return
@@ -3280,6 +3360,13 @@ class SessionHub:
             pending_result = None
             wait_closed = ""       # why a wait was ended early, if it was
             bg_idle_since = None   # when every task ended without a wake-up
+            # Each pause on background work is numbered; the model is asked
+            # about its tasks at most once per pause (see background_check).
+            bg_pause = 0
+            bg_paused_at = 0.0     # monotonic start of the current pause
+            bg_asked = 0           # the last pause a check was put for
+            bg_check = None        # the unanswered check: id, pause, tasks, when
+            bg_stop = None         # a STOP waiting for the user's own question
             # Independent bounds for replies that can follow the turn result.
             # Neither channel may close stdin while the other is still owed a
             # response. These are durations, so wall-clock changes cannot
@@ -3366,6 +3453,133 @@ class SessionHub:
                 # the CLI ends its tasks and exits on EOF within seconds
                 deadline = time.time() + 30
 
+            async def withdraw_check(reason) -> None:
+                """Take back an unanswered check: the pause it asked about is
+                over, or its answer is overdue. No answer is doubt, so the
+                wait itself carries on untouched."""
+                nonlocal bg_check
+                check, bg_check = bg_check, None
+                if check is None:
+                    return
+                self._bg_check_id = ""
+                self._bg_note = ""
+                log.info("background check for session %s withdrawn: %s",
+                         self.id, reason)
+                payload = driver.side_question_cancel_payload(
+                    session, self._driver_ctx, check["id"])
+                proc = self.proc
+                if isinstance(payload, dict) and proc is not None and \
+                        proc.stdin is not None and not proc.stdin.is_closing():
+                    try:
+                        await self._write_stdin(payload)
+                    except (BrokenPipeError, ConnectionError, OSError, RuntimeError):
+                        pass
+                self._publish_background()
+                self._publish_steering_state(session)
+
+            def check_answered(act) -> None:
+                """The model's answer to a check. Only a plain STOP from a real
+                answer, about the pause still going on, can end the wait; the
+                engine's placeholder, a stand-in model, an explanation or a
+                KEEP all leave it waiting."""
+                nonlocal bg_check, bg_stop
+                check = bg_check
+                if check is None or str(act.get("request_id") or "") != check["id"]:
+                    return      # taken back, or about a pause that has ended
+                bg_check = None
+                self._bg_check_id = ""
+                text = str(act.get("text") or "")
+                real = act.get("ok") and not act.get("synthetic") and \
+                    not act.get("fallback_model") and not act.get("fallback_notice")
+                verdict = _background_check_verdict(text) if real else ""
+                log.info("background check for session %s: %s (%r)", self.id,
+                         verdict or "unclear", (text or str(act.get("error") or ""))[:200])
+                self._bg_note = ""
+                if verdict == "stop" and check["pause"] == bg_pause:
+                    bg_stop = {"pause": check["pause"], "tasks": check["tasks"]}
+                elif verdict == "keep":
+                    self._bg_note = "{} still needs {}".format(
+                        driver.label,
+                        "it" if len(check["tasks"]) == 1 else "at least one")
+                self._publish_background()
+                self._publish_steering_state(session)
+
+            async def background_check() -> None:
+                """While the model waits on background work after answering:
+                end a wait that has lasted BACKGROUND_WAIT_LIMIT; once it has
+                lasted BACKGROUND_CHECK_AFTER, or at once when a prompt is
+                waiting in the queue, ask the model once per pause whether the
+                tasks are still needed; take back an overdue question; and end
+                the wait on a plain STOP about exactly the tasks still running,
+                after any question of the user's own has been answered."""
+                nonlocal bg_asked, bg_check, bg_stop
+                if pending_result is None or wait_closed or \
+                        self._bg_wait_since is None or self.interrupted or \
+                        self._turn_stopping:
+                    return
+                now = time.monotonic()
+                if now - bg_paused_at >= BACKGROUND_WAIT_LIMIT:
+                    await withdraw_check("the wait reached its limit")
+                    end_wait("limit",
+                             "Stopped waiting for background tasks after {}; "
+                             "the engine is ending them".format(
+                                 _wait_length(BACKGROUND_WAIT_LIMIT)))
+                    return
+                live = frozenset(str(row.get("id") or "") for row in self._bg_tasks)
+                if bg_stop is not None:
+                    if bg_stop["pause"] != bg_pause or not live or \
+                            not live <= bg_stop["tasks"]:
+                        bg_stop = None      # the work changed under the answer
+                    elif not self._side_questions_pending():
+                        bg_stop = None
+                        one = len(self._bg_tasks) == 1
+                        end_wait("not needed",
+                                 "{} no longer needs its background task{}; "
+                                 "ending {}: {}".format(
+                                     driver.label, "" if one else "s",
+                                     "it" if one else "them",
+                                     _background_task_names(self._bg_tasks)))
+                    return
+                if bg_check is not None:
+                    if now - bg_check["asked_at"] >= BACKGROUND_CHECK_TIMEOUT:
+                        await withdraw_check("no answer in time")
+                    return
+                if bg_asked == bg_pause or not live or \
+                        not driver.supports_side_questions:
+                    return
+                if now - bg_paused_at < BACKGROUND_CHECK_AFTER and \
+                        not self._prompt_waiting():
+                    return
+                async with self._stdin_lock:
+                    proc = self.proc
+                    if self._side_questions_pending() or proc is None or \
+                            proc.stdin is None or proc.stdin.is_closing():
+                        return      # after the user's own question, if at all
+                    request_id = BACKGROUND_CHECK_PREFIX + uuid.uuid4().hex
+                    payload = driver.side_question_payload(
+                        session, self._driver_ctx,
+                        _background_check_question(self._bg_tasks), [], request_id)
+                    if not isinstance(payload, dict):
+                        return      # the control channel is not up yet
+                    bg_asked = bg_pause
+                    bg_check = {"id": request_id, "pause": bg_pause,
+                                "tasks": live, "asked_at": now}
+                    self._bg_check_id = request_id
+                    try:
+                        proc.stdin.write((json.dumps(payload) + "\n").encode())
+                        await proc.stdin.drain()
+                    except (BrokenPipeError, ConnectionError, OSError,
+                            RuntimeError) as exc:
+                        log.info("background check write failed for session "
+                                 "%s: %s", self.id, exc)
+                        bg_check = None
+                        self._bg_check_id = ""
+                        return
+                self._bg_note = "asking {} whether {} still needed".format(
+                    driver.label, "it is" if len(live) == 1 else "they are")
+                self._publish_background()
+                self._publish_steering_state(session)
+
             while True:
                 waiting_for_replies = sq_grace_until is not None or steer_grace_until is not None
                 now = time.monotonic()
@@ -3390,6 +3604,7 @@ class SessionHub:
                     end_wait("engine did not continue",
                              "Background tasks finished but the engine did not "
                              "continue; ending the turn")
+                await background_check()
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     if pending_result is not None and not wait_closed:
@@ -3408,6 +3623,10 @@ class SessionHub:
                 for grace_until in (sq_grace_until, steer_grace_until):
                     if grace_until is not None:
                         read_cap = min(read_cap, max(0.001, grace_until - time.monotonic()))
+                if pending_result is not None and not wait_closed and \
+                        self._bg_wait_since is not None:
+                    # a quiet wait still looks at its clocks and the queue
+                    read_cap = min(read_cap, BACKGROUND_WAIT_POLL)
                 try:
                     if transport is not None:
                         actions = await asyncio.wait_for(
@@ -3440,7 +3659,10 @@ class SessionHub:
                             # its answer continues within this same turn
                             self._bg_wait_since = None
                             bg_idle_since = None
+                            bg_stop = None
                             self._turn_result_seen = False
+                            await withdraw_check("the model woke for a finished task")
+                            self._bg_note = ""
                             self._publish_background()
                         self.broadcast(self._scrub_value(msg))
                     elif a == "background_tasks":
@@ -3460,6 +3682,11 @@ class SessionHub:
                         pending_result = data
                         tasks = [dict(row) for row in (act.get("tasks") or [])
                                  if isinstance(row, dict)] or list(self._bg_tasks)
+                        await withdraw_check("a new pause began")
+                        bg_pause += 1
+                        bg_paused_at = time.monotonic()
+                        bg_stop = None
+                        self._bg_note = ""
                         self._bg_wait_since = time.time()
                         bg_idle_since = None if tasks else time.time()
                         self._bg_tasks = tasks
@@ -3513,6 +3740,13 @@ class SessionHub:
                             await self._write_stdin(payload)
                     elif a == "steer_result":
                         self._handle_steer_result(act)
+                    elif a in ("side_question_result", "side_question_progress") and \
+                            str(act.get("request_id") or "").startswith(
+                                BACKGROUND_CHECK_PREFIX):
+                        # Puppy's own check never reaches the transcript or
+                        # the user's thread of side questions
+                        if a == "side_question_result":
+                            check_answered(act)
                     elif a == "side_question_result":
                         self._handle_side_question_result(act)
                     elif a == "side_question_progress":
@@ -3659,6 +3893,8 @@ class SessionHub:
             self._fail_side_questions("the turn ended before the engine answered")
             self._bg_wait_since = None
             self._bg_tasks = []
+            self._bg_check_id = ""
+            self._bg_note = ""
             # The engine no longer owns tasks. Clear the live indicator now:
             # post-turn workspace/spawn cleanup can delay turn_done.
             self._publish_background()

@@ -26,6 +26,9 @@ fresh defaults before applying all six fields. No fleet propagation is implicit.
 The runner captures its limit once per engine attempt; it counts elapsed time,
 including approvals and engine background work. A zero limit leaves the turn
 running until completion, Stop, shutdown, or another independent failure.
+Independently of this setting, a wait on engine background work after the
+model has answered ends after 60 minutes (`runner.BACKGROUND_WAIT_LIMIT`),
+and sooner when the model says the work is no longer needed.
 The headless CLI's `--turn-timeout` accepts the same values, including zero.
 
 Spawn limits are captured at job creation. An omitted limit uses the executing

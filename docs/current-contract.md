@@ -127,8 +127,9 @@ still contain a value written before that release.
   already-sent steering may acknowledge for up to two seconds afterward.
   Native refusals and unconfirmed handoffs remain distinct in their error
   wording. Steering and side-question reply deadlines are independent;
-  background pauses continue accepting side questions. This changes no stored
-  format or wire capability.
+  background pauses continue accepting side questions, except for the few
+  seconds Puppy's own check on that background work is out (readiness is
+  false meanwhile). This changes no stored format or wire capability.
 
 This cleanup preserves transaction rollback, interrupted-operation recovery,
 offline retry, historical transcript rendering, and external engine/Chromium

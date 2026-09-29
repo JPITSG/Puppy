@@ -1151,6 +1151,122 @@ def system(subtype, **fields):
 TASK = {"task_id": "btask1", "task_type": "local_bash",
         "description": "fake background command"}
 
+
+def answer(rid, text, synthetic=False):
+    send({"type": "control_response", "response": {
+        "subtype": "success", "request_id": rid,
+        "response": {"response": text, "synthetic": synthetic}}})
+
+
+def complete_task():
+    system("background_tasks_changed", tasks=[])
+    system("task_updated", task_id="btask1", patch={"status": "completed"})
+    system("task_notification", task_id="btask1", tool_use_id="toolu_1",
+           status="completed", output_file="/tmp/fake.output",
+           summary='Background command "fake background command" '
+                   'completed (exit code 0)')
+    system("init", model="claude-fake", tools=[])
+
+
+def continue_after_task():
+    send({"type": "assistant", "uuid": "a-2", "session_id": sid, "message": {
+        "model": "claude-fake",
+        "content": [{"type": "text", "text": "continued after task"}],
+        "usage": usage(5, 3)}})
+    result(1, 250, 0.02, 5, 3, "continued after task")
+
+
+def serve_check(mode):
+    """A pause the runner checks on with a side question of its own. The
+    check is answered as the mode says, a question of the user's a little
+    later; a task that finishes wakes the model as the real CLI does, and
+    stdin EOF ends a task that is still running."""
+    checks = flags.setdefault("checks", [])
+    cancels = flags.setdefault("cancels", [])
+    users = flags.setdefault("user_questions", [])
+    pending_users = set()
+    state = {"woke": False}
+    due = []
+
+    def wake():
+        complete_task()
+        continue_after_task()
+        state["woke"] = True
+
+    def reply_user(rid):
+        pending_users.discard(rid)
+        answer(rid, "the user's own answer")
+
+    end = time.monotonic() + 30
+    while time.monotonic() < end:
+        now = time.monotonic()
+        for item in [item for item in due if item[0] <= now]:
+            due.remove(item)
+            item[1]()
+        ready, _, _ = select.select([sys.stdin], [], [], 0.02)
+        if not ready:
+            continue
+        line = sys.stdin.readline()
+        if not line:
+            flags["eof"] = True
+            if not state["woke"]:
+                # the runner ended the wait: the real CLI kills the task now
+                system("background_tasks_changed", tasks=[])
+                system("task_notification", task_id="btask1",
+                       tool_use_id="toolu_1", status="stopped",
+                       output_file="", summary=TASK["description"])
+            finish()
+        if not line.strip():
+            continue
+        value = json.loads(line)
+        seen.append(value)
+        rid = str(value.get("request_id") or "")
+        if value.get("type") == "control_cancel_request":
+            cancels.append(rid)
+            if mode == "silent":
+                wake()
+            elif mode == "woke" and checks:
+                # an answer that crossed the withdrawal on the wire
+                answer(checks[-1]["id"], "STOP")
+                continue_after_task()
+                state["woke"] = True
+            continue
+        request = value.get("request") or {}
+        if value.get("type") != "control_request" or \
+                request.get("subtype") != "side_question":
+            continue
+        if "bgcheck-" not in rid:
+            users.append(rid)
+            pending_users.add(rid)
+            due.append((now + 0.6, lambda rid=rid: reply_user(rid)))
+            continue
+        checks.append({"id": rid, "question": request.get("question"),
+                       "history": "history" in request,
+                       "user_pending": bool(pending_users)})
+        if mode == "stop":
+            due.append((now + 0.4, lambda rid=rid: answer(rid, "STOP")))
+        elif mode in ("queued", "deferred"):
+            answer(rid, "STOP")
+        elif mode == "keep":
+            answer(rid, "KEEP")
+            due.append((now + 0.4, wake))
+        elif mode == "limit":
+            answer(rid, "KEEP")
+        elif mode == "unclear":
+            answer(rid, "**STOP** - the build already finished")
+        elif mode == "placeholder":
+            answer(rid, "STOP", synthetic=True)
+            due.append((now + 0.4, wake))
+        elif mode == "refused":
+            send({"type": "control_response", "response": {
+                "subtype": "error", "request_id": rid,
+                "error": "side questions are unavailable"}})
+            due.append((now + 0.4, wake))
+        elif mode == "woke":
+            # the task ends before the answer: the CLI wakes the model
+            complete_task()
+    finish()
+
 init = read()
 if init.get("type") != "control_request" or \
         init.get("request", {}).get("subtype") != "initialize":
@@ -1211,6 +1327,9 @@ else:
            is_backgrounded=True, description=TASK["description"],
            task_type="local_bash")
     result(1, 100, 0.01, 10, 2, "first answer")
+    words = prompt.split()
+    if "check" in words:
+        serve_check(words[words.index("check") + 1])
     if prompt.endswith("background fake turn"):
         if stdin_eof(0.5):
             # the runner gave up on the task: a real CLI would kill it now
@@ -1492,6 +1611,171 @@ finish()
         assert events[3]["data"]["text"] == "Retry cancelled by user"
         assert hub.last_completion_status == "interrupted"
         assert len(invocations_for("cancelled retry fake turn")) == 1
+
+        # A wait on background work after the answer is checked with the model
+        # through a side question of Puppy's own. Only a bare STOP ends it.
+        for text, verdict in (("STOP", "stop"), ("stop", "stop"), ("**STOP**", "stop"),
+                              ("`KEEP`", "keep"), ("KEEP.", "keep"), ("STOP now", ""),
+                              ("I think STOP", ""), ("NONE", ""), ("", ""),
+                              ("STOP\n\nThe build finished", "")):
+            assert runner._background_check_verdict(text) == verdict, text
+        question = runner._background_check_question([
+            {"id": "b1", "type": "local_bash", "description": "Wait for\nthe build"},
+            {"id": "a2", "type": "local_agent", "description": ""}])
+        assert "- b1: Wait for the build\n- a2: (no description)\n" in question
+        assert question.startswith("This question comes from Puppy")
+        assert question.endswith("Answer with exactly one word: KEEP if any of "
+                                 "these tasks is still needed, or STOP if none "
+                                 "is and all of them can be stopped now.")
+        assert runner._wait_length(3600) == "60 minutes"
+        assert runner._wait_length(1.5) == "1.5 seconds"
+
+        original_check = (runner.BACKGROUND_CHECK_AFTER, runner.BACKGROUND_CHECK_TIMEOUT,
+                          runner.BACKGROUND_WAIT_LIMIT, runner.BACKGROUND_WAIT_POLL)
+        runner.BACKGROUND_CHECK_AFTER = 0.3
+        runner.BACKGROUND_CHECK_TIMEOUT = 1.0
+        runner.BACKGROUND_WAIT_LIMIT = 30.0
+        runner.BACKGROUND_WAIT_POLL = 0.05
+        waiting_row = ("info", "background_wait")
+        woke_shape = [("user", ""), ("assistant", ""), waiting_row,
+                      ("info", "task"), ("assistant", ""), ("result", "")]
+        ended_shape = [("user", ""), ("assistant", ""), waiting_row,
+                       ("info", "background_wait_stopped"), ("info", "task"),
+                       ("result", "")]
+
+        def check_of(prompt):
+            flags = invocations_for(prompt)[-1]["flags"]
+            return flags, flags.get("checks") or []
+
+        async def until_hub(label, condition):
+            deadline = time.monotonic() + 20
+            while not condition():
+                if time.monotonic() >= deadline:
+                    raise AssertionError(label)
+                await asyncio.sleep(0.01)
+
+        try:
+            # STOP: the wait ends as a normal completion; the check never
+            # reaches the transcript, and the user's Ask waits while it is out
+            capture.messages.clear()
+            assert hub.send_message("check stop fake turn") == {"queued": False}
+            await until_hub("the check was never asked", lambda: hub._bg_check_id)
+            assert hub.side_question_state()["ready"] is False
+            assert hub.snapshot()["background_tasks"]["text"] == (
+                "Waiting for 1 background task: fake background command · asking "
+                "Claude Code whether it is still needed · Stop ends the wait")
+            await finish_turn("check stop fake turn")
+            events = turn_events("check stop fake turn")
+            assert shape(events) == ended_shape, shape(events)
+            assert events[3]["data"]["text"] == (
+                "Claude Code no longer needs its background task; ending it: "
+                "fake background command")
+            assert events[4]["data"]["status"] == "stopped"
+            assert events[5]["data"]["ok"] is True
+            assert hub.last_completion_status == "ok"
+            flags, checks = check_of("check stop fake turn")
+            assert flags["eof"] is True and len(checks) == 1
+            assert checks[0]["id"].startswith("puppy-sq:bgcheck-")
+            assert checks[0]["history"] is False
+            assert "\n- btask1: fake background command\n" in checks[0]["question"]
+            assert not any(message.get("type") in ("side_question_progress",
+                                                   "side_question_state")
+                           and message.get("side_question", {}).get("pending_request_id")
+                           for message in capture.messages)
+
+            # KEEP: the wait goes on, says so, and the user's Ask is back;
+            # the task finishing wakes the model exactly as before
+            capture.messages.clear()
+            assert hub.send_message("check keep fake turn") == {"queued": False}
+            await until_hub("KEEP was never shown", lambda: "still needs it" in
+                            hub.snapshot()["background_tasks"]["text"])
+            assert hub.snapshot()["background_tasks"]["text"] == (
+                "Waiting for 1 background task: fake background command · "
+                "Claude Code still needs it · Stop ends the wait")
+            assert hub.side_question_state()["ready"] is True
+            await finish_turn("check keep fake turn")
+            events = turn_events("check keep fake turn")
+            assert shape(events) == woke_shape, shape(events)
+            assert events[5]["data"]["ok"] is True and events[5]["data"]["wakeups"] == 1
+            assert len(check_of("check keep fake turn")[1]) == 1
+
+            # doubt never ends a wait early: an engine placeholder, a refusal,
+            # an explanation around the word, or no answer in time
+            for mode in ("placeholder", "refused", "silent"):
+                prompt = "check {} fake turn".format(mode)
+                assert hub.send_message(prompt) == {"queued": False}
+                await finish_turn(prompt)
+                events = turn_events(prompt)
+                assert shape(events) == woke_shape, (mode, shape(events))
+                flags, checks = check_of(prompt)
+                assert len(checks) == 1, mode
+                assert flags["cancels"] == ([checks[0]["id"]] if mode == "silent" else []), mode
+                assert hub.last_completion_status == "ok"
+
+            # a task that ends while the check is out: the check is withdrawn
+            # and an answer crossing that on the wire is ignored
+            assert hub.send_message("check woke fake turn") == {"queued": False}
+            await finish_turn("check woke fake turn")
+            events = turn_events("check woke fake turn")
+            assert shape(events) == woke_shape, shape(events)
+            flags, checks = check_of("check woke fake turn")
+            assert flags["cancels"] == [checks[0]["id"]]
+
+            # no wait after an answer outlasts the limit, KEEP or doubt alike
+            runner.BACKGROUND_WAIT_LIMIT = 1.5
+            for mode in ("unclear", "limit"):
+                prompt = "check {} fake turn".format(mode)
+                assert hub.send_message(prompt) == {"queued": False}
+                await finish_turn(prompt)
+                events = turn_events(prompt)
+                assert shape(events) == ended_shape, (mode, shape(events))
+                assert events[3]["data"]["text"] == (
+                    "Stopped waiting for background tasks after 1.5 seconds; "
+                    "the engine is ending them"), mode
+                assert events[5]["data"]["ok"] is True
+                assert hub.last_completion_status == "ok"
+                assert len(check_of(prompt)[1]) == 1, mode
+            runner.BACKGROUND_WAIT_LIMIT = 30.0
+
+            # a prompt waiting in the queue asks at once, and runs next
+            runner.BACKGROUND_CHECK_AFTER = 30.0
+            started = time.monotonic()
+            assert hub.send_message("check queued fake turn") == {"queued": False}
+            assert hub.send_message("queued after check fake turn plain fake turn") \
+                .get("queued") is True
+            await finish_turn("check queued fake turn")
+            assert time.monotonic() - started < 15
+            events = turn_events("check queued fake turn")
+            assert shape(events[:6]) == ended_shape, shape(events)
+            assert shape(turn_events("queued after check fake turn plain fake turn")) == [
+                ("user", ""), ("assistant", ""), ("result", "")]
+            runner.BACKGROUND_CHECK_AFTER = 0.3
+
+            # a question of the user's own comes first: the check waits for
+            # its answer, and the user's pair is the only one in the transcript
+            assert hub.send_message("check deferred fake turn") == {"queued": False}
+            await until_hub("the deferred turn never paused",
+                            lambda: hub._bg_wait_since is not None)
+            asked = await hub.ask("What is still running?",
+                                  expected_turn_id=hub._active_turn_id)
+            assert asked.get("ok") is True, asked
+            await finish_turn("check deferred fake turn")
+            events = turn_events("check deferred fake turn")
+            assert shape(events) == [
+                ("user", ""), ("assistant", ""), waiting_row, ("side_question", ""),
+                ("side_question_result", ""), ("info", "background_wait_stopped"),
+                ("info", "task"), ("result", "")], shape(events)
+            assert events[4]["data"]["text"] == "the user's own answer"
+            flags, checks = check_of("check deferred fake turn")
+            assert len(checks) == 1 and checks[0]["user_pending"] is False
+            order = [str(value.get("request_id") or "") for value in
+                     invocations_for("check deferred fake turn")[-1]["seen"]
+                     if value.get("type") == "control_request" and
+                     (value.get("request") or {}).get("subtype") == "side_question"]
+            assert order == [flags["user_questions"][0], checks[0]["id"]], order
+        finally:
+            (runner.BACKGROUND_CHECK_AFTER, runner.BACKGROUND_CHECK_TIMEOUT,
+             runner.BACKGROUND_WAIT_LIMIT, runner.BACKGROUND_WAIT_POLL) = original_check
     finally:
         hub.detach(capture)
         driver.binary = original_binary

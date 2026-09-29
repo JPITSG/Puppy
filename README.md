@@ -424,6 +424,16 @@ Updates remain visible with the card collapsed; those without a matching card
 stand on their own. Transient engine failures (such as an OAuth refresh lock)
 retry on their own with a back-off note in the transcript.
 
+A task the model left behind does not hold the session forever. Once a wait
+after Claude's answer has lasted two minutes, or at once when a prompt is
+waiting in the queue, Puppy asks Claude through a side question the
+conversation never sees whether any of those tasks is still needed. Only a
+plain **STOP** ends the wait early: Claude Code stops the tasks, the answer
+stands as a normal completion, the queue moves on and the transcript names
+what was ended. Any other reply keeps waiting; the status line says when
+Claude still needs a task. Your own **Ask** waits the few seconds the check
+takes, and no wait after an answer lasts longer than 60 minutes.
+
 Retries an engine performs inside a running turn (Codex counting a dropped
 response stream back up while it falls back to another transport) appear in the
 status line in the engine's own words - except in a turn's first ten seconds,
@@ -960,7 +970,8 @@ backend name stays readable; long button labels wrap within the button.
   appear beneath the affected field; edit it or press Escape to clear the error.
 - **Timeouts** – per backend: maximum agent turn duration (2 hours), spawned-agent
   runtime (2 hours) and inactivity (10 minutes), and unattended terminal, browser
-  and VNC timeouts (15 minutes each). Values are seconds; **0 means unlimited**.
+  and VNC timeouts (15 minutes each). Values are seconds; **0 means unlimited**,
+  though a wait on background tasks after an answer still ends after 60 minutes.
   Turn and spawn settings initialize new runs; changing an unattended timeout
   restarts that timer immediately. Agent interaction renews unattended timers.
   Spawned agents still stop with their owning turn. Each field has an Apply
