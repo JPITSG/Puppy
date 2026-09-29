@@ -4474,6 +4474,11 @@ def seed_tool_clocks(sid=2):
     return h, events
 
 
+def clock_seconds(reading):
+    """The seconds a tool mark's "<State> · m:ss" or "h:mm:ss" reading says."""
+    return sum(int(v) * 60 ** i for i, v in enumerate(reversed(reading.split(" · ")[1].split(":"))))
+
+
 async def tool_clock_checks(instance, capture=False):
     h, events = seed_tool_clocks()
     key = "s:0:2"
@@ -4483,15 +4488,17 @@ async def tool_clock_checks(instance, capture=False):
         await evaluate(instance, "window.clockView=state.views['s:0:2'].activeView(); true")
         await until(instance, "clockView.status==='running' && !!clockView.toolCards['clock-other']")
 
-    async def hover(tool_id):
+    async def hover(tool_id, reading=None):
         await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 0, "y": 0}, session=instance.page_session)
         point = await evaluate(instance, """(() => {
             const m=clockView.toolCards[%s].querySelector('.t-state'); m.scrollIntoView({block:'center'});
             const r=m.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};
         })()""" % json.dumps(tool_id))
         await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", **point}, session=instance.page_session)
+        shown = ("document.querySelector('#tip .tip-card').textContent.startsWith('Running · ')" if reading is None else
+                 "document.querySelector('#tip .tip-card').textContent===%s" % json.dumps(reading))
         try:
-            await until(instance, "!!document.querySelector('#tip:not([hidden]):not(.out) .tip-card') && document.querySelector('#tip .tip-card').textContent.startsWith('Running · ') && document.querySelector('#tip .tip-card').textContent===tips.text(clockView.toolCards[%s].querySelector('.t-state'))" % json.dumps(tool_id))
+            await until(instance, "!!document.querySelector('#tip:not([hidden]):not(.out) .tip-card') && %s && document.querySelector('#tip .tip-card').textContent===tips.text(clockView.toolCards[%s].querySelector('.t-state'))" % (shown, json.dumps(tool_id)))
         except AssertionError:
             detail = await evaluate(instance, """(() => {const mark=clockView.toolCards[%s].querySelector('.t-state');
                 return {status:clockView.status,closed:clockView.closed,end:clockView.toolClockEndSeq,
@@ -4500,10 +4507,16 @@ async def tool_clock_checks(instance, capture=False):
                 (json.dumps(tool_id), point['x'], point['y']))
             raise AssertionError(detail)
         value = await evaluate(instance, "document.querySelector('#tip .tip-card').textContent")
-        seconds = sum(int(v) * 60 ** i for i, v in enumerate(reversed(value.split(' · ')[1].split(':'))))
+        if reading is not None:
+            return value
+        seconds = clock_seconds(value)
         event = next(row for row in events if row['data']['tool_use_id'] == tool_id)
         assert abs(seconds - (time.time() - event['ts'])) < 3, (tool_id, value, event)
         return seconds
+
+    async def took(outcome, call, ending):
+        return await evaluate(instance, "%s+' · '+formatSessionActivity(%s*1000,%s*1000)" % (
+            json.dumps(outcome), json.dumps(call["ts"]), json.dumps(ending["ts"])))
 
     try:
         await evaluate(instance, "openSessionTab(0,2,findSessionMeta(0,2)); true")
@@ -4536,10 +4549,42 @@ async def tool_clock_checks(instance, capture=False):
         await evaluate(instance, "window.clockSocket=clockView.ws; clockView.ws.close(); true")
         await until(instance, "clockView.ws!==clockSocket && clockView.draftReady")
         assert await hover("clock-shell") >= elapsed, "reconnect reset the call's clock"
-        # Complete the hovered call while the pointer stays on its status mark.
+        # Complete the hovered call while the pointer stays on its status mark:
+        # the bubble stays, its clock stopped at the call's own result.
         finished = db.add_event(2, "tool_result", {"tool_use_id": "clock-shell", "content": "Checks complete"})
         h.broadcast({"type": "event", "event": finished})
-        await until(instance, "clockView.toolCards['clock-shell'].querySelector('.t-state').classList.contains('ok') && document.querySelector('#tip').hidden")
+        completed = await took("Completed", events[0], finished)
+        assert completed.startswith("Completed · ") and \
+            elapsed <= clock_seconds(completed) <= finished["ts"] - events[0]["ts"] + 1, (completed, elapsed)
+        await until(instance, "clockView.toolCards['clock-shell'].querySelector('.t-state').classList.contains('ok') && !document.querySelector('#tip').hidden && !document.querySelector('#tip').classList.contains('out') && document.querySelector('#tip .tip-card').textContent===%s" % json.dumps(completed))
+        await asyncio.sleep(1.2)
+        assert await evaluate(instance, "document.querySelector('#tip .tip-card').textContent") == completed, "a finished call's time must stand still"
+        # A call that fails reads its time on the cross the same way.
+        with patch.object(db, "time", SimpleNamespace(time=lambda: time.time() - 7)):
+            failing = db.add_event(2, "tool_use", {"tool": "Bash", "tool_use_id": "clock-failed", "input": {"command": "npm run lint"}})
+        h.broadcast({"type": "event", "event": failing})
+        failure = db.add_event(2, "tool_result", {"tool_use_id": "clock-failed", "content": "exit 1", "is_error": True})
+        h.broadcast({"type": "event", "event": failure})
+        failed = await took("Failed", failing, failure)
+        assert failed.startswith("Failed · ") and 7 <= clock_seconds(failed) <= 8, failed
+        await until(instance, "!!clockView.toolCards['clock-failed'] && clockView.toolCards['clock-failed'].querySelector('.t-state').classList.contains('bad')")
+        for width in (1440, 390):
+            await instance.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": 900 if width == 1440 else 844,
+                "deviceScaleFactor": 1, "mobile": width == 390}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                for tool_id, reading in (("clock-shell", completed), ("clock-failed", failed)):
+                    assert await hover(tool_id, reading) == reading
+                    # a bubble shown from another spot glides there; measure where it lands
+                    await until(instance, "document.querySelector('#tip').getAnimations({subtree:true}).length===0")
+                    bubble = await evaluate(instance, """(() => {const r=document.querySelector('#tip').getBoundingClientRect();
+                        return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:innerWidth,height:innerHeight,
+                            cls:document.querySelector('#tip').className,transform:document.querySelector('#tip').style.transform};})()""")
+                    assert bubble["left"] >= 0 and bubble["right"] <= bubble["width"] and \
+                        bubble["top"] >= 0 and bubble["bottom"] <= bubble["height"], (tool_id, width, theme, bubble)
+                    if capture:
+                        shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                        (BASE / "data" / ("tool-clock-{}-{}-{}.png".format(tool_id[6:], width, theme))).write_bytes(base64.b64decode(shot["data"]))
         await hover("clock-other")
         # An interrupted call can lack a tool_result. Its persisted turn ending
         # must still hide the clock, including if work continues immediately.
@@ -4555,6 +4600,7 @@ async def tool_clock_checks(instance, capture=False):
         pending.observe("tool_use", events[1]["data"])
         h._emit("tool_result", next(pending.results(tool_calls.RESTARTED)))
         await until(instance, "clockView.toolCards['clock-other'].querySelector('.t-state').textContent==='interrupted'")
+        assert await evaluate(instance, "tips.text(clockView.toolCards['clock-other'].querySelector('.t-state'))===''"), "an interrupted call has no time to read"
         for width in (1440, 390):
             await instance.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": 900 if width == 1440 else 844,
                 "deviceScaleFactor": 1, "mobile": width == 390}, session=instance.page_session)
@@ -4575,6 +4621,9 @@ async def tool_clock_checks(instance, capture=False):
         await until(instance, "!window.recoveryReloadMarker")
         await bind()
         assert await evaluate(instance, "clockView.toolCards['clock-other'].querySelector('.t-state').textContent==='interrupted'")
+        # The history's own stamps give the same readings after a reload.
+        assert await hover("clock-shell", completed) == completed, "reload changed a finished call's time"
+        assert await hover("clock-failed", failed) == failed
     finally:
         h.status, h.active_since = "idle", None
         db.touch_session(2, status="idle")
@@ -4583,7 +4632,7 @@ async def tool_clock_checks(instance, capture=False):
         await evaluate(instance, "closeTab(%s); activateTab('s:0:1'); applyTheme('dark'); window.demoView=state.views['s:0:1'].activeView(); true" % json.dumps(key))
         await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
             "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
-    print("PASS: per-tool hover clocks and recovered interruptions fit both themes and phone, survive reload/reconnect, and end on completion/interruption", flush=True)
+    print("PASS: per-tool hover clocks and recovered interruptions fit both themes and phone, survive reload/reconnect, and end on completion/interruption; finished calls read Completed or Failed with how long they took, unmoving and the same after a reload", flush=True)
 
 
 async def engine_activity_checks(instance):

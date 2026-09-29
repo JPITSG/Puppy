@@ -225,11 +225,11 @@ const resultText = card => {
   assert.equal(tip(reloaded, "first"), "Running · 0:18", "snapshot/rebuild retains the original start");
   clockNow += 3600000;
   assert.equal(tip(v, "first"), "Running · 1:00:18");
-  v.renderEvent(result("first", 12), true);
-  assert.equal(tip(v, "first"), "", "the finished call cannot keep a live tooltip");
+  v.renderEvent({...result("first", 12), ts: 4603.5}, true);
+  assert.equal(tip(v, "first"), "Completed · 1:00:18", "the finished call's clock stops at its own result");
   assert.equal(tip(v, "second"), "Running · 1:00:08", "a peer finishing does not stop this call");
-  v.renderEvent(result("second", 13, {is_error: true}), true);
-  assert.equal(tip(v, "second"), "", "a failure also stops its clock");
+  v.renderEvent({...result("second", 13, {is_error: true}), ts: 4603.5}, true);
+  assert.equal(tip(v, "second"), "Failed · 1:00:08", "a failure also stops its clock");
   v.renderEvent({...call("stopped", 14), ts: 996}, true);
   context.backgroundTaskStateInto(v.toolCards.stopped, {status: "stopped"});
   assert.equal(tip(v, "stopped"), "");
@@ -251,4 +251,82 @@ const resultText = card => {
   assert.equal(tip(reloaded, "first"), "", "retired views stop live readouts");
 }
 
-console.log("PASS: tool results fold and reunite; per-call hover clocks retain event starts across reloads and clock skew, tick independently, and stop on completion or interruption");
+/* A finished call's mark says how it ended and how long it took, measured
+   between the node's own stamps for the call and for the ending the mark
+   shows - never this browser's clock, and never a guess for a missing stamp. */
+{
+  sessionMeta = {id: 2, status: "running", active_since: 900};
+  context.ingestOneSessionActivity(7, sessionMeta, 1000, clockNow);
+  const v = view(); v.tab = {bid: 7, sid: 2}; v.status = "running";
+  const tip = id => context.tips.text(v.toolCards[id].querySelector(".t-state"));
+  v.renderEvent({...call("done", 1), ts: 950.25}, true);
+  v.renderEvent({...result("done", 2), ts: 978.9}, true);
+  assert.equal(tip("done"), "Completed · 0:28");
+  v.renderEvent({...call("quick", 3), ts: 980}, true);
+  v.renderEvent({...result("quick", 4), ts: 980.4}, true);
+  assert.equal(tip("quick"), "Completed · 0:00", "a call under a second reads the stopwatch's own face");
+  v.renderEvent({...call("broke", 5), ts: 981}, true);
+  v.renderEvent({...result("broke", 6, {is_error: true, content: "exit 1"}), ts: 4708}, true);
+  assert.equal(tip("broke"), "Failed · 1:02:07");
+  clockNow += 3600000;
+  assert.equal(tip("done"), "Completed · 0:28", "a finished call's time stands still");
+  v.status = "idle";
+  assert.equal(tip("done"), "Completed · 0:28", "and outlives the turn that ran it");
+  assert.equal(tip("broke"), "Failed · 1:02:07");
+  v.closed = true;
+  assert.equal(tip("done"), "Completed · 0:28", "nothing about it is live");
+  v.closed = false;
+
+  // Only a check or a cross has an ending to measure to.
+  v.renderEvent({...call("lost", 7), ts: 982}, true);
+  v.renderEvent({...result("lost", 8, {is_error: true, interrupted: true}), ts: 990}, true);
+  assert.equal(v.toolCards.lost.querySelector(".t-state").textContent, "interrupted");
+  assert.equal(tip("lost"), "", "an interrupted call's outcome and time are unknown");
+  v.renderEvent({...call("unfinished", 9), ts: 983}, true);
+  assert.equal(v.toolCards.unfinished.querySelector(".t-state").textContent, "ended");
+  assert.equal(tip("unfinished"), "", "an ended call without its result has no time");
+  v.renderEvent({...call("unstamped", 10), ts: 984}, true);
+  v.renderEvent(result("unstamped", 11), true);
+  assert.ok(v.toolCards.unstamped.querySelector(".t-state").classList.contains("ok"));
+  assert.equal(tip("unstamped"), "", "a result without a stamp is never measured");
+  v.renderEvent(call("undated", 12), true);
+  v.renderEvent({...result("undated", 13), ts: 990}, true);
+  assert.equal(tip("undated"), "", "nor is a call without one");
+  v.renderEvent({...call("backwards", 14), ts: 991}, true);
+  v.renderEvent({...result("backwards", 15), ts: 990}, true);
+  assert.equal(tip("backwards"), "", "a result stamped before its call is refused, not shown as zero");
+
+  // A window that starts after the call measures once paging back brings it.
+  v.renderEvent({...result("paged", 21), ts: 1075.5}, true);
+  const node = v.buildEventNode({...call("paged", 20), ts: 1000});
+  v.inner.insertBefore(node, v.inner.firstChild);
+  assert.equal(tip("paged"), "Completed · 1:15", "the reunited card measures to its result's own stamp");
+
+  // A command sent to the background: its launch completes at once, then the
+  // task's ending decides the mark and so the time, whichever loads first.
+  const notice = (id, status, seq, ts) => ({seq, ts, kind: "info", data: {
+    subtype: "task", task_id: "task-" + id, tool_use_id: id, status, text: "npm run build"}});
+  for (const [status, reading] of [["completed", "Completed · 5:25"], ["failed", "Failed · 5:25"], ["stopped", ""]]) {
+    const live = view(); live.tab = {bid: 7, sid: 2}; live.status = "running";
+    const liveTip = () => context.tips.text(live.toolCards.bg.querySelector(".t-state"));
+    live.renderEvent({...call("bg", 1), ts: 1000}, true);
+    live.renderEvent({...result("bg", 2, {content: "Command running in background"}), ts: 1000.2}, true);
+    assert.equal(liveTip(), "Completed · 0:00", "the launch itself took no time");
+    live.renderEvent(notice("bg", status, 3, 1325.7), true);
+    assert.equal(liveTip(), reading, `the ${status} task's ending is the call's`);
+    live.renderEvent({...result("bg", 4), ts: 1400}, true);
+    assert.equal(liveTip(), reading, "a late launch result cannot move the task's ending");
+
+    const history = view(); history.tab = live.tab; history.status = "idle";
+    history.renderEvent(notice("bg", status, 9, 1325.7), false);
+    history.renderEvent({...call("bg", 1), ts: 1000}, false);
+    assert.equal(context.tips.text(history.toolCards.bg.querySelector(".t-state")), reading,
+      "a history window that began at the ending measures to it");
+    history.renderEvent({...result("bg", 2), ts: 1000.2}, false);
+    assert.equal(context.tips.text(history.toolCards.bg.querySelector(".t-state")), reading,
+      "and the launch result loading after it keeps that ending");
+  }
+  sessionMeta = null;
+}
+
+console.log("PASS: tool results fold and reunite; per-call hover clocks retain event starts across reloads and clock skew, tick independently, and stop on completion or interruption; finished calls read Completed or Failed with how long they took between their own stamps, background endings included");

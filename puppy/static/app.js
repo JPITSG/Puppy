@@ -14990,6 +14990,18 @@ function toolRunningTip(view, startedAt, seq) {
       activeSince <= 0 || startedAt < activeSince) return "";
   return `Running · ${formatSessionActivity(anchor + (startedAt - activeSince) * 1000)}`;
 }
+/* A check or cross says how long the call took on the same stopwatch face.
+   Both stamps are the executing backend's own - the call's and whichever
+   ending the mark shows (its result, or the background task it started) - so
+   no clock needs translating. An interrupted or ended call has no ending to
+   measure to, and an unknown stamp is never invented. */
+function toolFinishedTip(mark, startedAt, endedAt) {
+  const outcome = mark.classList.contains("ok") ? "Completed" :
+    mark.classList.contains("bad") ? "Failed" : "";
+  if (!outcome || !Number.isFinite(startedAt) || startedAt <= 0 ||
+      !Number.isFinite(endedAt) || endedAt < startedAt) return "";
+  return `${outcome} · ${formatSessionActivity(startedAt * 1000, endedAt * 1000)}`;
+}
 function toolLabel(tool) {
   return String(tool || "tool").replace(/_/g, " ");
 }
@@ -15161,13 +15173,15 @@ function backgroundTaskUpdateNode(d) {
 }
 
 /* A result belongs inside its call's card, folded away like every other
-   card's body until the reader opens it. */
-function fillToolResultInto(card, d) {
+   card's body until the reader opens it. `endedAt` is the result event's own
+   stamp, which the mark's hover measures the call to. */
+function fillToolResultInto(card, d, endedAt) {
+  card._toolEndedAt = Number(endedAt);
   toolStateInto(card.querySelector(".t-state"), true, d.is_error);
   card.classList.toggle("err", !!d.is_error);
   if (d.interrupted) toolInterruptedInto(card);
   if (card._backgroundTaskUpdate)
-    backgroundTaskStateInto(card, card._backgroundTaskUpdate.data);
+    backgroundTaskStateInto(card, card._backgroundTaskUpdate.data, card._backgroundTaskUpdate.ts);
   const body = card.querySelector(".tool-body");
   if (card._questions && !d.is_error)
     questionMarkChosen(card._questions.list, card._questions.rows, d.content);
@@ -15175,8 +15189,10 @@ function fillToolResultInto(card, d) {
   body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(Empty)"));
 }
 
-function backgroundTaskStateInto(card, d) {
+/* The task's ending decides the mark, so the call took until that ending. */
+function backgroundTaskStateInto(card, d, endedAt) {
   if (!["completed", "failed", "stopped"].includes(d.status)) return;
+  card._toolEndedAt = Number(endedAt);
   const stateEl = card.querySelector(".t-state");
   if (d.status === "stopped") {
     stateEl.className = "t-state warn";
@@ -15190,7 +15206,7 @@ function attachBackgroundTaskUpdate(card, update) {
   card.appendChild(update.node);
   if (!card._backgroundTaskUpdate || update.seq >= card._backgroundTaskUpdate.seq) {
     card._backgroundTaskUpdate = update;
-    backgroundTaskStateInto(card, update.data);
+    backgroundTaskStateInto(card, update.data, update.ts);
   }
 }
 
@@ -18941,7 +18957,8 @@ class SessionView {
         const mark = n.querySelector(".t-state"), startedAt = Number(ev.ts), seq = Number(ev.seq);
         n._toolSeq = seq;
         n._toolStartedAt = startedAt;
-        tips.live(mark, () => mark.classList.contains("busy") ? toolRunningTip(this, startedAt, seq) : "");
+        tips.live(mark, () => mark.classList.contains("busy") ? toolRunningTip(this, startedAt, seq) :
+          toolFinishedTip(mark, startedAt, n._toolEndedAt));
         if (d.tool_use_id) {
           this.toolCards[d.tool_use_id] = n;
           for (const update of this.backgroundTaskUpdates.get(d.tool_use_id) || [])
@@ -18949,7 +18966,7 @@ class SessionView {
           /* Paging back reunites the pair: the result this call was missing
              moves into it and stops standing alone. */
           for (const orphan of this.orphanResults.get(d.tool_use_id) || []) {
-            fillToolResultInto(n, orphan.data);
+            fillToolResultInto(n, orphan.data, orphan.ts);
             orphan.node.remove();
           }
           this.orphanResults.delete(d.tool_use_id);
@@ -18959,16 +18976,16 @@ class SessionView {
       }
       case "tool_result": {
         const card = d.tool_use_id && this.toolCards[d.tool_use_id];
-        if (card) { fillToolResultInto(card, d); return null; }
+        if (card) { fillToolResultInto(card, d, ev.ts); return null; }
         /* The call is outside this window - the newest page starts partway
            through a turn, or the reader jumped into history - so the result
            stands on its own until paging back brings its card in. It is still
            a result: folded away like any other, never opened for the reader. */
         const n = toolCardNode({tool: d.tool || "tool_result", is_error: d.is_error}, true);
-        fillToolResultInto(n, d);
+        fillToolResultInto(n, d, ev.ts);
         if (d.tool_use_id) {
           const waiting = this.orphanResults.get(d.tool_use_id) || [];
-          waiting.push({node: n, data: d});
+          waiting.push({node: n, data: d, ts: ev.ts});
           this.orphanResults.set(d.tool_use_id, waiting);
         }
         return n;
@@ -19009,7 +19026,7 @@ class SessionView {
           const node = backgroundTaskUpdateNode(d);
           node.dataset.seq = String(ev.seq);
           if (d.tool_use_id) {
-            const update = {node, data: d, seq: Number(ev.seq)};
+            const update = {node, data: d, seq: Number(ev.seq), ts: ev.ts};
             const updates = this.backgroundTaskUpdates.get(d.tool_use_id) || [];
             updates.push(update);
             this.backgroundTaskUpdates.set(d.tool_use_id, updates);

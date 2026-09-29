@@ -130,7 +130,10 @@ for their carets, icons and status marks, with equal spacing from the chevron to
 the tool icon and from the icon to its label. Hover a running tool's status
 spinner to see a live elapsed clock for that individual call, including shell
 commands. It uses the saved call timestamp, survives reloads and reconnects,
-and stops when the call or its turn finishes. If a turn ends or Puppy restarts
+and stops when the call or its turn finishes. A finished call's check or cross
+reads **Completed · 1:20** or **Failed · 0:07** on hover: how long the call
+took, from its saved call timestamp to its result's, or to its background
+task's ending once that is attached to the card. If a turn ends or Puppy restarts
 without a tool result, Puppy records the call as **interrupted**, with its
 outcome unknown. Restoring a snapshot closes unanswered calls the same way.
 This cleanup preserves recorded results and never reruns the missing calls.
