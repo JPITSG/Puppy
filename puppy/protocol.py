@@ -81,6 +81,9 @@ QUEUE_PAUSE_CAPABILITY = "queue-pause"
 # Move a waiting prompt into the durable shared composer in the same guarded
 # operation that removes it from the queue.
 QUEUE_EDIT_CAPABILITY = "queue-edit"
+# POST /api/sessions/{sid}/loop accepts a prompt and 1..100 iterations as
+# one batch of ordinary messages: start now when idle, queue the remainder.
+SESSION_LOOPS_CAPABILITY = "session-loops"
 # The switch route queues an engine change behind running/queued work instead
 # of refusing it, and answers with the additive ``queued`` flag. Queue payloads
 # then contain {kind:"engine"} rows beside {kind:"config"} ones.
@@ -277,6 +280,7 @@ BASE_CAPABILITIES = (
     "message-queue",
     QUEUE_PAUSE_CAPABILITY,
     QUEUE_EDIT_CAPABILITY,
+    SESSION_LOOPS_CAPABILITY,
     QUEUE_REORDER_CAPABILITY,
     SESSION_DRAFT_CAPABILITY,
     SESSION_DRAFT_PRESENCE_CAPABILITY,

@@ -123,6 +123,14 @@ still contain a value written before that release.
   consoles that are not editing can follow the writer's caret.
 - Internal browser bridge aliases and the obsolete engines-response `user`
   alias are removed.
+- `session-loops` adds `POST /api/sessions/{sid}/loop` with `{text, iterations}`:
+  a nonempty prompt of at most 262,144 characters and an integer from 1 to 100.
+  Both runtimes accept all iterations in one synchronous batch, preserving
+  earlier queue entries and the engine-upgrade guard. An idle, empty session
+  starts one immediately; the rest are ordinary prompt strings in the existing
+  durable queue. The response is `{queued, iterations}`, with `queued` true
+  when the batch joined existing work. Drafts are untouched. No persisted
+  format, migration, scheduler or mandatory capability changes are needed.
 - Final turn completion refuses new steering and side questions, while
   already-sent steering may acknowledge for up to two seconds afterward.
   Native refusals and unconfirmed handoffs remain distinct in their error

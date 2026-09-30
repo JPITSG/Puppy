@@ -12907,6 +12907,7 @@ function spellAutocorrection(word) {
                        menu, above the spelling switches every box carries
                        (optional)
      runTool(value)    one of those opts was picked (optional)
+     loop(onStarted)   open a loop for this session (chat hosts only)
      menuOwner()       the view element a menu opened here belongs to, so a
                        rebuilt workspace takes it down (optional)
      uploadsBlocked()  a reason files cannot be attached through this host
@@ -12919,7 +12920,7 @@ function composerBoxHtml({ id = "", placeholder = "", rows = 1, className = "",
                            controls = "", actions = "" } = {}) {
   return `<div class="composer-box${className ? " " + esc(className) : ""}">
     <div class="mention-pop hidden" role="listbox"
-      aria-label="Mention a Puppy session, browser, terminal, or spawn"></div>
+      aria-label="Puppy tools and mentions"></div>
     <textarea rows="${Number(rows) || 1}"${id ? ` id="${esc(id)}"` : ""} placeholder="${esc(placeholder)}"
       spellcheck="false" autocorrect="off"></textarea>
     <div class="attach-strip hidden"></div>
@@ -14208,6 +14209,7 @@ class Composer {
     }
     if (item.kind === "new-vnc") { this.vncMentionBegin(); return; }
     if (item.kind === "new-spawn") { this.spawnMentionBegin(); return; }
+    if (item.kind === "new-loop") { this.loopMentionBegin(); return; }
     if (item.kind === "spawn-back") { this.spawnStepBack(); return; }
     if (item.kind === "spawn-step") { this.spawnStepChoose(item); return; }
     if (item.kind === "spawn-retry") { this.spawnFetchEngines(true); return; }
@@ -14255,6 +14257,18 @@ class Composer {
       }, current);
   }
 
+  loopMentionBegin() {
+    if (!this.mention || !this.host.loop) return;
+    const start = this.mention.start, end = this.ta.selectionStart, draft = this.ta.value;
+    this.hideMention();
+    this.host.loop(() => {
+      // Only consume the shortcut which opened this dialog. A newer draft,
+      // its attachments and any composition belong to the person editing it.
+      if (!this.closed && !this.composing && this.ta.value === draft)
+        this.set(draft.slice(0, start) + draft.slice(end));
+    });
+  }
+
   /* What "@" can point the agent at on this session's node: live instances
      first (its own before other sessions'), then the explicit new-instance
      requests. Every row is gated on what the node actually offers the engine:
@@ -14291,6 +14305,8 @@ class Composer {
       push("new-vnc", "New VNC connection", "a remote screen by host", "");
     if (spawnExecFor(bid))
       push("new-spawn", "New spawn", "delegate a one-shot agent", "");
+    if (this.host.loop && (!bid || backendHasCapability(backend, "session-loops")))
+      push("new-loop", "New loop", "repeat a prompt in this session", "");
     return items;
   }
 
@@ -16627,6 +16643,96 @@ async function modalNewTask(workspace) {
     finally { preparing = false; if (m.isConnected) syncBusy(); }
   };
 }
+const LOOP_MAX_ITERATIONS = 100;
+function modalNewLoop(bid, sid, onStarted = null) {
+  const session = findSessionMeta(bid, sid);
+  if (!session || !nodeHasCapability(bid, "session-loops")) return;
+  let submitting = false, submitted = false, uncertain = false;
+  const { m, close, onClose } = modal(`<form class="loop-form" novalidate>
+    <h2>New loop</h2>
+    ${modalSubjectHtml(session.name || "This session")}
+    <p class="modal-copy">Run the same prompt several times in this session. Each iteration continues the conversation after the previous one finishes.</p>
+    <label for="loop-prompt" class="task-composer-lbl">Prompt</label>
+    ${composerBoxHtml({ id: "loop-prompt", rows: 6, placeholder: "What should the agent do each time?",
+                        className: "mention-below" })}
+    <div class="loop-options">
+      <label>Iterations<input id="loop-count" type="number" min="1" max="${LOOP_MAX_ITERATIONS}" step="1" value="3" inputmode="numeric" aria-describedby="loop-plan" required></label>
+      <p id="loop-plan" class="hint loop-plan" aria-live="polite"></p>
+    </div>
+    <p class="form-error hidden" role="alert"></p>
+    <div class="m-btns"><button type="button" class="btn" id="loop-cancel">Cancel</button><button type="submit" class="btn btn-pri" id="loop-start">Start loop</button></div>
+  </form>`, "loop-modal", () => {
+    if (!submitted) modalNewLoop(bid, sid, onStarted);
+  });
+  const form = m.querySelector(".loop-form"), count = m.querySelector("#loop-count");
+  const start = m.querySelector("#loop-start"), cancel = m.querySelector("#loop-cancel");
+  const error = m.querySelector(".form-error"), plan = m.querySelector(".loop-plan");
+  const composer = new Composer(m.querySelector(".composer-box"), {
+    bid, sid, submit: () => form.requestSubmit(), privateUploads: () => !submitted,
+  });
+  onClose(() => composer.destroy({ discardUploads: !submitted }));
+  cancel.onclick = close;
+  const validCount = () => Number.isInteger(Number(count.value)) &&
+    Number(count.value) >= 1 && Number(count.value) <= LOOP_MAX_ITERATIONS;
+  const showPlan = () => {
+    const view = sessionViewFor(bid, sid), current = findSessionMeta(bid, sid);
+    const waiting = (view ? view.status : current && current.status) === "running" ||
+      !!(view && view.queued && view.queued.length);
+    const n = Number(count.value);
+    plan.textContent = !validCount() ? `Choose 1–${LOOP_MAX_ITERATIONS} iterations` : waiting ?
+      `${n} ${n === 1 ? "iteration joins" : "iterations join"} the queue after existing work` :
+      n === 1 ? "1 iteration starts now" : `1 iteration starts now · ${n - 1} queued`;
+  };
+  count.oninput = showPlan;
+  showPlan();
+  const fail = message => { error.textContent = message; error.classList.remove("hidden"); };
+  const syncBusy = () => {
+    start.disabled = submitting || uncertain;
+    start.textContent = submitting ? "Starting…" : "Start loop";
+    cancel.textContent = submitted ? "Close" : "Cancel";
+    count.disabled = submitting || uncertain;
+    composer.setBusy(submitting || uncertain);
+    m.setAttribute("aria-busy", String(submitting));
+  };
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (submitting || uncertain || !m.isConnected) return;
+    error.classList.add("hidden");
+    if (!validCount()) { fail(`Enter a whole number from 1 to ${LOOP_MAX_ITERATIONS}`); count.focus(); return; }
+    const text = composer.message(), blocker = composer.sendBlocker();
+    if (blocker) { fail(blocker); return; }
+    if (!text) { fail("Enter a prompt for the loop"); composer.focus(); return; }
+    if (text.length > DEFAULT_DRAFT_MAX_CHARS) { fail("The loop prompt is too long"); return; }
+    const iterations = Number(count.value);
+    submitting = submitted = true;
+    syncBusy();
+    try {
+      const result = await api(bid, `sessions/${sid}/loop`, {
+        method: "POST", body: { text, iterations }, timeoutMs: 30000,
+      });
+      if (!result || result.iterations !== iterations || typeof result.queued !== "boolean")
+        throw new Error("unexpected loop response");
+      spellLearnSent(text);
+      if (onStarted) onStarted();
+      close();
+      toast(`Loop ${result.queued ? "queued" : "started"} · ${iterations} ${iterations === 1 ? "iteration" : "iterations"}`, "busy");
+    } catch (err) {
+      // A lost response may already have started the batch. Never offer a
+      // blind retry or delete attachments which those queued prompts own.
+      uncertain = !err.status || err.status >= 500;
+      submitted = uncertain;
+      const message = uncertain ? "Could not confirm the loop · check the session queue before starting another" :
+        `Could not start the loop · ${err.message}`;
+      if (m.isConnected) fail(message);
+      else toast(message, "bad", TOAST_LONG);
+    } finally {
+      submitting = false;
+      if (m.isConnected) { syncBusy(); showPlan(); }
+    }
+  };
+  composer.focus();
+}
+
 /* The review sheet: the task's facts in the linked-workspace sheet's voice,
    then its changed files and diff on the transcript's code-block
    surface.
@@ -17229,6 +17335,7 @@ class SessionView {
       sid: this.tab.sid,
       promptHistory: true,
       submit: () => this.submit(),
+      loop: onStarted => modalNewLoop(Number(this.tab.bid) || 0, this.tab.sid, onStarted),
       enterActions: { steer: () => this.steer(), queue: () => this.submit() },
       /* Escape with no list open interrupts the turn; it is consumed here so
          nothing above the view reads it as its own. */

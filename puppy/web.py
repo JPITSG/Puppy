@@ -996,6 +996,18 @@ async def h_session_message(request: web.Request):
     return web.json_response(res, status=status)
 
 
+async def h_session_loop(request: web.Request):
+    s = _session_or_404(request)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid loop request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "loop request must be an object"}, status=400)
+    result = runner.hub(s["id"]).send_loop(body.get("text"), body.get("iterations"))
+    return web.json_response(result, status=400 if "error" in result else 200)
+
+
 async def _session_steer(s: dict, body) -> tuple:
     """Validate and hand off one steer for either HTTP or the session socket."""
     if not isinstance(body, dict):
@@ -2192,6 +2204,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_post("/api/sessions/{sid:\\d+}/workspace/reset", h_session_workspace_reset)
     r.add_post("/api/sessions/{sid:\\d+}/workspace/move", h_session_workspace_move)
     r.add_post("/api/sessions/{sid:\\d+}/message", h_session_message)
+    r.add_post("/api/sessions/{sid:\\d+}/loop", h_session_loop)
     r.add_post("/api/sessions/{sid:\\d+}/steer", h_session_steer)
     r.add_post("/api/sessions/{sid:\\d+}/ask", h_session_ask)
     r.add_delete("/api/sessions/{sid:\\d+}/ask", h_session_ask_cancel)

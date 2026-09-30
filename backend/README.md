@@ -790,6 +790,16 @@ and calls after the originating turn ends are rejected.
 
 ## Durable message queues
 
+Nodes advertising `session-loops` accept `POST /api/sessions/{sid}/loop` with
+`{"text":"Review the latest changes","iterations":3}`. The count must be an
+integer from 1 to 100; the prompt must be nonempty and at most 262,144 characters.
+When idle with an empty queue, the first copy starts immediately and two copies
+queue. Otherwise all copies join behind existing work. The answer contains
+`queued` (whether the batch joined existing work) and `iterations`. The whole
+batch is accepted without interleaving, uses the ordinary engine-upgrade guard,
+and leaves the shared draft alone. Waiting copies are ordinary prompt strings,
+so the existing queue controls, uploads, backup and restart behavior apply.
+
 Prompts queued behind a running turn are written through to the node's database
 on every change, so they belong to the user rather than to the process. A
 console connected to a node advertising `queue-pause` may pause any ordinary

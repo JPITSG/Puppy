@@ -226,6 +226,7 @@ async def fixture():
     # Even an accidental click in the interactive preview cannot run an engine.
     for session in db.list_sessions():
         runner.hub(session["id"]).send_message = lambda text: {"error": "Preview only"}
+        runner.hub(session["id"]).send_loop = lambda text, iterations: {"error": "Preview only"}
     return app, sid
 
 
@@ -768,6 +769,104 @@ async def model_substitute_checks(instance, capture=False):
         await instance.call("Emulation.setDeviceMetricsOverride", {
             "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
     print("PASS: model stand-ins reach the real console, keep amber names under hover, fit desktop/phone in both themes, survive reattach and clear on recovery", flush=True)
+
+
+async def loop_checks(instance, capture=False):
+    """Real @ entry, dialog, history, and one atomic request to the node."""
+    sid = db.create_session("Layout review", "claude", "/home/mira/projects/harbor", "", "", "", "default")
+    hub = runner.hub(sid)
+    runner.broadcast_sessions()
+    await until(instance, "!!findSessionMeta(0,%d)" % sid)
+    await evaluate(instance, "openSessionTab(0,%d,findSessionMeta(0,%d)); window.loopView=sessionViewFor(0,%d); true" % (sid, sid, sid))
+    await until(instance, "loopView.draftReady")
+    started = []
+
+    def start(text):
+        started.append(text)
+        hub.status = "running"
+        db.touch_session(sid, status="running")
+        runner.broadcast_sessions()
+
+    async def click(selector):
+        point = await evaluate(instance, """(() => { const n=document.querySelector(%s);
+            n.scrollIntoView({block:'nearest'}); const r=n.getBoundingClientRect();
+            return {x:r.x+r.width/2,y:r.y+r.height/2}; })()""" % json.dumps(selector))
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1), session=instance.page_session)
+
+    async def open_dialog():
+        await evaluate(instance, "loopView.composer.set(''); loopView.composer.focus(); true")
+        await instance.call("Input.insertText", {"text": "@Loop"}, session=instance.page_session)
+        await until(instance, "loopView.composer.mention?.items[0]?.kind==='new-loop'")
+        await click('.chat.on .mention-item')
+        await until(instance, "!!document.querySelector('.loop-modal') && !navigation.pending && !navigation.scheduled")
+
+    try:
+        with patch.object(hub, "_start_turn", side_effect=start):
+            for width, height, scale, name in [(1440, 900, 1, "desktop"), (390, 844, 2, "mobile")]:
+                await instance.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
+                    "deviceScaleFactor": scale, "mobile": name == "mobile"}, session=instance.page_session)
+                for theme in ("dark", "light"):
+                    await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                    await open_dialog()
+                    await instance.call("Input.insertText", {"text": "Review the dashboard layout, improve one detail, and run the relevant checks."}, session=instance.page_session)
+                    geometry = await evaluate(instance, """(() => {
+                        const m=document.querySelector('.loop-modal'), r=m.getBoundingClientRect(),
+                            c=Composer.of(m.querySelector('#loop-prompt')), buttons=[...m.querySelector('.m-btns').children];
+                        return {fits:r.left>=0 && r.right<=innerWidth && r.top>=0 && r.bottom<=innerHeight && m.scrollWidth<=m.clientWidth,
+                            shared:!!c && !c.host.loop, buttons:buttons.map(b=>b.textContent),
+                            count:m.querySelector('#loop-count').value,
+                            plan:m.querySelector('.loop-plan').textContent,
+                            labeled:m.querySelector('label[for="loop-prompt"]')?.textContent};
+                    })()""")
+                    assert geometry == {"fits": True, "shared": True, "buttons": ["Cancel", "Start loop"],
+                        "count": "3", "plan": "1 iteration starts now · 2 queued", "labeled": "Prompt"}, (name, theme, geometry)
+                    if capture:
+                        shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                        (BASE / "assets" / ("loop-" + name + "-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
+                    # Back cleans up; Forward opens a fresh form and never sends.
+                    await evaluate(instance, "history.back(); true")
+                    await until(instance, "!document.querySelector('.loop-modal') && !navigation.pending")
+                    assert not started and not hub.queue
+                    assert await evaluate(instance, "loopView.composer.text()") == "@Loop"
+                    await evaluate(instance, "history.forward(); true")
+                    await until(instance, "!!document.querySelector('.loop-modal') && !navigation.pending")
+                    assert await evaluate(instance, "document.querySelector('#loop-prompt').value") == ""
+                    assert await evaluate(instance, "!JSON.stringify(history.state).includes('dashboard layout')")
+                    await click('#loop-cancel')
+                    await until(instance, "!document.querySelector('.loop-modal') && !navigation.pending")
+            await open_dialog()
+            await click('#loop-start')
+            assert await evaluate(instance, "document.querySelector('.loop-modal .form-error').textContent") == "Enter a prompt for the loop"
+            await evaluate(instance, "document.querySelector('#loop-prompt').focus(); true")
+            await instance.call("Input.insertText", {"text": "Review one detail"}, session=instance.page_session)
+            # Ctrl+Enter uses the shared Composer's send contract.
+            for kind in ("keyDown", "keyUp"):
+                await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Enter", "code": "Enter",
+                    "windowsVirtualKeyCode": 13, "modifiers": 2}, session=instance.page_session)
+            await until(instance, "!document.querySelector('.loop-modal') && loopView.queued.length===2 && !navigation.pending")
+            assert started == ["Review one detail"] and hub.queue == ["Review one detail"] * 2
+            assert await evaluate(instance, "loopView.composer.text()") == ""
+            await evaluate(instance, "history.forward(); true")
+            await until(instance, "!navigation.pending && !navigation.applying")
+            assert not await evaluate(instance, "!!document.querySelector('.loop-modal')")
+            assert len(started) == 1 and len(hub.queue) == 2
+            # A second loop joins an active session without interrupting it.
+            await open_dialog()
+            assert await evaluate(instance, "document.querySelector('.loop-plan').textContent") == "3 iterations join the queue after existing work"
+            await instance.call("Input.insertText", {"text": "Follow-up pass"}, session=instance.page_session)
+            await click('#loop-start')
+            await until(instance, "!document.querySelector('.loop-modal') && loopView.queued.length===5 && !navigation.pending")
+            assert len(started) == 1 and hub.queue[-3:] == ["Follow-up pass"] * 3
+    finally:
+        hub.clear_queue()
+        hub.status = "idle"
+        db.touch_session(sid, status="idle")
+        runner.broadcast_sessions()
+        await evaluate(instance, "closeTab('s:0:%d'); activateTab('s:0:1'); applyTheme('dark'); delete window.loopView; true" % sid)
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    print("PASS: @Loop form, desktop/phone in both themes, Back/Forward cleanup without replay, inline validation, keyboard send, first run plus queued copies, and busy-session ordering", flush=True)
 
 
 async def thinking_disclosure_checks(instance):
@@ -6712,6 +6811,12 @@ async def main(args):
                 return
             if args.navigation_only:
                 await navigation_checks(instances[0], url, sid, args.screenshots)
+                await loop_checks(instances[0], args.screenshots)
+                return
+            if args.loop_only:
+                await loop_checks(instances[0], args.screenshots)
+                if args.screenshots:
+                    await screenshots(instances[0])
                 return
             if args.model_substitute_only:
                 await model_substitute_checks(instances[0], args.screenshots)
@@ -6757,6 +6862,7 @@ async def main(args):
             await chat_filter_checks(*instances, args.screenshots)
             await show_focus_checks(instances[0])
             await thinking_disclosure_checks(instances[0])
+            await loop_checks(instances[0], args.screenshots)
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])
@@ -6784,6 +6890,7 @@ if __name__ == "__main__":
     parser.add_argument("--chat-filter-only", action="store_true")
     parser.add_argument("--show-focus-only", action="store_true")
     parser.add_argument("--thinking-only", action="store_true")
+    parser.add_argument("--loop-only", action="store_true")
     parser.add_argument("--tool-clock-only", action="store_true")
     parser.add_argument("--task-refresh-only", action="store_true")
     parser.add_argument("--token-usage-only", action="store_true")

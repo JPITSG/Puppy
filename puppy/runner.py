@@ -37,6 +37,7 @@ UPDATE_QUEUE_LIMIT = 256
 
 STREAM_LIMIT = 16 * 1024 * 1024
 QUEUE_REORDER_HOLD_SECONDS = 30
+MAX_LOOP_ITERATIONS = 100
 MAX_STEER_CHARS = 128 * 1024
 MAX_STEER_TURN_ID_CHARS = 128
 MAX_STEERS_PER_TURN = 64
@@ -1326,6 +1327,26 @@ class SessionHub:
     # ---- public ops ----
 
     def send_message(self, text: str) -> dict:
+        return self._send_messages(text, 1)
+
+    def send_loop(self, text, iterations) -> dict:
+        """Accept one bounded batch of ordinary prompts, without yielding.
+
+        The existing scheduler, persistence and controls own every iteration;
+        no loop state survives separately from its queued messages.
+        """
+        if not isinstance(text, str) or not text.strip():
+            return {"error": "enter a prompt for the loop"}
+        if len(text) > db.MAX_DRAFT_CHARS:
+            return {"error": "loop prompt cannot exceed {} characters".format(db.MAX_DRAFT_CHARS)}
+        if type(iterations) is not int or not 1 <= iterations <= MAX_LOOP_ITERATIONS:
+            return {"error": "iterations must be a whole number from 1 to {}".format(MAX_LOOP_ITERATIONS)}
+        result = self._send_messages(text, iterations)
+        if "error" not in result:
+            result["iterations"] = iterations
+        return result
+
+    def _send_messages(self, text: str, iterations: int) -> dict:
         text = (text or "").strip()
         if not text:
             return {"error": "empty message"}
@@ -1353,7 +1374,7 @@ class SessionHub:
         # turn ending and its successor starting): a pending change in there
         # must still apply before this prompt runs
         if self.status == "running" or self.queue:
-            self.queue.append(text)
+            self.queue.extend([text] * iterations)
             self._broadcast_queue()
             # A queue idle only because every earlier prompt is paused stays
             # idle on its own. This prompt is runnable now, so it pokes the
@@ -1361,6 +1382,9 @@ class SessionHub:
             if self.status != "running":
                 self._start_queue_if_ready()
             return {"queued": True}
+        if iterations > 1:
+            self.queue.extend([text] * (iterations - 1))
+            self._broadcast_queue()
         self._start_turn(text)
         return {"queued": False}
 

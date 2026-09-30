@@ -335,9 +335,10 @@ hide the checkboxes and keep the saved Enter choice.
 Everything typed at an agent goes through one shared prompt box: `Enter` sends
 (using the chosen action during a running turn),
 `Shift+Enter` or `Ctrl+J` breaks a line, and `@` opens the mention list (browsers,
-terminals, VNC screens, sessions, a new spawn). In session chats, `↑` at the
-start of the box recalls earlier prompts. The New task box keeps normal
-Up/Down caret movement and does not recall Main's prompts. Recall reads the session's stored prompts, loading older pages as
+terminals, VNC screens, sessions, a new spawn; session chats also offer **New loop**).
+In session chats, `↑` at the start of the box recalls earlier prompts. The New task
+and New loop boxes keep normal Up/Down caret movement without prompt recall.
+Recall reads the session's stored prompts, loading older pages as
 needed with no history limit, all the way back to its first prompt, on any
 device. `↓` at the end walks forward again and restores your unsent draft and
 attachments after the newest prompt. Each new recall walk picks up prompts
@@ -356,6 +357,19 @@ stay local until you review the drafts or send your message; another console's
 edits never interrupt your typing or move your caret while you type.
 The status row below the tools appears only for typing activity, a draft conflict,
 or a save/send error; it takes no space when idle.
+
+Type **@Loop** in a session chat and choose **New loop** to repeat a prompt.
+The dialog uses the same prompt box, including attachments, mentions and spelling,
+and an iteration count from **1 to 100** (default **3**). **Start loop** starts
+the first iteration immediately when the session is idle and has no waiting work;
+the remaining copies join its ordinary queue. If work is already running or queued,
+all iterations join behind it. Each run continues the same conversation. The usual
+queue controls can pause, reorder, edit or remove any waiting iteration, and a
+restart parks the remaining work as held prompts. The entry requires the backend's
+`session-loops` capability and is offered in session chats, including existing tasks.
+
+[Desktop preview](assets/loop-desktop-dark.png) ·
+[Phone preview](assets/loop-mobile-light.png)
 
 Steer accepts the same files as ordinary messages, including attachments without
 text. The agent receives their paths and uses its file or image tools to inspect
@@ -378,8 +392,8 @@ the 2026 standard dictionaries' additions, such as `deduplication`, `deserialize
 and `cybersecurity`, plus `anonymize`/`anonymise` and their verb forms. These
 additions are recognized and suggested without becoming autocorrect targets.
 Nothing you type is sent anywhere to be checked, and no dictionary is downloaded from the
-internet. The tools button in every prompt box — the chat's and the New task
-dialog's — carries two switches:
+internet. The tools button in every prompt box — the chat's, New task's and
+New loop's — carries two switches:
 
 - **Spell check** (on by default) underlines what it does not know, once you
   have finished the word: nothing is marked under your fingers while you are
@@ -1073,6 +1087,7 @@ node tests/tab_drag_ui_test.js       # task discovery, saved visibility and tab 
 node tests/drag_scroll_ui_test.js    # the lists a reorder drag scrolls, and the drops past their ends
 node tests/menu_dismiss_ui_test.js   # menu dismissal, toggles and open dropdowns
 node tests/navigation_ui_test.js    # browser Back/Forward, dialogs and cancellation ownership
+python3 tests/session_loop_test.py  # loop batches, queue controls, bounds and both runtimes
 node tests/composer_ui_test.js       # the shared prompt box and its "@" list
 node tests/backend_settings_ui_test.js # backend forms, removal errors and retry
 node tests/task_config_ui_test.js    # the New task dialog

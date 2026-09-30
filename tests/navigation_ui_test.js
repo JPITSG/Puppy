@@ -139,6 +139,40 @@ function fixture() {
   assert.equal(root.children.length, 0); assert.equal(headerCleanups, 2);
   assert.ok(!JSON.stringify(f.stack).includes("Private draft"));
 
+  // New loop is an editor until submitted. Back cleans it up, Forward gets
+  // fresh fields, and a successful command consumes its reopen factory.
+  let loopPosts = 0;
+  Object.assign(modalContext, {
+    findSessionMeta: () => ({ name: 'Loop preview', status: 'idle' }),
+    nodeHasCapability: () => true, sessionViewFor: () => ({ status: 'idle', queued: [] }),
+    modalSubjectHtml: () => '', composerBoxHtml: () => '<div class="composer-box"><textarea id="loop-prompt"></textarea></div>',
+    Composer: class {
+      constructor(box) { this.ta = box.querySelector('textarea'); }
+      message() { return this.ta.value.trim(); }
+      focus() { this.ta.focus(); }
+      sendBlocker() { return ''; }
+      setBusy() {}
+      destroy() { this.closed = true; }
+    },
+    DEFAULT_DRAFT_MAX_CHARS: 262144, spellLearnSent() {}, toast() {},
+    api: async (bid, route, options) => {
+      assert.equal(bid, 0); assert.equal(route, 'sessions/1/loop');
+      assert.equal(options.body.iterations, 3); loopPosts++;
+      return { iterations: 3, queued: false };
+    },
+  });
+  vm.runInContext(between('const LOOP_MAX_ITERATIONS', '/* The review sheet:'), modalContext);
+  modalContext.modalNewLoop(0, 1); await tick();
+  const loopForm = () => root.querySelector('.loop-form');
+  loopForm().querySelector('#loop-prompt').value = 'Private loop prompt';
+  await f.move(-1); assert.equal(loopForm(), null); assert.equal(loopPosts, 0);
+  await f.move(1); assert.equal(loopForm().querySelector('#loop-prompt').value, '');
+  loopForm().querySelector('#loop-prompt').value = 'Repeat once per turn';
+  await loopForm().onsubmit({ preventDefault() {} }); await tick(); await tick();
+  assert.equal(loopForm(), null); assert.equal(loopPosts, 1);
+  await f.move(1); assert.equal(loopForm(), null); assert.equal(loopPosts, 1);
+  assert.ok(!JSON.stringify(f.stack).includes('Private loop prompt'));
+
   f = fixture(); let layers = [], cleanups = 0;
   function open(name, reopen = true) {
     const row = { name, close: null };

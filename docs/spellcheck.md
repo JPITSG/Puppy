@@ -7,7 +7,7 @@ this release. Nothing typed at an agent leaves the browser to be checked, and
 no dictionary is fetched from the internet.
 
 Two switches, both per browser, both in every prompt box's tools menu (the
-chat's and the New task dialog's), stored as the exact values `"1"` and `"0"`:
+chat's, New task's and New loop's), stored as the exact values `"1"` and `"0"`:
 
 | key | default | meaning |
 | --- | --- | --- |
@@ -211,8 +211,9 @@ A word the dictionary does not know but the person keeps sending - `eval`, a
 product, a colleague - is probably theirs, so the checker adds it by itself.
 `spellLearnSent(text)` runs for every sent message: `Composer.take()` hands
 over the box's text on every send (the chat, steering, a side question, a
-shared draft's accepted send) and the New task dialog hands over a created
-task's prompt. The message's marked words - each once, however often it
+shared draft's accepted send), the New task dialog hands over a created
+task's prompt, and New loop reports its accepted prompt once for the whole
+batch. The message's marked words - each once, however often it
 appears - go to `POST /api/spelling/sent {"words": [...]}` (at most 200), and
 the controller counts them: every send is dated to the second, sends older
 than `LEARN_DAYS` (7) days fall off before every count, and a word now sent

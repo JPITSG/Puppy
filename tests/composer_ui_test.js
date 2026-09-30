@@ -27,6 +27,7 @@ let controlHold = null;
 let controlFailure = "";
 let historyRead = null;
 let sessionCatalog = null;
+let loopFailure = null, loopHold = null;
 let storedEvents = [];
 const promptEvent = (seq, text) => ({ seq, kind: "user", data: { text } });
 function historyPage(route) {
@@ -53,6 +54,11 @@ const context = vm.createContext({
   fetch: (url, init) => new Promise(resolve => calls.fetch.push({ url, init, resolve })),
   api: async (bid, route, options = {}) => {
     calls.api.push({ bid, route, ...options });
+    if (route.endsWith('/loop')) {
+      if (loopHold) await loopHold;
+      if (loopFailure) throw loopFailure;
+      return { queued: false, iterations: options.body.iterations };
+    }
     if (route === "session-links/catalog") return await sessionCatalog;
     if (/\/events\?/.test(route))
       return historyRead ? historyRead(bid, route, options) : historyPage(route);
@@ -79,12 +85,15 @@ const context = vm.createContext({
   WebSocket: { OPEN: 1 },
   lsGet: key => storage.has(key) ? storage.get(key) : null,
   lsSet: (key, value) => storage.set(key, value), lsDel: key => storage.delete(key),
-  modal: html => {
+  modal: (html, className, reopen) => {
     const m = document.createElement("div"); m.innerHTML = html; document.body.appendChild(m);
     const listeners = [];
-    reviewDialog = { m, close() { m.remove(); listeners.forEach(fn => fn()); }, onClose: fn => listeners.push(fn) };
+    reviewDialog = { m, reopen, close() { m.remove(); listeners.forEach(fn => fn()); }, onClose: fn => listeners.push(fn) };
     return reviewDialog;
   },
+  modalSubjectHtml: text => `<p class="modal-subject">${text}</p>`,
+  nodeHasCapability: (bid, cap) => !bid || !!state.backends.find(b => b.id === bid && b.capabilities.includes(cap)),
+  sessionViewFor: () => ({ status: "idle", queued: [] }),
   browserEnabledFor: () => true,
   vncEnabledFor: () => true,
   vncInstancesFor: bid => state.vncInstances[bid] || null,
@@ -115,6 +124,7 @@ vm.runInContext([
   between("class SharedDraft {", "class SessionView {"),
   between("class SessionView {", "/* ================= TermView"),
   between("function vncShortcutText(", "function modalVncShortcut("),
+  between("const LOOP_MAX_ITERATIONS", "/* The review sheet:"),
 ].join("\n"), context);
 const { Composer, composerBoxHtml, SessionView, SharedDraft } = vm.runInContext(
   "({ Composer, composerBoxHtml, SessionView, SharedDraft })", context);
@@ -1180,5 +1190,81 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     assert.equal(attachment.uploading, true);
     b.composer.destroy();
   }
-  console.log("PASS: shared prompt box keys, mentions, attachments, full stored recall across devices, paging/retry/cancellation, shared replacement, host gating and release paths");
+  // Loop is a chat-host action, not a directive sent to the model. The
+  // original draft survives cancellation and newer edits survive acceptance.
+  let loopStarted;
+  const loopSource = makeBox({ loop: done => { loopStarted = done; } });
+  type(loopSource.ta, "Keep this @Loop");
+  assert.equal(loopSource.composer.mention.items[0].kind, "new-loop");
+  key(loopSource.ta, "Enter");
+  assert.equal(loopSource.ta.value, "Keep this @Loop");
+  assert.equal(loopSource.events.submit, 0);
+  loopStarted(); assert.equal(loopSource.ta.value, "Keep this ");
+  type(loopSource.ta, "@Loop"); key(loopSource.ta, "Enter");
+  type(loopSource.ta, "A newer draft"); loopStarted();
+  assert.equal(loopSource.ta.value, "A newer draft");
+  assert.ok(!makeBox().composer.mentionCandidates().some(row => row.kind === "new-loop"));
+  loopSource.composer.destroy();
+  const remoteLoop = makeBox({ bid: 77, loop() {} });
+  state.backends.push({ id: 77, capabilities: [] });
+  assert.ok(!remoteLoop.composer.mentionCandidates().some(row => row.kind === 'new-loop'));
+  state.backends.at(-1).capabilities.push('session-loops');
+  assert.ok(remoteLoop.composer.mentionCandidates().some(row => row.kind === 'new-loop'));
+  remoteLoop.composer.destroy(); state.backends.pop();
+
+  const openLoop = () => {
+    context.modalNewLoop(0, 10);
+    const d = reviewDialog, form = d.m.querySelector('.loop-form');
+    form.requestSubmit = () => form.onsubmit(new FakeEvent('submit'));
+    return { d, form, box: Composer.of(d.m.querySelector('#loop-prompt')),
+      count: d.m.querySelector('#loop-count'), start: d.m.querySelector('#loop-start'),
+      error: d.m.querySelector('.form-error'), send: () => form.requestSubmit() };
+  };
+  let loop = openLoop();
+  assert.equal(loop.count.value, '3');
+  assert.equal(document.activeElement, loop.box.ta);
+  assert.equal(loop.box.host.promptHistory, undefined, 'a dialog never recalls session messages');
+  await loop.send(); assert.match(loop.error.textContent, /Enter a prompt/);
+  loop.box.set('Repeat this prompt');
+  for (const n of ['', '0', '-1', '2.5', '101']) {
+    loop.count.value = n; await loop.send(); assert.match(loop.error.textContent, /whole number/);
+  }
+  loop.count.value = '3';
+  paste(loop.box.ta);
+  await loop.send(); assert.match(loop.error.textContent, /uploads/);
+  completeUpload(calls.fetch.at(-1)); await settle();
+  const loopMessage = loop.box.message();
+  let releaseLoop; loopHold = new Promise(resolve => { releaseLoop = resolve; });
+  mark = calls.api.length;
+  const loopPending = loop.send();
+  await loop.send();
+  assert.equal(calls.api.length, mark + 1, 'a double press submits one batch');
+  assert.ok(loop.start.disabled && loop.box.busy && loop.count.disabled);
+  assert.equal(calls.api.at(-1).body.text, loopMessage, 'every iteration carries the same attachment markers');
+  assert.equal(calls.api.at(-1).body.iterations, 3);
+  releaseLoop(); await loopPending; loopHold = null;
+  assert.equal(loop.d.m.isConnected, false);
+  const savedDialog = reviewDialog; loop.d.reopen();
+  assert.equal(reviewDialog, savedDialog, 'Forward cannot revive a submitted loop');
+
+  loop = openLoop(); loop.box.set('Keep on refusal');
+  loopFailure = Object.assign(new Error('backend busy'), { status: 400 });
+  await loop.send();
+  assert.equal(loop.box.text(), 'Keep on refusal');
+  assert.equal(loop.start.disabled, false);
+  assert.match(loop.error.textContent, /backend busy/);
+  loopFailure = new Error('reply lost');
+  await loop.send();
+  assert.equal(loop.start.disabled, true, 'an uncertain response never invites a duplicate batch');
+  assert.match(loop.error.textContent, /check the session queue/);
+  loop.d.close(); loopFailure = null;
+  loop = openLoop();
+  paste(loop.box.ta); completeUpload(calls.fetch.at(-1)); await settle();
+  mark = calls.api.length;
+  loop.d.close(); await settle();
+  assert.equal(deletes(mark).length, 1, 'cancelling discards private staged attachments');
+  loop.d.reopen();
+  assert.equal(reviewDialog.m.querySelector('#loop-prompt').value, '', 'Forward opens a fresh editor');
+  reviewDialog.close();
+  console.log("PASS: shared prompt box keys, mentions, attachments, recall, replacements, controls and loop dialog validation, submission, cleanup and retry guards");
 })().catch(error => { console.error(error); process.exitCode = 1; });

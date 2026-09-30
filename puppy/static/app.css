@@ -3467,9 +3467,13 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .remove-task-modal .fold-check{margin:0 0 6px}
 /* the task box is the shared prompt box at the old field's height; the
    caption sits as close to it as a label's own control */
-.new-task-modal .task-composer-lbl{margin-bottom:5px}
-.new-task-modal .composer-box{margin-bottom:10px}
-.new-task-modal .composer-box textarea{min-height:130px;max-height:40vh}
+:is(.new-task-modal,.loop-modal) .task-composer-lbl{margin-bottom:5px}
+:is(.new-task-modal,.loop-modal) .composer-box{margin-bottom:10px}
+:is(.new-task-modal,.loop-modal) .composer-box textarea{min-height:130px;max-height:40vh}
+.loop-modal{--modal-w:var(--modal-w-editor)}
+.loop-options{display:grid;grid-template-columns:minmax(0,120px) minmax(0,1fr);gap:16px;align-items:end}
+.loop-options label{margin:0}
+.loop-plan{margin:0 0 9px}
 /* the review sheet: facts in the linked-workspace sheet's voice, then the
    file list and diff on the same surface every other modal gives a
    textarea (the agent-notes editor's mono voice), each scrolling on its own.
