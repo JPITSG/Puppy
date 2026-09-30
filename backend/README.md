@@ -800,6 +800,21 @@ batch is accepted without interleaving, uses the ordinary engine-upgrade guard,
 and leaves the shared draft alone. Waiting copies are ordinary prompt strings,
 so the existing queue controls, uploads, backup and restart behavior apply.
 
+With the additive `session-loop-config` capability, the same request may include
+`configurations`, an array of exactly `iterations` objects, each containing only
+`engine`, `model` and `effort` strings. Empty model/effort values mean engine
+default. Omit the array to retain the basic loop behavior; null is invalid.
+The node refreshes the selected engines' catalogs and validates the entire batch
+before changing the session or queue, including each model's effort choices and
+every target engine's upgrade guard. A bad iteration rejects the whole request.
+Changes become ordinary engine/config rows before the corresponding prompt,
+without resetting native context for a model/effort change within one engine.
+Engine switches use the existing transcript handoff and capture the target's
+saved permission default; same-engine choices retain permissions. Fast turns off
+on an engine switch or a model without Fast support. The final settings remain in
+force after the loop. Queue ordering, editing, removal and restart rules are
+unchanged; no separate loop state is stored.
+
 Prompts queued behind a running turn are written through to the node's database
 on every change, so they belong to the user rather than to the process. A
 console connected to a node advertising `queue-pause` may pause any ordinary

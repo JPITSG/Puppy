@@ -131,6 +131,15 @@ still contain a value written before that release.
   durable queue. The response is `{queued, iterations}`, with `queued` true
   when the batch joined existing work. Drafts are untouched. No persisted
   format, migration, scheduler or mandatory capability changes are needed.
+- `session-loop-config` adds an optional `configurations` array to `/loop`,
+  exactly one `{engine, model, effort}` object per iteration. Both runtimes
+  refresh the selected catalogs, then validate the whole batch and every
+  engine-upgrade guard before any mutation. Settings use existing ordered
+  engine/config rows before prompt strings, preserving native context within
+  an engine and the normal handoff across engines. Permission defaults and
+  Fast resets follow the switch contract; the final settings remain in force.
+  Omitting the array preserves basic loops; null and incomplete rows are
+  refused. No persisted format or mandatory capability changes are needed.
 - Final turn completion refuses new steering and side questions, while
   already-sent steering may acknowledge for up to two seconds afterward.
   Native refusals and unconfirmed handoffs remain distinct in their error

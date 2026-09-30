@@ -9,6 +9,7 @@ and --serve keeps the demo open for interactive review (mira / preview-password)
 import argparse
 import asyncio
 import base64
+from contextlib import ExitStack
 import json
 import math
 import os
@@ -19,7 +20,7 @@ import shutil
 import sys
 import time
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
@@ -31,7 +32,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from puppy import auth, backends, browser, config, db, notices, runner, search, session_git, session_tasks, session_aliases, terminal, token_usage, workspaces
 from puppy import web as webui
-from puppy.drivers import all_drivers
+from puppy.drivers import all_drivers, get_driver
 
 
 async def engines(*args, **kwargs):
@@ -226,7 +227,7 @@ async def fixture():
     # Even an accidental click in the interactive preview cannot run an engine.
     for session in db.list_sessions():
         runner.hub(session["id"]).send_message = lambda text: {"error": "Preview only"}
-        runner.hub(session["id"]).send_loop = lambda text, iterations: {"error": "Preview only"}
+        runner.hub(session["id"]).send_loop = lambda text, iterations, configurations=None: {"error": "Preview only"}
     return app, sid
 
 
@@ -773,23 +774,38 @@ async def model_substitute_checks(instance, capture=False):
 
 async def loop_checks(instance, capture=False):
     """Real @ entry, dialog, history, and one atomic request to the node."""
-    sid = db.create_session("Layout review", "claude", "/home/mira/projects/harbor", "", "", "", "default")
+    sid = db.create_session("Layout review", "claude", "/home/mira/projects/harbor", "", "", "", get_driver("claude").default_permission())
     hub = runner.hub(sid)
     runner.broadcast_sessions()
     await until(instance, "!!findSessionMeta(0,%d)" % sid)
     await evaluate(instance, "openSessionTab(0,%d,findSessionMeta(0,%d)); window.loopView=sessionViewFor(0,%d); true" % (sid, sid, sid))
     await until(instance, "loopView.draftReady")
     started = []
+    used = []
+    models = [{"value": "", "label": "Engine default", "effort_options": [{"value": "", "label": "Engine default"}]},
+              {"value": "preview-quick", "label": "Preview Quick", "effort_options": [
+                  {"value": "", "label": "Engine default"}, {"value": "low", "label": "Low"}]},
+              {"value": "preview-precise", "label": "Preview Precise", "effort_options": [
+                  {"value": "", "label": "Engine default"}, {"value": "high", "label": "High"}]}]
+
+    async def loop_engines(*args, **kwargs):
+        return [{**item, "model_options": models} for item in await engines()]
 
     def start(text):
         started.append(text)
+        used.append({key: db.get_session(sid)[key] for key in ("engine", "model", "effort")})
         hub.status = "running"
         db.touch_session(sid, status="running")
         runner.broadcast_sessions()
 
     async def click(selector):
+        await evaluate(instance, "document.querySelector(%s).scrollIntoView({block:'nearest'})" % json.dumps(selector))
+        # A tall phone dialog scrolls on the compositor; layout can report
+        # the new rect before hit testing has reached that scroll position.
+        await until(instance, """(() => {const n=document.querySelector(%s),r=n.getBoundingClientRect();
+            return n.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));})()""" % json.dumps(selector))
         point = await evaluate(instance, """(() => { const n=document.querySelector(%s);
-            n.scrollIntoView({block:'nearest'}); const r=n.getBoundingClientRect();
+            const r=n.getBoundingClientRect();
             return {x:r.x+r.width/2,y:r.y+r.height/2}; })()""" % json.dumps(selector))
         for kind in ("mousePressed", "mouseReleased"):
             await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1), session=instance.page_session)
@@ -802,7 +818,15 @@ async def loop_checks(instance, capture=False):
         await until(instance, "!!document.querySelector('.loop-modal') && !navigation.pending && !navigation.scheduled")
 
     try:
-        with patch.object(hub, "_start_turn", side_effect=start):
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(hub, "_start_turn", side_effect=start))
+            stack.enter_context(patch.object(webui, "_engines_payload", loop_engines))
+            for driver in all_drivers():
+                stack.enter_context(patch.object(driver, "refresh_model_options", new=AsyncMock()))
+                stack.enter_context(patch.object(driver, "model_options", return_value=models))
+            await evaluate(instance, "api(0,'engines').then(data=>rememberEnginePayload(0,data))")
+            await evaluate(instance, """window.loopMedia=window.matchMedia;
+                window.matchMedia=q=>q==='(hover:hover) and (pointer:fine)' ? {matches:innerWidth>600} : loopMedia.call(window,q); true""")
             for width, height, scale, name in [(1440, 900, 1, "desktop"), (390, 844, 2, "mobile")]:
                 await instance.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
                     "deviceScaleFactor": scale, "mobile": name == "mobile"}, session=instance.page_session)
@@ -810,20 +834,51 @@ async def loop_checks(instance, capture=False):
                     await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
                     await open_dialog()
                     await instance.call("Input.insertText", {"text": "Review the dashboard layout, improve one detail, and run the relevant checks."}, session=instance.page_session)
+                    if name == "desktop":
+                        assert await evaluate(instance, "document.querySelectorAll('.loop-config-row .choice-button').length") == 3
+                        await click('.loop-config-row .choice-button')
+                        await until(instance, "!!openChoiceControl")
+                        await evaluate(instance, "api(0,'engines').then(data=>rememberEnginePayload(0,data))")
+                        assert await evaluate(instance, "!!openChoiceControl"), "a catalog refresh preserves the open picker"
+                        for kind in ("keyDown", "keyUp"):
+                            await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session=instance.page_session)
+                        await until(instance, "!openChoiceControl && !!document.querySelector('.loop-modal')")
+                    else:
+                        assert await evaluate(instance, "document.querySelectorAll('.loop-config-row .choice-button').length") == 0
                     geometry = await evaluate(instance, """(() => {
                         const m=document.querySelector('.loop-modal'), r=m.getBoundingClientRect(),
                             c=Composer.of(m.querySelector('#loop-prompt')), buttons=[...m.querySelector('.m-btns').children];
                         return {fits:r.left>=0 && r.right<=innerWidth && r.top>=0 && r.bottom<=innerHeight && m.scrollWidth<=m.clientWidth,
                             shared:!!c && !c.host.loop, buttons:buttons.map(b=>b.textContent),
                             count:m.querySelector('#loop-count').value,
+                            same:m.querySelector('#loop-same').checked, rows:m.querySelectorAll('.loop-config-row').length,
                             plan:m.querySelector('.loop-plan').textContent,
                             labeled:m.querySelector('label[for="loop-prompt"]')?.textContent};
                     })()""")
                     assert geometry == {"fits": True, "shared": True, "buttons": ["Cancel", "Start loop"],
-                        "count": "3", "plan": "1 iteration starts now · 2 queued", "labeled": "Prompt"}, (name, theme, geometry)
+                        "count": "3", "plan": "1 iteration starts now · 2 queued", "labeled": "Prompt",
+                        "same": True, "rows": 1}, (name, theme, geometry)
                     if capture:
                         shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
                         (BASE / "assets" / ("loop-" + name + "-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
+                    await click('#loop-same')
+                    assert await evaluate(instance, "document.querySelectorAll('.loop-config-row').length") == 3
+                    await evaluate(instance, """(() => {
+                        const rows=[...document.querySelectorAll('.loop-config-row')];
+                        for (const [i,row] of rows.entries()) {
+                            for (const [field,value] of Object.entries({engine:['claude','codex','opencode'][i],
+                                model:i===1?'preview-precise':'preview-quick',effort:i===1?'high':'low'})) {
+                                const select=row.querySelector('.loop-'+field); select.value=value; select.dispatchEvent(new Event('change'));
+                            }
+                        }
+                        document.querySelector('.loop-modal').scrollTop=0;
+                    })()""")
+                    assert await evaluate(instance, """(() => {const m=document.querySelector('.loop-modal'),r=m.getBoundingClientRect();
+                        return m.scrollWidth<=m.clientWidth && [...m.querySelectorAll('.loop-config-fields label')]
+                          .every(n=>{const b=n.getBoundingClientRect();return b.left>=r.left && b.right<=r.right});})()""")
+                    if capture:
+                        shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                        (BASE / "assets" / ("loop-iterations-" + name + "-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
                     # Back cleans up; Forward opens a fresh form and never sends.
                     await evaluate(instance, "history.back(); true")
                     await until(instance, "!document.querySelector('.loop-modal') && !navigation.pending")
@@ -832,6 +887,7 @@ async def loop_checks(instance, capture=False):
                     await evaluate(instance, "history.forward(); true")
                     await until(instance, "!!document.querySelector('.loop-modal') && !navigation.pending")
                     assert await evaluate(instance, "document.querySelector('#loop-prompt').value") == ""
+                    assert await evaluate(instance, "document.querySelector('#loop-same').checked && document.querySelectorAll('.loop-config-row').length===1")
                     assert await evaluate(instance, "!JSON.stringify(history.state).includes('dashboard layout')")
                     await click('#loop-cancel')
                     await until(instance, "!document.querySelector('.loop-modal') && !navigation.pending")
@@ -844,7 +900,13 @@ async def loop_checks(instance, capture=False):
             for kind in ("keyDown", "keyUp"):
                 await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Enter", "code": "Enter",
                     "windowsVirtualKeyCode": 13, "modifiers": 2}, session=instance.page_session)
-            await until(instance, "!document.querySelector('.loop-modal') && loopView.queued.length===2 && !navigation.pending")
+            try:
+                await until(instance, "!document.querySelector('.loop-modal') && loopView.queued.length===2 && !navigation.pending")
+            except AssertionError:
+                print("Loop send diagnostics:", await evaluate(instance, """({error:document.querySelector('.loop-modal .form-error')?.textContent,
+                    disabled:document.querySelector('#loop-start')?.disabled, queue:loopView.queued,
+                    choices:[...document.querySelectorAll('.loop-config-row select')].map(s=>({value:s.value,disabled:s.disabled}))})"""), flush=True)
+                raise
             assert started == ["Review one detail"] and hub.queue == ["Review one detail"] * 2
             assert await evaluate(instance, "loopView.composer.text()") == ""
             await evaluate(instance, "history.forward(); true")
@@ -858,15 +920,42 @@ async def loop_checks(instance, capture=False):
             await click('#loop-start')
             await until(instance, "!document.querySelector('.loop-modal') && loopView.queued.length===5 && !navigation.pending")
             assert len(started) == 1 and hub.queue[-3:] == ["Follow-up pass"] * 3
+            hub.clear_queue()
+            hub.status = "idle"
+            db.touch_session(sid, status="idle")
+            runner.broadcast_sessions()
+            await until(instance, "loopView.status!=='running' && loopView.queued.length===0")
+            await open_dialog()
+            await click('#loop-same')
+            choices = [{"engine": "claude", "model": "preview-quick", "effort": "low"},
+                       {"engine": "codex", "model": "preview-precise", "effort": "high"},
+                       {"engine": "opencode", "model": "preview-quick", "effort": "low"}]
+            await evaluate(instance, """(() => {
+                const rows=[...document.querySelectorAll('.loop-config-row')];
+                for (const [i,choice] of %s.entries()) for (const [field,value] of Object.entries(choice)) {
+                    const s=rows[i].querySelector('.loop-'+field); s.value=value; s.dispatchEvent(new Event('change'));
+                }
+                Composer.of(document.querySelector('#loop-prompt')).set('Configured pass');
+            })()""" % json.dumps(choices))
+            await click('#loop-start')
+            await until(instance, "!document.querySelector('.loop-modal') || !!document.querySelector('.loop-modal .form-error:not(.hidden)')")
+            assert not await evaluate(instance, "!!document.querySelector('.loop-modal')"), await evaluate(instance, "document.querySelector('.loop-modal .form-error').textContent")
+            await until(instance, "loopView.queued.length===4")
+            for expected in choices:
+                assert used[-1] == expected, used
+                hub.status = "idle"
+                hub._start_queue_if_ready()
+            assert started == ["Review one detail"] + ["Configured pass"] * 3 and not hub.queue
     finally:
         hub.clear_queue()
         hub.status = "idle"
         db.touch_session(sid, status="idle")
         runner.broadcast_sessions()
         await evaluate(instance, "closeTab('s:0:%d'); activateTab('s:0:1'); applyTheme('dark'); delete window.loopView; true" % sid)
+        await evaluate(instance, "if(window.loopMedia) {window.matchMedia=loopMedia;delete window.loopMedia;} true")
         await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
             "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
-    print("PASS: @Loop form, desktop/phone in both themes, Back/Forward cleanup without replay, inline validation, keyboard send, first run plus queued copies, and busy-session ordering", flush=True)
+    print("PASS: @Loop shared/per-iteration choices, desktop/phone in both themes, Back/Forward cleanup, validation, keyboard send, busy-session ordering and three configured turns", flush=True)
 
 
 async def thinking_disclosure_checks(instance):

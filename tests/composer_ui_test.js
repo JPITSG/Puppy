@@ -28,6 +28,14 @@ let controlFailure = "";
 let historyRead = null;
 let sessionCatalog = null;
 let loopFailure = null, loopHold = null;
+const enginePayloadListeners = new Set();
+const loopOptions = values => values.map(value => ({ value, label: value || 'Engine default' }));
+const loopEngine = key => ({ key, label: key, model_catalog_loaded: true,
+  allow_custom_model: false, dynamic_model_options: true,
+  model_options: [{ value: '', label: 'Engine default', effort_options: loopOptions(['']) },
+    { value: 'precise', label: 'Precise', effort_options: loopOptions(['', 'high']) },
+    { value: 'quick', label: 'Quick', effort_options: loopOptions(['', 'low']) }],
+  session_defaults: { model: 'quick', effort: 'low', permission_mode: 'safe' } });
 let storedEvents = [];
 const promptEvent = (seq, text) => ({ seq, kind: "user", data: { text } });
 function historyPage(route) {
@@ -94,6 +102,8 @@ const context = vm.createContext({
   modalSubjectHtml: text => `<p class="modal-subject">${text}</p>`,
   nodeHasCapability: (bid, cap) => !bid || !!state.backends.find(b => b.id === bid && b.capabilities.includes(cap)),
   sessionViewFor: () => ({ status: "idle", queued: [] }),
+  enginePayloadListeners, ENGINE_POLL_TIMEOUT: 60000,
+  refreshChoiceSelect() {}, enhanceChoiceSelect() {},
   browserEnabledFor: () => true,
   vncEnabledFor: () => true,
   vncInstancesFor: bid => state.vncInstances[bid] || null,
@@ -106,11 +116,14 @@ const context = vm.createContext({
   backendHasCapability: (backend, capability) => !!backend && backend.capabilities.includes(capability),
   spawnExecFor: () => false,
   linkifyInto: (node, text) => { node.appendChild(document.createTextNode(text)); return node; },
-  findSessionMeta: (bid, sid) => ({ name: "Session " + sid }),
+  findSessionMeta: (bid, sid) => ({ name: "Session " + sid, engine: 'first', model: 'precise', effort: 'high' }),
   backendName: bid => bid ? "node " + bid : "this node",
   browserInstancesFor: () => true, terminalInstancesFor: () => true,
   uploadPreviewUrl: () => "",
-  rememberEnginePayload: () => {},
+  rememberEnginePayload: (bid, data) => {
+    if (bid) state.engCache[bid] = data.engines; else state.engines = data.engines;
+    for (const listener of enginePayloadListeners) listener(bid, data.engines);
+  },
 });
 vm.runInContext([
   between("const el = ", "/* Close buttons"),
@@ -125,6 +138,8 @@ vm.runInContext([
   between("class SessionView {", "/* ================= TermView"),
   between("function vncShortcutText(", "function modalVncShortcut("),
   between("const LOOP_MAX_ITERATIONS", "/* The review sheet:"),
+  between("function engineStatusText(", "const headWord ="),
+  between("function effectiveQueuedConfig(", "/* One workspace tab"),
 ].join("\n"), context);
 const { Composer, composerBoxHtml, SessionView, SharedDraft } = vm.runInContext(
   "({ Composer, composerBoxHtml, SessionView, SharedDraft })", context);
@@ -1212,14 +1227,15 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.ok(remoteLoop.composer.mentionCandidates().some(row => row.kind === 'new-loop'));
   remoteLoop.composer.destroy(); state.backends.pop();
 
-  const openLoop = () => {
-    context.modalNewLoop(0, 10);
+  const openLoop = (bid = 0) => {
+    context.modalNewLoop(bid, 10);
     const d = reviewDialog, form = d.m.querySelector('.loop-form');
     form.requestSubmit = () => form.onsubmit(new FakeEvent('submit'));
     return { d, form, box: Composer.of(d.m.querySelector('#loop-prompt')),
       count: d.m.querySelector('#loop-count'), start: d.m.querySelector('#loop-start'),
       error: d.m.querySelector('.form-error'), send: () => form.requestSubmit() };
   };
+  state.engines = [loopEngine('first'), loopEngine('second')];
   let loop = openLoop();
   assert.equal(loop.count.value, '3');
   assert.equal(document.activeElement, loop.box.ta);
@@ -1242,6 +1258,8 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.ok(loop.start.disabled && loop.box.busy && loop.count.disabled);
   assert.equal(calls.api.at(-1).body.text, loopMessage, 'every iteration carries the same attachment markers');
   assert.equal(calls.api.at(-1).body.iterations, 3);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.api.at(-1).body.configurations)),
+    Array.from({ length: 3 }, () => ({ engine: 'first', model: 'precise', effort: 'high' })));
   releaseLoop(); await loopPending; loopHold = null;
   assert.equal(loop.d.m.isConnected, false);
   const savedDialog = reviewDialog; loop.d.reopen();
@@ -1266,5 +1284,98 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   loop.d.reopen();
   assert.equal(reviewDialog.m.querySelector('#loop-prompt').value, '', 'Forward opens a fresh editor');
   reviewDialog.close();
+
+  // One shared configuration by default, or one independently editable row
+  // per iteration. Toggling and resizing the batch must not discard edits.
+  loop = openLoop();
+  const sameLoop = () => loop.d.m.querySelector('#loop-same');
+  const loopRows = () => loop.d.m.querySelectorAll('.loop-config-row');
+  const chooseLoop = (index, field, value) => {
+    const input = loopRows()[index].querySelector('.loop-' + field);
+    input.value = value; if (input.onchange) input.onchange();
+  };
+  const toggleLoop = checked => { sameLoop().checked = checked; sameLoop().onchange(); };
+  const resizeLoop = value => { loop.count.value = String(value); loop.count.oninput(); };
+  assert.equal(sameLoop().checked, true);
+  assert.equal(loopRows().length, 1);
+  toggleLoop(false);
+  assert.equal(loopRows().length, 3);
+  chooseLoop(1, 'engine', 'second');
+  assert.equal(loopRows()[1].querySelector('.loop-model').value, 'quick', 'engine change uses its saved defaults');
+  assert.equal(loopRows()[1].querySelector('.loop-effort').value, 'low');
+  chooseLoop(1, 'model', 'precise');
+  assert.equal(loopRows()[1].querySelector('.loop-effort').value, '', 'effort belongs to the selected model');
+  chooseLoop(1, 'effort', 'high');
+  chooseLoop(2, 'model', 'quick'); chooseLoop(2, 'effort', 'low');
+  toggleLoop(true); chooseLoop(0, 'model', 'quick');
+  toggleLoop(false);
+  assert.equal(loopRows()[1].querySelector('.loop-engine').value, 'second');
+  resizeLoop(1); resizeLoop(3);
+  assert.equal(loopRows()[2].querySelector('.loop-model').value, 'quick');
+  resizeLoop(100); assert.equal(loopRows().length, 100);
+  assert.equal(loopRows()[99].querySelector('.loop-model').value, 'quick', 'new rows inherit the shared selection');
+  resizeLoop(3);
+  const beforeRefresh = loopRows()[1];
+  context.rememberEnginePayload(0, { engines: [loopEngine('first'), loopEngine('second')] });
+  assert.equal(loopRows()[1], beforeRefresh, 'refresh preserves the row and its controls');
+  assert.equal(loopRows()[1].querySelector('.loop-effort').value, 'high');
+  loop.box.set('Run with these choices');
+  await loop.send();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.api.at(-1).body.configurations)), [
+    { engine: 'first', model: 'precise', effort: 'high' },
+    { engine: 'second', model: 'precise', effort: 'high' },
+    { engine: 'first', model: 'quick', effort: 'low' },
+  ]);
+  assert.equal(enginePayloadListeners.size, 0, 'closing removes the catalog subscription');
+
+  // A provisional catalog does not turn a saved model into Custom. Once
+  // loaded, aliases keep its request spelling; retired values stay visible.
+  state.engines = [{ ...loopEngine('first'), allow_custom_model: true, model_catalog_loaded: false,
+    model_options: [], effort_options: loopOptions(['', 'high']) }];
+  const savedLoopApi = context.api;
+  context.api = async (bid, route) => route === 'engines' ? { engines: state.engines } : {};
+  loop = openLoop(); await settle();
+  assert.equal(loopRows()[0].querySelector('.loop-model').value, 'precise');
+  assert.ok(loopRows()[0].querySelector('.loop-custom-wrap').classList.contains('hidden'));
+  const aliases = loopEngine('first');
+  aliases.model_options[1].value = 'precise-v2'; aliases.model_options[1].aliases = ['precise'];
+  context.rememberEnginePayload(0, { engines: [aliases] });
+  assert.equal(loopRows()[0].querySelector('.loop-model').value, 'precise');
+  assert.equal(loopRows()[0].querySelector('.loop-effort').value, 'high');
+  context.rememberEnginePayload(0, { engines: [{ ...aliases, model_options: [] }] });
+  loop.box.set('Do not silently replace a retired model');
+  await loop.send(); assert.match(loop.error.textContent, /Choose an available/);
+  loop.d.close();
+
+  state.engines = [{ ...loopEngine('first'), allow_custom_model: true, effort_options: loopOptions(['', 'high']) }];
+  loop = openLoop(); chooseLoop(0, 'model', '__custom__');
+  loop.box.set('Custom model'); await loop.send();
+  assert.match(loop.error.textContent, /Enter a custom model/);
+  const customLoop = loopRows()[0].querySelector('.loop-custom');
+  customLoop.value = 'bespoke'; customLoop.oninput();
+  context.rememberEnginePayload(0, { engines: [{ ...state.engines[0], model_options: [
+    ...state.engines[0].model_options, { value: 'bespoke', label: 'Bespoke', effort_options: loopOptions(['', 'high']) }] }] });
+  assert.equal(loopRows()[0].querySelector('.loop-model').value, 'bespoke');
+  assert.ok(loopRows()[0].querySelector('.loop-custom-wrap').classList.contains('hidden'));
+  loop.d.close();
+  context.api = savedLoopApi;
+
+  state.backends.push({ id: 78, capabilities: ['session-loops', 'session-loop-config'] });
+  state.engCache[78] = [loopEngine('first'), loopEngine('second')];
+  context.sessionViewFor = () => ({ session: { engine: 'first', model: 'precise', effort: 'high' },
+    status: 'running', queued: [{ kind: 'engine', engine: 'second', model: 'quick', effort: 'low',
+      permission_mode: 'safe', fast_mode: 'off' }, 'Existing work'] });
+  loop = openLoop(78);
+  assert.equal(loopRows()[0].querySelector('.loop-engine').value, 'second', 'initial choices follow the queue tail');
+  loop.box.set('Remote loop'); await loop.send();
+  assert.equal(calls.api.at(-1).bid, 78);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.api.at(-1).body.configurations)),
+    Array.from({ length: 3 }, () => ({ engine: 'second', model: 'quick', effort: 'low' })));
+  state.backends.at(-1).capabilities = ['session-loops'];
+  loop = openLoop(78);
+  assert.ok(loop.d.m.querySelector('.loop-configs').classList.contains('hidden'));
+  loop.box.set('Basic loop on an older node'); await loop.send();
+  assert.equal('configurations' in calls.api.at(-1).body, false, 'an older backend receives only the basic contract');
+  state.backends.pop(); delete state.engCache[78];
   console.log("PASS: shared prompt box keys, mentions, attachments, recall, replacements, controls and loop dialog validation, submission, cleanup and retry guards");
 })().catch(error => { console.error(error); process.exitCode = 1; });

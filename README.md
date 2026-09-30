@@ -360,16 +360,31 @@ or a save/send error; it takes no space when idle.
 
 Type **@Loop** in a session chat and choose **New loop** to repeat a prompt.
 The dialog uses the same prompt box, including attachments, mentions and spelling,
-and an iteration count from **1 to 100** (default **3**). **Start loop** starts
+and an iteration count from **1 to 100** (default **3**).
+**Use the same engine, model and effort** is checked by default: one set of
+selectors applies to every iteration, initially matching the session's settings
+after its waiting work. Uncheck it to choose each iteration's engine, model and
+effort in a numbered row. Each model offers its own supported effort levels;
+switching engines selects that engine's saved defaults. Individual choices survive
+toggling the checkbox or reducing and restoring the iteration count while the
+dialog stays open. These selectors require the backend's `session-loop-config`
+capability.
+
+**Start loop** starts
 the first iteration immediately when the session is idle and has no waiting work;
 the remaining copies join its ordinary queue. If work is already running or queued,
-all iterations join behind it. Each run continues the same conversation. The usual
+all iterations join behind it. The selected settings apply before their prompt;
+engine changes use the normal transcript handoff, and the last iteration's
+settings remain selected afterward. Permissions stay as they are within an engine;
+an engine switch uses its saved permission default and turns Fast off. Each run
+continues the same conversation. The usual
 queue controls can pause, reorder, edit or remove any waiting iteration, and a
 restart parks the remaining work as held prompts. The entry requires the backend's
 `session-loops` capability and is offered in session chats, including existing tasks.
 
 [Desktop preview](assets/loop-desktop-dark.png) ·
-[Phone preview](assets/loop-mobile-light.png)
+[Phone preview](assets/loop-mobile-light.png) ·
+[Per-iteration choices](assets/loop-iterations-desktop-dark.png)
 
 Steer accepts the same files as ordinary messages, including attachments without
 text. The agent receives their paths and uses its file or image tools to inspect

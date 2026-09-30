@@ -16647,17 +16647,25 @@ const LOOP_MAX_ITERATIONS = 100;
 function modalNewLoop(bid, sid, onStarted = null) {
   const session = findSessionMeta(bid, sid);
   if (!session || !nodeHasCapability(bid, "session-loops")) return;
+  const configurable = nodeHasCapability(bid, "session-loop-config");
+  const view = sessionViewFor(bid, sid);
+  const initial = effectiveQueuedConfig(view && view.session || session, view && view.queued);
+  let engines = (bid ? state.engCache[bid] : state.engines) || [];
   let submitting = false, submitted = false, uncertain = false;
   const { m, close, onClose } = modal(`<form class="loop-form" novalidate>
     <h2>New loop</h2>
     ${modalSubjectHtml(session.name || "This session")}
     <p class="modal-copy">Run the same prompt several times in this session. Each iteration continues the conversation after the previous one finishes.</p>
     <label for="loop-prompt" class="task-composer-lbl">Prompt</label>
-    ${composerBoxHtml({ id: "loop-prompt", rows: 6, placeholder: "What should the agent do each time?",
+    ${composerBoxHtml({ id: "loop-prompt", rows: 3, placeholder: "What should the agent do each time?",
                         className: "mention-below" })}
     <div class="loop-options">
       <label>Iterations<input id="loop-count" type="number" min="1" max="${LOOP_MAX_ITERATIONS}" step="1" value="3" inputmode="numeric" aria-describedby="loop-plan" required></label>
       <p id="loop-plan" class="hint loop-plan" aria-live="polite"></p>
+    </div>
+    <div class="loop-configs${configurable ? "" : " hidden"}">
+      <label class="check loop-same"><input id="loop-same" type="checkbox" checked> Use the same engine, model and effort</label>
+      <div class="loop-config-rows"></div>
     </div>
     <p class="form-error hidden" role="alert"></p>
     <div class="m-btns"><button type="button" class="btn" id="loop-cancel">Cancel</button><button type="submit" class="btn btn-pri" id="loop-start">Start loop</button></div>
@@ -16667,6 +16675,7 @@ function modalNewLoop(bid, sid, onStarted = null) {
   const form = m.querySelector(".loop-form"), count = m.querySelector("#loop-count");
   const start = m.querySelector("#loop-start"), cancel = m.querySelector("#loop-cancel");
   const error = m.querySelector(".form-error"), plan = m.querySelector(".loop-plan");
+  const same = m.querySelector("#loop-same"), rows = m.querySelector(".loop-config-rows");
   const composer = new Composer(m.querySelector(".composer-box"), {
     bid, sid, submit: () => form.requestSubmit(), privateUploads: () => !submitted,
   });
@@ -16683,17 +16692,122 @@ function modalNewLoop(bid, sid, onStarted = null) {
       `${n} ${n === 1 ? "iteration joins" : "iterations join"} the queue after existing work` :
       n === 1 ? "1 iteration starts now" : `1 iteration starts now · ${n - 1} queued`;
   };
-  count.oninput = showPlan;
-  showPlan();
   const fail = message => { error.textContent = message; error.classList.remove("hidden"); };
+  const pickers = [];
+  let shared;
+  const visiblePickers = () => !configurable ? [] : same.checked ? [shared] :
+    pickers.slice(0, validCount() ? Number(count.value) : 0);
   const syncBusy = () => {
-    start.disabled = submitting || uncertain;
+    const busy = submitting || uncertain;
+    start.disabled = busy || visiblePickers().some(row => !row.ready());
     start.textContent = submitting ? "Starting…" : "Start loop";
     cancel.textContent = submitted ? "Close" : "Cancel";
-    count.disabled = submitting || uncertain;
-    composer.setBusy(submitting || uncertain);
+    count.disabled = same.disabled = busy;
+    for (const row of visiblePickers()) row.setBusy(busy);
+    composer.setBusy(busy);
     m.setAttribute("aria-busy", String(submitting));
   };
+  const makePicker = (selected, label) => {
+    const node = el("div", "loop-config-row");
+    node.setAttribute("role", "group"); node.setAttribute("aria-label", label);
+    node.innerHTML = `<p class="loop-config-title">${esc(label)}</p>
+      <div class="loop-config-fields">
+        <label>Engine<select class="loop-engine" aria-label="${esc(label)} engine"></select></label>
+        <label>Model<select class="loop-model" aria-label="${esc(label)} model"></select></label>
+        <label>Effort<select class="loop-effort" aria-label="${esc(label)} effort"></select></label>
+      </div>
+      <label class="loop-custom-wrap hidden">Custom model<input class="loop-custom" type="text" placeholder="Model ID" spellcheck="false" maxlength="256"></label>`;
+    const engine = node.querySelector(".loop-engine"), model = node.querySelector(".loop-model");
+    const effort = node.querySelector(".loop-effort"), custom = node.querySelector(".loop-custom");
+    const customWrap = node.querySelector(".loop-custom-wrap");
+    const value = () => ({ engine: engine.value,
+      model: model.value === "__custom__" ? custom.value.trim() : model.value, effort: effort.value });
+    const ready = () => engines.some(info => info.key === engine.value && info.session_defaults);
+    const render = choice => {
+      const info = engines.find(info => info.key === choice.engine);
+      fillEngineChoice(engine, engines.map(info => ({ value: info.key, label: info.label })), choice.engine);
+      const offered = engineOffersModel(info, choice.model);
+      const customAllowed = info && info.allow_custom_model !== false;
+      const isCustom = customAllowed && !offered &&
+        (choice.custom || (!!choice.model && !engineCatalogPending(info)));
+      const options = modelOptionsForPicker(info, choice.model);
+      if (!isCustom) options.push(...pendingModelRows(info, choice.model));
+      if (customAllowed) options.push({ value: "__custom__", label: "Custom…" });
+      fillEngineChoice(model, options, isCustom ? "__custom__" : choice.model);
+      if (custom.value !== (isCustom ? choice.model : "")) custom.value = isCustom ? choice.model : "";
+      customWrap.classList.toggle("hidden", !isCustom);
+      fillEngineChoice(effort, effortOptionsForModel(info, choice.model), choice.effort);
+    };
+    const syncEffort = () => {
+      const info = engines.find(info => info.key === engine.value);
+      const options = effortOptionsForModel(info, value().model);
+      fillEngineChoice(effort, options, options.some(item => item.value === effort.value) ? effort.value : "");
+      customWrap.classList.toggle("hidden", model.value !== "__custom__");
+    };
+    engine.onchange = () => {
+      const info = engines.find(info => info.key === engine.value);
+      if (info && info.session_defaults) render({ engine: info.key, ...initialEngineConfig(info) });
+      syncBusy();
+    };
+    model.onchange = custom.oninput = syncEffort;
+    render(selected);
+    for (const select of node.querySelectorAll("select")) enhanceChoiceSelect(select);
+    return { node, value, ready,
+      refresh: () => render({ ...value(), custom: model.value === "__custom__" }),
+      setBusy: busy => {
+        for (const control of node.querySelectorAll("select,input")) {
+          control.disabled = busy || (control === engine ? !engines.length : !ready());
+          refreshChoiceSelect(control);
+        }
+      },
+      valid: () => {
+        if (!ready()) { fail("Could not load engine choices"); return false; }
+        if (model.value === "__custom__" && !custom.value.trim()) {
+          fail(`${label}: Enter a custom model`); custom.focus(); return false;
+        }
+        for (const control of [engine, model, effort]) {
+          if ([...control.options].some(option => option.value === control.value && option.disabled)) {
+            fail(`${label}: Choose an available engine, model and effort`); control.focus(); return false;
+          }
+        }
+        return true;
+      },
+    };
+  };
+  const renderRows = () => {
+    if (configurable) {
+      if (!shared) shared = makePicker(initial, "All iterations");
+      if (!same.checked && validCount()) {
+        while (pickers.length < Number(count.value))
+          pickers.push(makePicker(shared.value(), `Iteration ${pickers.length + 1}`));
+      }
+      const visible = visiblePickers();
+      for (const row of [shared, ...pickers]) {
+        if (visible.includes(row)) { if (row.node.parentNode !== rows) rows.appendChild(row.node); }
+        else row.node.remove();
+      }
+    }
+    showPlan(); syncBusy();
+  };
+  same.onchange = count.oninput = renderRows;
+  renderRows();
+  if (configurable) {
+    const listener = (changedBid, loaded) => {
+      if (!m.isConnected || changedBid !== bid || submitting || uncertain) return;
+      engines = loaded;
+      for (const row of [shared, ...pickers]) row.refresh();
+      syncBusy();
+    };
+    enginePayloadListeners.add(listener);
+    onClose(() => enginePayloadListeners.delete(listener));
+    if (!shared.ready() || engines.some(engineCatalogPending)) {
+      api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT }).then(data => {
+        if (!m.isConnected) return;
+        if (!data || !Array.isArray(data.engines)) throw new Error("Could not load engine choices");
+        rememberEnginePayload(bid, data);
+      }).catch(err => { if (m.isConnected) fail(err.message); });
+    }
+  }
   form.onsubmit = async event => {
     event.preventDefault();
     if (submitting || uncertain || !m.isConnected) return;
@@ -16703,12 +16817,16 @@ function modalNewLoop(bid, sid, onStarted = null) {
     if (blocker) { fail(blocker); return; }
     if (!text) { fail("Enter a prompt for the loop"); composer.focus(); return; }
     if (text.length > DEFAULT_DRAFT_MAX_CHARS) { fail("The loop prompt is too long"); return; }
+    if (visiblePickers().some(row => !row.valid())) return;
     const iterations = Number(count.value);
+    const body = { text, iterations };
+    if (configurable) body.configurations = Array.from({ length: iterations }, (_, index) =>
+      (same.checked ? shared : pickers[index]).value());
     submitting = submitted = true;
     syncBusy();
     try {
       const result = await api(bid, `sessions/${sid}/loop`, {
-        method: "POST", body: { text, iterations }, timeoutMs: 30000,
+        method: "POST", body, timeoutMs: configurable ? ENGINE_POLL_TIMEOUT : 30000,
       });
       if (!result || result.iterations !== iterations || typeof result.queued !== "boolean")
         throw new Error("unexpected loop response");

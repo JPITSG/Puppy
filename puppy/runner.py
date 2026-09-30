@@ -14,7 +14,7 @@ import signal
 import time
 import uuid
 
-from puppy import (agent_notes, browser_agent, config, db, handoff, notify, spawn_agent,
+from puppy import (agent_notes, browser_agent, config, db, engine_defaults, handoff, notify, spawn_agent,
                    system_prompts, terminal_agent, vnc_agent,
                    session_agent, session_git, session_links, uploads, workspace_sync,
                    workspaces, session_tasks, session_titles, token_usage, tool_calls)
@@ -253,6 +253,24 @@ def _config_after(session: dict, items) -> dict:
                 if k in fields:
                     cfg[k] = str(fields.get(k) or "")
     return cfg
+
+
+def loop_config_drivers(configurations, iterations) -> dict:
+    """Check the optional wire list before refreshing any engine catalogs."""
+    if type(iterations) is not int or not 1 <= iterations <= MAX_LOOP_ITERATIONS or \
+            not isinstance(configurations, list) or len(configurations) != iterations:
+        raise ValueError("supply one configuration for each iteration (1 to {})".format(
+            MAX_LOOP_ITERATIONS))
+    drivers = {}
+    for index, row in enumerate(configurations, 1):
+        if not isinstance(row, dict) or set(row) != {"engine", "model", "effort"} or \
+                any(not isinstance(value, str) for value in row.values()):
+            raise ValueError("iteration {} must contain engine, model and effort text".format(index))
+        try:
+            drivers[row["engine"]] = get_driver(row["engine"])
+        except KeyError:
+            raise ValueError("iteration {} has an unknown engine".format(index)) from None
+    return drivers
 
 
 def parse_used_config(raw):
@@ -1329,7 +1347,7 @@ class SessionHub:
     def send_message(self, text: str) -> dict:
         return self._send_messages(text, 1)
 
-    def send_loop(self, text, iterations) -> dict:
+    def send_loop(self, text, iterations, configurations=None) -> dict:
         """Accept one bounded batch of ordinary prompts, without yielding.
 
         The existing scheduler, persistence and controls own every iteration;
@@ -1341,12 +1359,55 @@ class SessionHub:
             return {"error": "loop prompt cannot exceed {} characters".format(db.MAX_DRAFT_CHARS)}
         if type(iterations) is not int or not 1 <= iterations <= MAX_LOOP_ITERATIONS:
             return {"error": "iterations must be a whole number from 1 to {}".format(MAX_LOOP_ITERATIONS)}
-        result = self._send_messages(text, iterations)
+        result = self._send_messages(text, iterations, configurations)
         if "error" not in result:
             result["iterations"] = iterations
         return result
 
-    def _send_messages(self, text: str, iterations: int) -> dict:
+    def _loop_items(self, text: str, configurations, iterations: int) -> list:
+        """Plan the whole batch before mutating anything, using ordinary rows.
+
+        Permissions follow the existing switch contract: retain them within
+        an engine, capture the target's saved default across engines. Fast
+        turns off on a switch or a move to a model which does not offer it.
+        """
+        drivers = loop_config_drivers(configurations, iterations)
+        from puppy import cli_upgrade
+        for driver in drivers.values():
+            if cli_upgrade.is_running(driver.key):
+                raise ValueError("{} is being updated - try again when it finishes".format(driver.label))
+        previous = self.pending_config()
+        items = []
+        for index, row in enumerate(configurations, 1):
+            driver = drivers[row["engine"]]
+            switching = row["engine"] != previous["engine"]
+            permission = engine_defaults.values(driver)["permission_mode"] if switching else \
+                previous["permission_mode"]
+            try:
+                choices = engine_defaults.validate(driver, {
+                    "model": row["model"], "effort": row["effort"],
+                    "permission_mode": permission})
+            except ValueError as exc:
+                raise ValueError("Iteration {}: {}".format(index, exc)) from None
+            fast = "off" if switching else previous["fast_mode"]
+            if fast == "on" and not driver.fast_mode_tier(choices["model"] or driver.default_model()):
+                fast = "off"
+            target = {"engine": driver.key, **choices, "fast_mode": fast}
+            if switching:
+                items.append({"kind": "engine", "fields": target,
+                              "key": _queued_engine_key(target)})
+            else:
+                changed = {key: target[key] for key in ("model", "effort", "fast_mode")
+                           if target[key] != previous[key]}
+                if changed:
+                    changed["engine"] = driver.key
+                    items.append({"kind": "config", "fields": changed,
+                                  "key": _queued_config_key(changed)})
+            items.append(text)
+            previous = target
+        return items
+
+    def _send_messages(self, text: str, iterations: int, configurations=None) -> dict:
         text = (text or "").strip()
         if not text:
             return {"error": "empty message"}
@@ -1360,9 +1421,14 @@ class SessionHub:
         # every pending switch ahead of it leaves in force.
         engine = self.pending_config()["engine"]
         from puppy import cli_upgrade
-        if cli_upgrade.is_running(engine):
+        if configurations is None and cli_upgrade.is_running(engine):
             return {"error": "{} is being updated - try again when it finishes".format(
                 engine or "the engine")}
+        try:
+            items = [text] * iterations if configurations is None else \
+                self._loop_items(text, configurations, iterations)
+        except ValueError as exc:
+            return {"error": str(exc)}
         if not session["name"]:
             name = db.auto_session_name(text)
             db.touch_session(self.id, name=name)
@@ -1374,7 +1440,7 @@ class SessionHub:
         # turn ending and its successor starting): a pending change in there
         # must still apply before this prompt runs
         if self.status == "running" or self.queue:
-            self.queue.extend([text] * iterations)
+            self.queue.extend(items)
             self._broadcast_queue()
             # A queue idle only because every earlier prompt is paused stays
             # idle on its own. This prompt is runnable now, so it pokes the
@@ -1382,8 +1448,13 @@ class SessionHub:
             if self.status != "running":
                 self._start_queue_if_ready()
             return {"queued": True}
+        if configurations is not None:
+            self.queue.extend(items)
+            self._broadcast_queue()
+            self._start_queue_if_ready()
+            return {"queued": False}
         if iterations > 1:
-            self.queue.extend([text] * (iterations - 1))
+            self.queue.extend(items[1:])
             self._broadcast_queue()
         self._start_turn(text)
         return {"queued": False}

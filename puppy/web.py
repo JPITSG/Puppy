@@ -1004,7 +1004,16 @@ async def h_session_loop(request: web.Request):
         return web.json_response({"error": "invalid loop request"}, status=400)
     if not isinstance(body, dict):
         return web.json_response({"error": "loop request must be an object"}, status=400)
-    result = runner.hub(s["id"]).send_loop(body.get("text"), body.get("iterations"))
+    configurations = body.get("configurations")
+    if "configurations" in body:
+        try:
+            drivers = runner.loop_config_drivers(configurations, body.get("iterations"))
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        await asyncio.gather(*(driver.refresh_model_options() for driver in drivers.values()))
+    # Catalog reads may yield; all validation, upgrade guards and queue writes
+    # below use the current session and finish together without yielding.
+    result = runner.hub(s["id"]).send_loop(body.get("text"), body.get("iterations"), configurations)
     return web.json_response(result, status=400 if "error" in result else 200)
 
 

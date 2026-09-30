@@ -143,8 +143,15 @@ function fixture() {
   // fresh fields, and a successful command consumes its reopen factory.
   let loopPosts = 0;
   Object.assign(modalContext, {
-    findSessionMeta: () => ({ name: 'Loop preview', status: 'idle' }),
-    nodeHasCapability: () => true, sessionViewFor: () => ({ status: 'idle', queued: [] }),
+    findSessionMeta: () => ({ name: 'Loop preview', status: 'idle', engine: 'first', model: '', effort: '' }),
+    nodeHasCapability: () => true,
+    sessionViewFor: () => ({ status: 'idle', queued: [] }),
+    effectiveQueuedConfig: session => session,
+    state: { engines: [{ key: 'first', label: 'First',
+      model_options: [{ value: '', label: 'Engine default', effort_options: [{ value: '', label: 'Engine default' }] }],
+      session_defaults: { model: '', effort: '' } }] },
+    enginePayloadListeners: new Set(), ENGINE_POLL_TIMEOUT: 60000,
+    refreshChoiceSelect() {}, esc: text => String(text),
     modalSubjectHtml: () => '', composerBoxHtml: () => '<div class="composer-box"><textarea id="loop-prompt"></textarea></div>',
     Composer: class {
       constructor(box) { this.ta = box.querySelector('textarea'); }
@@ -158,20 +165,33 @@ function fixture() {
     api: async (bid, route, options) => {
       assert.equal(bid, 0); assert.equal(route, 'sessions/1/loop');
       assert.equal(options.body.iterations, 3); loopPosts++;
+      assert.equal(options.body.configurations.length, 3);
+      assert.ok(options.body.configurations.every(row => row.engine === 'first' && row.model === '' && row.effort === ''));
       return { iterations: 3, queued: false };
     },
   });
+  vm.runInContext(between('function engineStatusText(', 'const headWord ='), modalContext);
   vm.runInContext(between('const LOOP_MAX_ITERATIONS', '/* The review sheet:'), modalContext);
   modalContext.modalNewLoop(0, 1); await tick();
   const loopForm = () => root.querySelector('.loop-form');
   loopForm().querySelector('#loop-prompt').value = 'Private loop prompt';
+  const same = loopForm().querySelector('#loop-same'); same.checked = false; same.onchange();
+  const count = loopForm().querySelector('#loop-count'); count.value = '2'; count.oninput();
+  assert.equal(loopForm().querySelectorAll('.loop-config-row').length, 2);
+  const picker = loopForm().querySelector('.loop-model'); picker.value = '__custom__'; picker.onchange();
+  loopForm().querySelector('.loop-custom').value = 'private-model-id';
+  await tick(); assert.equal(f.stack.length, 2, 'configuration edits share the dialog entry');
   await f.move(-1); assert.equal(loopForm(), null); assert.equal(loopPosts, 0);
   await f.move(1); assert.equal(loopForm().querySelector('#loop-prompt').value, '');
+  assert.equal(loopForm().querySelector('#loop-same').checked, true);
+  assert.equal(loopForm().querySelector('#loop-count').value, '3');
+  assert.equal(loopForm().querySelectorAll('.loop-config-row').length, 1);
   loopForm().querySelector('#loop-prompt').value = 'Repeat once per turn';
   await loopForm().onsubmit({ preventDefault() {} }); await tick(); await tick();
   assert.equal(loopForm(), null); assert.equal(loopPosts, 1);
   await f.move(1); assert.equal(loopForm(), null); assert.equal(loopPosts, 1);
   assert.ok(!JSON.stringify(f.stack).includes('Private loop prompt'));
+  assert.ok(!JSON.stringify(f.stack).includes('private-model-id'));
 
   f = fixture(); let layers = [], cleanups = 0;
   function open(name, reopen = true) {
