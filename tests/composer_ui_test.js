@@ -343,7 +343,7 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
 
   /* Real shared-draft state machine with deliberately delayed and colliding
      websocket replies. No replace can run during a local conflict. */
-  function draftBox(id) {
+  function draftBox(id, text = "shared", beforeSnapshot = () => {}) {
     const sent = [], v = { tab: { id }, draftClientId: id, draftClientSeq: 0,
       draftReady: false, draftRevision: 0, draftJournal: null,
       status: "idle", updateRunState() {}, setStatus() {},
@@ -355,11 +355,31 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
       reviewDraft: () => sync.review() });
     v.composer = box.composer;
     const sync = new SharedDraft(v); v.sharedDraft = sync;
-    sync.initialize({ text: "shared", revision: 1 });
+    beforeSnapshot(box);
+    sync.initialize({ text, revision: 1 });
     return { ...box, v, sync, sent };
   }
   const wire = (text, revision, id = "peer", seq = 1, more = {}) =>
     ({ type: "draft", text, revision, client_id: id, client_seq: seq, ...more });
+  const restored = draftBox("draft-restored", "Saved unsent text");
+  assert.deepEqual([restored.ta.selectionStart, restored.ta.selectionEnd], [17, 17],
+    "opening a saved draft lands at its end");
+  assert.notEqual(document.activeElement, restored.ta, "restoring a draft never takes focus");
+  restored.ta.setSelectionRange(2, 6);
+  restored.sync.disconnect();
+  restored.sync.initialize({ text: "Saved unsent text", revision: 1 });
+  assert.deepEqual([restored.ta.selectionStart, restored.ta.selectionEnd], [2, 6],
+    "reconnecting the same box keeps its selection");
+  restored.sync.initialize({ text: "Saved unsent text with a peer's addition", revision: 2 });
+  assert.deepEqual([restored.ta.selectionStart, restored.ta.selectionEnd], [2, 6],
+    "a changed reconnect snapshot preserves the place in surviving text");
+  restored.composer.destroy();
+  const early = draftBox("draft-early", "Already typing", box => {
+    box.ta.focus(); type(box.ta, "Already typing"); box.ta.setSelectionRange(3, 7);
+  });
+  assert.deepEqual([early.ta.selectionStart, early.ta.selectionEnd], [3, 7],
+    "typing before the first snapshot keeps its selection");
+  early.composer.destroy();
   const a = draftBox("draft-a");
   a.ta.focus(); type(a.ta, "my first edit"); type(a.ta, "my latest edit");
   assert.equal(a.sent.filter(x => x.type === "draft").length, 1, "typing coalesces while an echo waits");

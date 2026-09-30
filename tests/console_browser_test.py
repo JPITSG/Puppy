@@ -845,8 +845,61 @@ async def show_focus_checks(instance):
         await until(instance, "state.active==='s:0:%d' && document.activeElement===%s" % (sid, box))
     finally:
         await evaluate(instance, "window.matchMedia=showFocusMedia; delete window.showFocusMedia; true")
+
+    # A durable draft has no saved caret hint. Leaving the app and reopening
+    # it must land at the end and reveal the last line, even without focus.
+    view = "sessionViewFor(0,%d)" % sid
+    return_url = await evaluate(instance, "location.href")
+    draft = "\n".join("Unsent line %d" % n for n in range(1, 41)) + " — 🌱"
+    try:
+        for touch in (False, True):
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": 390 if touch else 1440, "height": 844 if touch else 900,
+                "deviceScaleFactor": 2 if touch else 1, "mobile": touch}, session=instance.page_session)
+            await instance.call("Emulation.setTouchEmulationEnabled", {"enabled": touch},
+                                session=instance.page_session)
+            await evaluate(instance, "%s.composer.set(''); %s.focus(); true" % (view, box))
+            await instance.call("Input.insertText", {"text": draft}, session=instance.page_session)
+            await until(instance, "!%s.sharedDraft.flight && !%s.draftJournal" % (view, view))
+            assert db.get_session_draft(sid)["text"] == draft
+            await evaluate(instance, "%s.setSelectionRange(0,0); true" % box)
+            if touch:
+                await evaluate(instance, "activateTab('s:0:1'); true")
+            await instance.call("Page.navigate", {"url": "about:blank"}, session=instance.page_session)
+            await until(instance, "location.href==='about:blank'")
+            await instance.call("Page.navigate", {"url": return_url}, session=instance.page_session)
+            await until(instance, "typeof state!=='undefined' && !!%s && %s.draftReady" % (view, view))
+            if touch:
+                await evaluate(instance, "activateTab('s:0:%d'); true" % sid)
+            reading = await evaluate(instance, """(() => {
+                const ta=%s;
+                return {text:ta.value, end:ta.selectionStart===ta.value.length && ta.selectionEnd===ta.value.length,
+                    top:ta.scrollTop, room:ta.scrollHeight-ta.clientHeight,
+                    line:parseFloat(getComputedStyle(ta).lineHeight), focused:document.activeElement===ta};
+            })()""" % box)
+            assert reading["text"] == draft and reading["end"], (touch, reading)
+            assert reading["room"] > 0 and reading["top"] >= reading["room"] - reading["line"], (touch, reading)
+            if touch:
+                assert not reading["focused"], "restoring a draft leaves the phone keyboard down"
+            # A transient reconnect must keep a selection made in this box.
+            await evaluate(instance, "%s.setSelectionRange(2,8); window.draftSocket=%s.ws; draftSocket.close(); true" % (box, view))
+            await until(instance, "%s.ws!==draftSocket && %s.draftReady" % (view, view))
+            assert await evaluate(instance, "[%s.selectionStart,%s.selectionEnd]" % (box, box)) == [2, 8]
+            # Closing the session tab creates a fresh box on its next open.
+            await evaluate(instance, "closeTab('s:0:%d'); openSessionTab(0,%d,findSessionMeta(0,%d)); true" % (sid, sid, sid))
+            await until(instance, "!!%s && %s.draftReady" % (view, view))
+            assert await evaluate(instance, "%s.selectionStart===%s.value.length && %s.selectionEnd===%s.value.length" % (box, box, box, box))
+            await evaluate(instance, "%s.focus(); true" % box)
+            await instance.call("Input.insertText", {"text": " continued"}, session=instance.page_session)
+            assert await evaluate(instance, "%s.value" % box) == draft + " continued"
+    finally:
+        await instance.call("Emulation.setTouchEmulationEnabled", {"enabled": False}, session=instance.page_session)
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        await evaluate(instance, "window.demoView=sessionViewFor(0,1); true")
     await evaluate(instance, "closeTab('s:0:%d'); true" % sid)
     print("PASS: switching sessions and tabs on a touch screen leaves the prompt box and its keyboard alone until tapped; a mouse device still lands in the box", flush=True)
+    print("PASS: leaving the app and reopening a saved draft puts the caret at its visible end on desktop and phone; reconnects preserve selections", flush=True)
 
 
 async def chat_filter_checks(instance, peer, capture=False):

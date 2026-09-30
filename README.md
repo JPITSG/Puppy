@@ -344,7 +344,9 @@ button to the left of Copy, revealed on hover or keyboard focus. It prepends the
 message text to the chat box with a blank line before any existing text, selects
 that existing text, and focuses the box. Staged attachments stay in place.
 Drafts are shared through the session's backend, so the
-half-finished prompt on your desktop is on your phone too. On backends with
+half-finished prompt on your desktop is on your phone too. Reopening a session
+or reloading the app restores a saved draft with the caret at the end and
+scrolls the message box to show it. On backends with
 typing presence, another console's typing also moves this console's caret to
 the same spot while you are not editing here, and scrolls a long draft to show
 it, so you can carry on from where the other device stopped. Overlapping edits

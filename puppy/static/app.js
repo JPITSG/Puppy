@@ -13968,7 +13968,10 @@ class Composer {
     } catch (_) {}
     this.renderAttachments(false);
     this.resize();
-    if (caret && !caretAtEnd) this.follow(caret);   // once the box has its final height
+    // Reveal restored text only once the box has its final height; no focus
+    // is needed, so reopening a draft on a phone leaves its keyboard down.
+    if (caretAtEnd) this.revealCaret();
+    else if (caret) this.follow(caret);
     /* A peer's draft is marked like any other text; it is never corrected. */
     this.spellFix = null;
     this.spellTypingAt = null;
@@ -16753,6 +16756,7 @@ async function modalReviewTask(workspace, session) {
 class SharedDraft {
   constructor(view) {
     this.view = view;
+    this.initialized = false;
     this.server = { text: "", revision: 0 };
     this.base = 0;
     this.flight = null;
@@ -16816,12 +16820,12 @@ class SharedDraft {
     return this.caret && this.caret.revision === value.revision ? this.caret.at : null;
   }
 
-  adopt(value, replaceUploading = false) {
+  adopt(value, replaceUploading = false, caretAtEnd = false) {
     this.base = value.revision;
     this.conflict = false;
     const caret = this.peerCaret(value);
     if (this.view.draftValue() !== value.text || replaceUploading)
-      this.view.composer.replace(value.text, false, replaceUploading, caret);
+      this.view.composer.replace(value.text, caretAtEnd, replaceUploading, caret);
     else if (caret && !this.view.composer.protectsDraft())
       this.view.composer.follow(caret);   // the same text, but never under a typist
     this.view.clearDraftJournal();
@@ -16830,6 +16834,8 @@ class SharedDraft {
 
   initialize(value) {
     const v = this.view, journal = readDraftJournal(v.tab.id);
+    const firstSnapshot = !this.initialized;
+    this.initialized = true;
     this.server = value;
     this.flight = null;
     this.sent = 0;
@@ -16851,7 +16857,9 @@ class SharedDraft {
       this.conflict = !!(journal && journal.submitted) || this.base !== value.revision;
       this.save();
     } else {
-      this.adopt(value);
+      // A newly opened box resumes at the end. Reconnects keep the existing
+      // selection, and a draft already edited here always owns its caret.
+      this.adopt(value, false, firstSnapshot && !touched);
     }
     this.paint();
   }
