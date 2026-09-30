@@ -4130,21 +4130,8 @@ async def git_sheet_checks(a):
         const reviewStep = parseFloat(style(reviewFacts).rowGap);
         const reviewLabel = style(review.querySelector('.field-lbl')).fontSize;
         review.remove();
-        /* the agent-notes editor, as a probe: the voice of its intro line and
-           the steps from its title down to it and from it down to the first
-           control */
-        const notes = document.createElement('div'); notes.className = 'modal agent-notes-modal';
-        notes.innerHTML = '<div class="modal-head"><h2>Agent notes</h2><button type="button" class="icon-btn modal-close"></button></div><p class="modal-copy agent-notes-intro">Garden planner · /home/mira/projects/garden</p>'
-            + '<form><label class="check"><input type="checkbox"> Use one file for both</label></form>';
-        document.body.appendChild(notes);
-        const notesIntro = notes.querySelector('.agent-notes-intro');
-        const voice = node => [style(node).fontSize, style(node).lineHeight, style(node).color, style(node).fontFamily].join(' ');
-        const notesTitleStep = notesIntro.getBoundingClientRect().top - notes.querySelector('.modal-head').getBoundingClientRect().bottom;
-        const notesIntroStep = notes.querySelector('.check').getBoundingClientRect().top - notesIntro.getBoundingClientRect().bottom;
-        const notesVoice = voice(notesIntro), notesIntroHeight = notesIntro.getBoundingClientRect().height;
-        notes.remove();
-        const intro = m.querySelector('.session-git-intro');
         const facts = m.querySelector('.session-git-facts');
+        const head = m.querySelector('.modal-head');
         const rows = Array.from(m.querySelectorAll('.ws-fact')).map(row => row.getBoundingClientRect());
         const label = m.querySelector('.ws-fact .field-lbl'), caption = m.querySelector('.session-git-section .field-lbl');
         const kind = m.querySelector('.sgl-kind'), list = m.querySelector('.session-git-list');
@@ -4152,13 +4139,11 @@ async def git_sheet_checks(a):
         const staged = m.querySelector('.sgl-group .sgl-rows');
         const what = staged.children[0].getBoundingClientRect(), path = staged.children[1].getBoundingClientRect();
         const commit = m.querySelector('.sgl-commits');
-        return {title: m.querySelector('h2').textContent, intro: intro.textContent,
+        return {title: m.querySelector('h2').textContent, intro: !!m.querySelector('.session-git-intro'),
             facts: Array.from(m.querySelectorAll('.ws-fact')).map(row => [row.querySelector('.field-lbl').textContent, row.querySelector('.wsf-v').textContent]),
             reviewStep, factStep: parseFloat(style(facts).rowGap),
-            notesTitleStep, titleStep: intro.getBoundingClientRect().top - m.querySelector('.modal-head').getBoundingClientRect().bottom,
-            notesIntroStep, introStep: facts.getBoundingClientRect().top - intro.getBoundingClientRect().bottom,
-            notesVoice, introVoice: voice(intro),
-            notesIntroHeight, introHeight: intro.getBoundingClientRect().height,
+            titleStep: facts.getBoundingClientRect().top - head.getBoundingClientRect().bottom,
+            headMargin: parseFloat(style(head).marginBottom),
             steps: rows.slice(1).map((box, i) => box.top - rows[i].bottom),
             captionSteps: (() => {
                 const sections = Array.from(m.querySelectorAll('.session-git-section'));
@@ -4192,17 +4177,12 @@ async def git_sheet_checks(a):
                     apart: boxes[1].left - boxes[0].right > 100}; })(),
             focused: document.activeElement === m.querySelector('#session-git-close')};
     })()""")
-    assert sheet["title"] == "Git repository" and sheet["intro"] == "Garden planner · /home/mira/projects/garden", sheet
+    assert sheet["title"] == "Git repository" and not sheet["intro"], sheet
     assert sheet["facts"] == [["Branch", "main"], ["Upstream", "origin/main · 1 ahead, 2 behind"],
                               ["State", "Uncommitted and unpushed work"], ["Checked", sheet["facts"][3][1]]], sheet
     assert sheet["facts"][3][1] and sheet["stateOrange"], sheet
-    # the session and its directory under the title in the agent-notes
-    # editor's intro voice, the same step below the title and the same step
-    # above the first fact as that editor's line stands above its first
-    # control
-    assert sheet["introVoice"] == sheet["notesVoice"] and sheet["introHeight"] == sheet["notesIntroHeight"], sheet
-    assert sheet["notesTitleStep"] == 12 and sheet["titleStep"] == sheet["notesTitleStep"], sheet
-    assert sheet["notesIntroStep"] == 12 and sheet["introStep"] == sheet["notesIntroStep"], sheet
+    # the facts directly under the title at the shared modal header's step
+    assert sheet["headMargin"] == 12 and sheet["titleStep"] == sheet["headMargin"], sheet
     # the four facts one under the next at the review sheet's own step
     assert sheet["reviewStep"] == 6 and sheet["factStep"] == sheet["reviewStep"], sheet
     assert len(sheet["steps"]) == 3 and all(abs(step - sheet["reviewStep"]) < .5 for step in sheet["steps"]), sheet

@@ -509,10 +509,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
     replies = [read];
     context.modalSessionGit(0, row);
     assert.deepEqual(dialogs, ["session-git-modal"]);
-    // the session and its directory under the title, as the agent-notes
-    // editor names them
-    assert.equal(dialog.m.querySelector(".session-git-intro").textContent, "Garden · …/src");
-    assert.ok(dialog.m.querySelector(".session-git-intro").classList.contains("modal-copy"));
+    assert.equal(dialog.m.querySelector(".session-git-intro"), null);
     assert.deepEqual(facts(), [["Branch", "main", ""], ["State", "Uncommitted and unpushed work", "warn"], ["Checked", "at 5", ""]]);
     assert.deepEqual(captions(), ["Changes · 5 · 2 staged, 1 unstaged, 1 untracked, 1 conflict", "Unpushed commits · 2"]);
     assert.deepEqual(lists(), [["Loading…"], ["Loading…"]]);
@@ -602,7 +599,7 @@ assert.equal(bare.document.querySelectorAll(".si-git").length, 0);
       paths: [], commits: [], more_paths: 0, more_commits: 0 };
     replies = [{ ok: true, git: clean.git, root: "/p", detail: bare }];
     context.modalSessionGit(0, clean);
-    assert.equal(dialog.m.querySelector(".session-git-intro").textContent, "Session 2 · …/p");
+    assert.equal(dialog.m.querySelector(".session-git-intro"), null);
     await settle();
     assert.deepEqual(facts(), [["Branch", "main", ""], ["Upstream", "origin/main · up to date", ""],
       ["State", "Nothing to commit or push", "ok"], ["Checked", "at 1", ""]]);
