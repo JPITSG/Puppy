@@ -19216,7 +19216,9 @@ class SessionView {
       (this.chatLogMask === undefined || !!(this.chatLogMask & 2));
     if (thinking) {
       const lab = this.liveEl.querySelector(".think-label");
-      if (lab) lab.replaceWith(promptStatusLabel(text, "think-label"));
+      // Keep the press target alive: replacing it between pointerdown and
+      // pointerup swallows the summary's native disclosure click.
+      if (lab) updatePromptStatusLabel(lab, text);
     }
     if (this.status !== "running" || thinking) {
       if (this.statusRow) { this.statusRow.remove(); this.statusRow = null; }

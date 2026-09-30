@@ -1526,7 +1526,14 @@ const toolStayed=marker()===toolMarker;
 view.statusText="thinking… 42 tokens";view.syncLiveStatus();
 const claude={cls:marker().className,text:marker().textContent};
 view.status="idle";view.syncLiveStatus();
-console.log(JSON.stringify({codex,tool,toolStayed,claude,idle:view.statusRow,
+const idle=view.statusRow;
+view.status="running";view.liveKind="thinking";view.liveEl=el("details","think");
+const liveLabel=promptStatusLabel("Thinking…","think-label");
+view.liveEl.appendChild(liveLabel);
+view.statusText="Thinking… 99 tokens";view.syncLiveStatus();
+const live={same:view.liveEl.querySelector(".think-label")===liveLabel,
+  text:liveLabel.textContent,aria:liveLabel.attributes["aria-label"]};
+console.log(JSON.stringify({codex,tool,toolStayed,claude,idle,live,
   classified:[isThinkingStatus("thinking"),isThinkingStatus("Thinking 9 tokens"),
     isThinkingStatus("rethinking"),isThinkingStatus("writing...")]}));
 """ % (function("promptStatusBase"), function("syncPromptSpinnerPhase"),
@@ -1541,6 +1548,8 @@ console.log(JSON.stringify({codex,tool,toolStayed,claude,idle:view.statusRow,
     assert result["tool"] == {"cls": "spinner", "text": ""}, result
     assert result["toolStayed"] is True, result
     assert result["idle"] is None, result
+    assert result["live"] == {"same": True, "text": "Thinking 99 tokens",
+                              "aria": "Thinking… 99 tokens"}, result
     assert result["classified"] == [True, True, False, False], result
     assert ui_source.count("sum.appendChild(thinkingIconNode())") == 2
 
@@ -1566,7 +1575,7 @@ console.log(JSON.stringify([
     ]
     assert 'label = promptStatusLabel(text, "status-text");' in ui_source
     assert "updatePromptStatusLabel(label, text);" in ui_source
-    assert ui_source.count('promptStatusLabel(text, "think-label")') == 2
+    assert 'label = promptStatusLabel(text, "think-label");' in ui_source
     assert "this.statusText || thinkingLabel(0), \"think-label\"" in ui_source
     assert ".prompt-status-label::after{" in css_source
     assert '0%,32%{clip-path:inset(0 66.6667% 0 0)}' in css_source

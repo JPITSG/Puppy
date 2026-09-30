@@ -770,6 +770,70 @@ async def model_substitute_checks(instance, capture=False):
     print("PASS: model stand-ins reach the real console, keep amber names under hover, fit desktop/phone in both themes, survive reattach and clear on recovery", flush=True)
 
 
+async def thinking_disclosure_checks(instance):
+    """A status update between press and release must not swallow a toggle."""
+    await evaluate(instance, """demoView.clearLive(); demoView.status='running';
+        demoView.setStatus('Thinking…'); demoView.appendLive('thinking','');
+        demoView.flushLive(); demoView.scrollBottom(true); true""")
+
+    async def press(target, touch=False, update=True):
+        point = await evaluate(instance, """(() => {
+            const n=demoView.liveEl.querySelector(%s);
+            n.scrollIntoView({block:'nearest'});
+            const r=n.getBoundingClientRect();
+            return {x:r.left+5,y:r.top+r.height/2};
+        })()""" % json.dumps(target))
+        if touch:
+            await instance.call("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [point]},
+                                session=instance.page_session)
+        else:
+            await instance.call("Input.dispatchMouseEvent", dict(point, type="mousePressed", button="left", clickCount=1),
+                                session=instance.page_session)
+        if update:
+            await evaluate(instance, "demoView.setStatus('Thinking… 42 tokens'); true")
+        if touch:
+            await instance.call("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []},
+                                session=instance.page_session)
+        else:
+            await instance.call("Input.dispatchMouseEvent", dict(point, type="mouseReleased", button="left", clickCount=1),
+                                session=instance.page_session)
+
+    try:
+        for touch in (False, True):
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": 390 if touch else 1440, "height": 844 if touch else 900,
+                "deviceScaleFactor": 2 if touch else 1, "mobile": touch}, session=instance.page_session)
+            await instance.call("Emulation.setTouchEmulationEnabled", {"enabled": touch}, session=instance.page_session)
+            await evaluate(instance, """demoView.clearLive(); demoView.appendLive('thinking','');
+                demoView.flushLive(); demoView.scrollBottom(true); true""")
+            await press('.think-label', touch)
+            assert not await evaluate(instance, "demoView.liveEl.open"), "empty thinking remains inert"
+            await evaluate(instance, "demoView.appendLive('thinking','Checking the next step.'); demoView.flushLive(); true")
+            await press('.think-label', touch)
+            assert await evaluate(instance, "demoView.liveEl.open"), (touch, "label click lost during status update")
+            await evaluate(instance, "demoView.appendLive('thinking',' Still working.'); demoView.flushLive(); true")
+            assert await evaluate(instance, "demoView.liveEl.open && demoView.liveEl.querySelector('.tbody').textContent.endsWith('Still working.')")
+            await press('.think-label', touch)
+            assert not await evaluate(instance, "demoView.liveEl.open"), (touch, "label closes while streaming")
+            await press('summary', touch)
+            assert await evaluate(instance, "demoView.liveEl.open"), (touch, "chevron still opens")
+            await press('summary', touch)
+            assert not await evaluate(instance, "demoView.liveEl.open"), (touch, "chevron still closes")
+        await evaluate(instance, "demoView.liveEl.querySelector('summary').focus(); true")
+        for key, code in (("Enter", 13), (" ", 32)):
+            for kind in ("keyDown", "keyUp"):
+                await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": key,
+                    "code": "Space" if key == " " else key, "windowsVirtualKeyCode": code,
+                    **({"text": "\r" if key == "Enter" else " "} if kind == "keyDown" else {})}, session=instance.page_session)
+            assert await evaluate(instance, "demoView.liveEl.open") == (key == "Enter"), (key, "keyboard toggle")
+    finally:
+        await evaluate(instance, "demoView.clearLive(); demoView.status='idle'; demoView.setStatus(''); true")
+        await instance.call("Emulation.setTouchEmulationEnabled", {"enabled": False}, session=instance.page_session)
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    print("PASS: live thinking opens and closes from its label and chevron across status updates on desktop and phone; empty and keyboard behavior preserved", flush=True)
+
+
 async def show_focus_checks(instance):
     """Switching sessions and tabs puts the caret in the prompt box only on a
     mouse device. On a touch screen - Chromium's own touch emulation on a
@@ -6662,6 +6726,9 @@ async def main(args):
             if args.show_focus_only:
                 await show_focus_checks(instances[0])
                 return
+            if args.thinking_only:
+                await thinking_disclosure_checks(instances[0])
+                return
             if args.tool_clock_only:
                 await tool_clock_checks(instances[0], args.screenshots)
                 return
@@ -6689,6 +6756,7 @@ async def main(args):
             await model_substitute_checks(instances[0], args.screenshots)
             await chat_filter_checks(*instances, args.screenshots)
             await show_focus_checks(instances[0])
+            await thinking_disclosure_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])
@@ -6715,6 +6783,7 @@ if __name__ == "__main__":
     parser.add_argument("--notices-only", action="store_true")
     parser.add_argument("--chat-filter-only", action="store_true")
     parser.add_argument("--show-focus-only", action="store_true")
+    parser.add_argument("--thinking-only", action="store_true")
     parser.add_argument("--tool-clock-only", action="store_true")
     parser.add_argument("--task-refresh-only", action="store_true")
     parser.add_argument("--token-usage-only", action="store_true")

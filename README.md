@@ -125,7 +125,9 @@ engine's own native session by id, and records everything the engine says as a
 normalized transcript: prompts, replies, thinking, tool calls with their results,
 side questions, engine switches and a result line for every turn with elapsed
 time, tokens in and out, and, when the engine reports it, how full the model's
-context is. Tool cards and folded-task headers share a vertically centered row
+context is. Click a thinking section's label or chevron to expand or collapse
+its text, including while it streams. A section without thinking text stays
+closed. Tool cards and folded-task headers share a vertically centered row
 for their carets, icons and status marks, with equal spacing from the chevron to
 the tool icon and from the icon to its label. Hover a running tool's status
 spinner to see a live elapsed clock for that individual call, including shell
