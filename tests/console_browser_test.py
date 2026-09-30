@@ -811,11 +811,19 @@ async def loop_checks(instance, capture=False):
             await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1), session=instance.page_session)
 
     async def open_dialog():
-        await evaluate(instance, "loopView.composer.set(''); loopView.composer.focus(); true")
+        await evaluate(instance, "loopView.composer.focus(); loopView.composer.ta.select(); true")
+        for kind in ("keyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8}, session=instance.page_session)
         await instance.call("Input.insertText", {"text": "@Loop"}, session=instance.page_session)
         await until(instance, "loopView.composer.mention?.items[0]?.kind==='new-loop'")
         await click('.chat.on .mention-item')
         await until(instance, "!!document.querySelector('.loop-modal') && !navigation.pending && !navigation.scheduled")
+
+    async def closed_dialog():
+        await until(instance, "!document.querySelector('.loop-modal') && !navigation.pending")
+        await evaluate(instance, "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))")
+        assert await evaluate(instance, "!loopView.composer.mention && loopView.composer.mentionEl.classList.contains('hidden')"), "returning focus must leave the @ menu dismissed"
+        assert await evaluate(instance, "loopView.composer.text()") == "@Loop"
 
     try:
         with ExitStack() as stack:
@@ -832,6 +840,14 @@ async def loop_checks(instance, capture=False):
                     "deviceScaleFactor": scale, "mobile": name == "mobile"}, session=instance.page_session)
                 for theme in ("dark", "light"):
                     await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                    await open_dialog()
+                    # Leave an untouched form through Escape and the close button.
+                    if theme == "dark":
+                        for kind in ("keyDown", "keyUp"):
+                            await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session=instance.page_session)
+                    else:
+                        await click('.loop-modal .modal-close')
+                    await closed_dialog()
                     await open_dialog()
                     await instance.call("Input.insertText", {"text": "Review the dashboard layout, improve one detail, and run the relevant checks."}, session=instance.page_session)
                     if name == "desktop":
@@ -881,16 +897,15 @@ async def loop_checks(instance, capture=False):
                         (BASE / "assets" / ("loop-iterations-" + name + "-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
                     # Back cleans up; Forward opens a fresh form and never sends.
                     await evaluate(instance, "history.back(); true")
-                    await until(instance, "!document.querySelector('.loop-modal') && !navigation.pending")
+                    await closed_dialog()
                     assert not started and not hub.queue
-                    assert await evaluate(instance, "loopView.composer.text()") == "@Loop"
                     await evaluate(instance, "history.forward(); true")
                     await until(instance, "!!document.querySelector('.loop-modal') && !navigation.pending")
                     assert await evaluate(instance, "document.querySelector('#loop-prompt').value") == ""
                     assert await evaluate(instance, "document.querySelector('#loop-same').checked && document.querySelectorAll('.loop-config-row').length===1")
                     assert await evaluate(instance, "!JSON.stringify(history.state).includes('dashboard layout')")
                     await click('#loop-cancel')
-                    await until(instance, "!document.querySelector('.loop-modal') && !navigation.pending")
+                    await closed_dialog()
             await open_dialog()
             await click('#loop-start')
             assert await evaluate(instance, "document.querySelector('.loop-modal .form-error').textContent") == "Enter a prompt for the loop"

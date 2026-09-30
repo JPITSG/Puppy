@@ -370,6 +370,9 @@ toggling the checkbox or reducing and restoring the iteration count while the
 dialog stays open. These selectors require the backend's `session-loop-config`
 capability.
 
+Closing New loop without starting it keeps the chat draft and leaves its
+@ menu dismissed.
+
 **Start loop** starts
 the first iteration immediately when the session is idle and has no waiting work;
 the remaining copies join its ordinary queue. If work is already running or queued,

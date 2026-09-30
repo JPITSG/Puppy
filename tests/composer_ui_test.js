@@ -1214,6 +1214,14 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   key(loopSource.ta, "Enter");
   assert.equal(loopSource.ta.value, "Keep this @Loop");
   assert.equal(loopSource.events.submit, 0);
+  loopSource.ta.blur(); loopSource.ta.focus(); fire(document, "selectionchange");
+  assert.equal(loopSource.composer.mention, null, "returning from the loop dialog keeps the menu dismissed");
+  assert.equal(loopSource.box.querySelector('.mention-pop').classList.contains('hidden'), true);
+  loopSource.ta.setSelectionRange(0, 0); fire(document, "selectionchange");
+  loopSource.ta.setSelectionRange(loopSource.ta.value.length, loopSource.ta.value.length);
+  fire(document, "selectionchange");
+  assert.equal(loopSource.composer.mention.items[0].kind, "new-loop", "leaving and returning to the token offers the shortcut again");
+  key(loopSource.ta, "Enter");
   loopStarted(); assert.equal(loopSource.ta.value, "Keep this ");
   type(loopSource.ta, "@Loop"); key(loopSource.ta, "Enter");
   type(loopSource.ta, "A newer draft"); loopStarted();

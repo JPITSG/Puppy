@@ -12982,7 +12982,7 @@ class Composer {
     this.uploadPolicy = uploadSettingsFor(this.host.bid);
     this.fileDragDepth = 0;
     this.mention = null;          // open @-mention popup: {start, query, items, sel}
-    this.mentionDismissedAt = -1; // Esc'd token start; stays hidden while it lives
+    this.mentionDismissedAt = -1; // dismissed token start; stays hidden while it lives
     this.mentionSession = null;   // session picker: {selected, data, error}
     this.mentionSpawn = null;     // "New spawn" wizard: {step, node, engine, model, …}
     this.mentionRowEls = [];      // selectable rows, excluding the wizard header
@@ -14256,6 +14256,8 @@ class Composer {
   loopMentionBegin() {
     if (!this.mention || !this.host.loop) return;
     const start = this.mention.start, end = this.ta.selectionStart, draft = this.ta.value;
+    // Returning focus from the dialog must not reopen this token's menu.
+    this.mentionDismissedAt = start;
     this.hideMention();
     this.host.loop(() => {
       // Only consume the shortcut which opened this dialog. A newer draft,
