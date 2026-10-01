@@ -460,14 +460,21 @@ Updates remain visible with the card collapsed; those without a matching card
 stand on their own. Transient engine failures (such as an OAuth refresh lock)
 retry on their own with a back-off note in the transcript.
 
-A task the model left behind does not hold the session forever. Once a wait
-after Claude's answer has lasted two minutes, or at once when a prompt is
-waiting in the queue, Puppy asks Claude through a side question the
-conversation never sees whether any of those tasks is still needed. Only a
-plain **STOP** ends the wait early: Claude Code stops the tasks, the answer
-stands as a normal completion, the queue moves on and the transcript names
-what was ended. Any other reply keeps waiting; the status line says when
-Claude still needs a task. Your own **Ask** waits the few seconds the check
+A task the model left behind does not hold the session forever. Every Claude
+turn is told up front that tasks still running at its final answer hold the
+session, and to stop a server, watcher or waiter it no longer needs before it
+answers. Once a wait after Claude's answer has lasted two minutes, or at once
+when a prompt is waiting in the queue, Puppy asks Claude through a side
+question the conversation never sees whether any of those tasks is still
+needed - only one whose end should wake Claude to continue the work, or one
+that stopping would leave half done, counts; a server kept for you to look
+at does not, since it cannot outlive the turn anyway. Only a plain **STOP**
+ends the wait early: Claude Code stops the tasks, the answer stands as a
+normal completion, the queue moves on and the transcript names what was
+ended. Any other reply keeps waiting, and the status line says when Claude
+still needs a task; the question is put again ten minutes later, naming the
+earlier KEEP and how long the wait has lasted, and at once when a prompt
+joins the queue after it. Your own **Ask** waits the few seconds the check
 takes, and no wait after an answer lasts longer than 60 minutes.
 
 Retries an engine performs inside a running turn (Codex counting a dropped

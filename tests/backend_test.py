@@ -1252,6 +1252,13 @@ def serve_check(mode):
             due.append((now + 0.4, wake))
         elif mode == "limit":
             answer(rid, "KEEP")
+        elif mode in ("again", "later"):
+            # KEEP once; the question put again is answered STOP
+            answer(rid, "KEEP" if len(checks) == 1 else "STOP")
+        elif mode == "quiet":
+            # the first question goes unanswered; the one put again is STOP
+            if len(checks) > 1:
+                answer(rid, "STOP")
         elif mode == "unclear":
             answer(rid, "**STOP** - the build already finished")
         elif mode == "placeholder":
@@ -1627,13 +1634,32 @@ finish()
         assert question.endswith("Answer with exactly one word: KEEP if any of "
                                  "these tasks is still needed, or STOP if none "
                                  "is and all of them can be stopped now.")
+        assert "ended your turn a moment ago, but background tasks" in question
+        assert "answered KEEP" not in question and "another message" not in question
+        assert "A server, a watcher or a waiter that nothing of yours is waiting " \
+               "for is not needed, even one you started for the user to look at" \
+               in question
+        again = runner._background_check_question(
+            [{"id": "b1", "description": "x"}], waited=750, prompt_waiting=True,
+            kept=130)
+        assert "ended your turn 12 minutes ago, but" in again
+        assert "\nWhen asked 2 minutes ago you answered KEEP, and nothing has " \
+               "woken you since.\n" in again
+        assert "\nThe user has already sent another message, which cannot start " \
+               "until this wait ends.\n" in again
+        assert again.endswith(question[question.index("Puppy keeps your process"):])
+        assert runner._ago(59) == "a moment ago" and runner._ago(60) == "1 minute ago"
+        assert runner._ago(3599) == "59 minutes ago"
         assert runner._wait_length(3600) == "60 minutes"
         assert runner._wait_length(1.5) == "1.5 seconds"
+        assert driver.background_guidance.startswith("Background tasks still running")
 
         original_check = (runner.BACKGROUND_CHECK_AFTER, runner.BACKGROUND_CHECK_TIMEOUT,
-                          runner.BACKGROUND_WAIT_LIMIT, runner.BACKGROUND_WAIT_POLL)
+                          runner.BACKGROUND_CHECK_AGAIN, runner.BACKGROUND_WAIT_LIMIT,
+                          runner.BACKGROUND_WAIT_POLL)
         runner.BACKGROUND_CHECK_AFTER = 0.3
         runner.BACKGROUND_CHECK_TIMEOUT = 1.0
+        runner.BACKGROUND_CHECK_AGAIN = 30.0
         runner.BACKGROUND_WAIT_LIMIT = 30.0
         runner.BACKGROUND_WAIT_POLL = 0.05
         waiting_row = ("info", "background_wait")
@@ -1677,6 +1703,11 @@ finish()
             assert flags["eof"] is True and len(checks) == 1
             assert checks[0]["id"].startswith("puppy-sq:bgcheck-")
             assert checks[0]["history"] is False
+            assert "ended your turn a moment ago" in checks[0]["question"]
+            argv = invocations_for("check stop fake turn")[-1]["argv"]
+            guidance = argv[argv.index("--append-system-prompt") + 1]
+            assert guidance == driver.background_guidance or \
+                guidance.endswith("\n\n" + driver.background_guidance), argv
             assert "\n- btask1: fake background command\n" in checks[0]["question"]
             assert not any(message.get("type") in ("side_question_progress",
                                                    "side_question_state")
@@ -1698,6 +1729,52 @@ finish()
             assert shape(events) == woke_shape, shape(events)
             assert events[5]["data"]["ok"] is True and events[5]["data"]["wakeups"] == 1
             assert len(check_of("check keep fake turn")[1]) == 1
+
+            # a KEEP is asked again after BACKGROUND_CHECK_AGAIN, naming the
+            # earlier answer and the time, and a STOP then ends the wait
+            runner.BACKGROUND_CHECK_AGAIN = 0.5
+            assert hub.send_message("check again fake turn") == {"queued": False}
+            await finish_turn("check again fake turn")
+            events = turn_events("check again fake turn")
+            assert shape(events) == ended_shape, shape(events)
+            assert hub.last_completion_status == "ok"
+            flags, checks = check_of("check again fake turn")
+            assert len(checks) == 2 and flags["cancels"] == [], flags
+            assert "answered KEEP" not in checks[0]["question"]
+            assert "\nWhen asked a moment ago you answered KEEP, and nothing has " \
+                   "woken you since.\n" in checks[1]["question"]
+            assert "another message" not in checks[1]["question"]
+
+            # a question that got no answer is withdrawn and asked again too
+            assert hub.send_message("check quiet fake turn") == {"queued": False}
+            await finish_turn("check quiet fake turn")
+            events = turn_events("check quiet fake turn")
+            assert shape(events) == ended_shape, shape(events)
+            flags, checks = check_of("check quiet fake turn")
+            assert len(checks) == 2 and flags["cancels"] == [checks[0]["id"]], flags
+            assert "answered KEEP" not in checks[1]["question"]
+            runner.BACKGROUND_CHECK_AGAIN = 30.0
+
+            # a prompt joining the queue after a KEEP asks again at once,
+            # saying so, and the STOP lets that prompt run
+            assert hub.send_message("check later fake turn") == {"queued": False}
+            await until_hub("KEEP was never shown", lambda: "still needs it" in
+                            hub.snapshot()["background_tasks"]["text"])
+            started = time.monotonic()
+            assert hub.send_message("queued after keep fake turn plain fake turn") \
+                .get("queued") is True
+            await finish_turn("check later fake turn")
+            assert time.monotonic() - started < 15
+            events = turn_events("check later fake turn")
+            assert shape(events[:6]) == ended_shape, shape(events)
+            flags, checks = check_of("check later fake turn")
+            assert len(checks) == 2, flags
+            assert "another message" not in checks[0]["question"]
+            assert "\nThe user has already sent another message, which cannot " \
+                   "start until this wait ends.\n" in checks[1]["question"]
+            assert "answered KEEP" in checks[1]["question"]
+            assert shape(turn_events("queued after keep fake turn plain fake turn")) == [
+                ("user", ""), ("assistant", ""), ("result", "")]
 
             # doubt never ends a wait early: an engine placeholder, a refusal,
             # an explanation around the word, or no answer in time
@@ -1775,7 +1852,8 @@ finish()
             assert order == [flags["user_questions"][0], checks[0]["id"]], order
         finally:
             (runner.BACKGROUND_CHECK_AFTER, runner.BACKGROUND_CHECK_TIMEOUT,
-             runner.BACKGROUND_WAIT_LIMIT, runner.BACKGROUND_WAIT_POLL) = original_check
+             runner.BACKGROUND_CHECK_AGAIN, runner.BACKGROUND_WAIT_LIMIT,
+             runner.BACKGROUND_WAIT_POLL) = original_check
     finally:
         hub.detach(capture)
         driver.binary = original_binary

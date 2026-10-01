@@ -638,6 +638,12 @@ class Driver:
     # tool-less, one response, and never added to the engine's own transcript.
     # This is the opposite of steering - it must not change what the turn does.
     supports_side_questions = False
+    # Guidance the runner appends to every prompt turn's system prompt when
+    # the engine keeps background work (commands, waits, agents) alive past
+    # its final answer, so the runner's wait and its check apply: what a
+    # task left running holds up, and to end what it no longer needs before
+    # answering. Empty for engines without such work.
+    background_guidance = ""
     # Some multi-provider CLIs deliberately leave authentication to whichever
     # provider/model a turn selects.  Their node health is binary availability,
     # not a single global login verdict.

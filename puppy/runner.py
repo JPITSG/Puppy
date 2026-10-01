@@ -822,10 +822,13 @@ BACKGROUND_WAKE_GRACE = 60.0
 # model itself: once it has lasted BACKGROUND_CHECK_AFTER, or at once when a
 # prompt is waiting in the queue, one side question asks whether any task is
 # still needed, and only a plain STOP ends the wait early. An answer is given
-# BACKGROUND_CHECK_TIMEOUT; any doubt keeps waiting, and no wait after an
-# answer outlasts BACKGROUND_WAIT_LIMIT.
+# BACKGROUND_CHECK_TIMEOUT; any doubt keeps waiting, but is asked again
+# BACKGROUND_CHECK_AGAIN later (and at once when a prompt joins the queue
+# after a check asked with none waiting), and no wait after an answer
+# outlasts BACKGROUND_WAIT_LIMIT.
 BACKGROUND_CHECK_AFTER = 120.0
 BACKGROUND_CHECK_TIMEOUT = 120.0
+BACKGROUND_CHECK_AGAIN = 600.0
 BACKGROUND_WAIT_LIMIT = 3600.0
 # how often a wait looks at the queue and its own clocks
 BACKGROUND_WAIT_POLL = 2.0
@@ -881,10 +884,24 @@ def _background_task_names(tasks) -> str:
     return shown
 
 
-def _background_check_question(tasks) -> str:
+def _ago(seconds) -> str:
+    """How long ago, in whole minutes, as the check tells the model; under
+    a minute is 'a moment ago'."""
+    minutes = int(max(0.0, float(seconds or 0)) // 60)
+    if minutes < 1:
+        return "a moment ago"
+    return _wait_length(minutes * 60) + " ago"
+
+
+def _background_check_question(tasks, waited=0.0, prompt_waiting=False, kept=None) -> str:
     """The side question that asks the model whether the background work
-    still running after its answer is needed. Only an answer that is exactly
-    STOP ends the wait; everything else keeps it."""
+    still running after its answer is needed: the tasks, how long ago the
+    turn ended (`waited` seconds), a KEEP it answered `kept` seconds ago in
+    this same pause, and a prompt of the user's waiting behind the wait. A
+    task counts as needed only when its end should wake the model to
+    continue, or when stopping it would leave work half done - never a
+    server kept for the user, which cannot outlive the turn. Only an answer
+    that is exactly STOP ends the wait; everything else keeps it."""
     rows = []
     for row in tasks:
         if not isinstance(row, dict):
@@ -892,17 +909,29 @@ def _background_check_question(tasks) -> str:
         ident = " ".join(str(row.get("id") or "").split())[:40]
         text = " ".join(str(row.get("description") or "").split())[:200]
         rows.append("- " + (ident + ": " if ident else "") + (text or "(no description)"))
-    return (
+    parts = [
         "This question comes from Puppy, the app running this session, not from "
-        "the user. Your last reply ended your turn, but background tasks you "
-        "started are still running:\n" + "\n".join(rows) + "\n"
-        "Is any of them still needed? A task is still needed if you will continue "
-        "this work when it finishes, if it keeps something running that the user "
-        "is using (a server, for example), or if stopping it now could leave work "
-        "half done (a deploy, a build, an install or a copy still in progress). "
-        "Tasks that are not needed will be stopped.\n"
+        "the user. Your last reply ended your turn {}, but background tasks you "
+        "started are still running:\n".format(_ago(waited)) + "\n".join(rows) + "\n"]
+    if kept is not None:
+        parts.append("When asked {} you answered KEEP, and nothing has woken you "
+                     "since.\n".format(_ago(kept)))
+    if prompt_waiting:
+        parts.append("The user has already sent another message, which cannot "
+                     "start until this wait ends.\n")
+    parts.append(
+        "Puppy keeps your process alive only so that a task's end can wake you to "
+        "continue this work, and ends the tasks when the wait ends. Is any of them "
+        "still needed? A task is still needed only if you will continue this work "
+        "when it finishes (you are waiting to report on it or to act on its "
+        "result), or if stopping it now would leave work half done (a deploy, a "
+        "build, an install or a copy still in progress). A server, a watcher or a "
+        "waiter that nothing of yours is waiting for is not needed, even one you "
+        "started for the user to look at: it cannot outlive this turn, and holding "
+        "the turn open for it only keeps the user's next message from starting.\n"
         "Answer with exactly one word: KEEP if any of these tasks is still "
         "needed, or STOP if none is and all of them can be stopped now.")
+    return "".join(parts)
 
 
 def _wait_length(seconds: float) -> str:
@@ -3393,6 +3422,11 @@ class SessionHub:
                 task_context = session_tasks.guidance(self.id, first_turn)
                 if task_context:
                     system_prompt_text += "\n\n" + task_context
+                # an engine that keeps background work alive past the answer
+                # is told what a task left running holds up, and that it
+                # will be asked about it (background_check below)
+                if driver.background_guidance:
+                    system_prompt_text += "\n\n" + driver.background_guidance
             driver_kwargs = {"browser_mcp": browser_mcp, "terminal_mcp": terminal_mcp,
                              "vnc_mcp": vnc_mcp, "spawn_mcp": spawn_mcp,
                              "system_prompt": system_prompt_text}
@@ -3456,10 +3490,13 @@ class SessionHub:
             wait_closed = ""       # why a wait was ended early, if it was
             bg_idle_since = None   # when every task ended without a wake-up
             # Each pause on background work is numbered; the model is asked
-            # about its tasks at most once per pause (see background_check).
+            # about its tasks once the pause has lasted, and again after any
+            # answer but STOP (see background_check).
             bg_pause = 0
             bg_paused_at = 0.0     # monotonic start of the current pause
-            bg_asked = 0           # the last pause a check was put for
+            bg_check_after = 0.0   # monotonic time the next check may be asked
+            bg_check_prompted = False  # the last check was asked with a prompt waiting
+            bg_kept_at = None      # monotonic time of the pause's last KEEP
             bg_check = None        # the unanswered check: id, pause, tasks, when
             bg_stop = None         # a STOP waiting for the user's own question
             # Independent bounds for replies that can follow the turn result.
@@ -3577,7 +3614,7 @@ class SessionHub:
                 answer, about the pause still going on, can end the wait; the
                 engine's placeholder, a stand-in model, an explanation or a
                 KEEP all leave it waiting."""
-                nonlocal bg_check, bg_stop
+                nonlocal bg_check, bg_kept_at, bg_stop
                 check = bg_check
                 if check is None or str(act.get("request_id") or "") != check["id"]:
                     return      # taken back, or about a pause that has ended
@@ -3593,6 +3630,7 @@ class SessionHub:
                 if verdict == "stop" and check["pause"] == bg_pause:
                     bg_stop = {"pause": check["pause"], "tasks": check["tasks"]}
                 elif verdict == "keep":
+                    bg_kept_at = time.monotonic()
                     self._bg_note = "{} still needs {}".format(
                         driver.label,
                         "it" if len(check["tasks"]) == 1 else "at least one")
@@ -3603,11 +3641,14 @@ class SessionHub:
                 """While the model waits on background work after answering:
                 end a wait that has lasted BACKGROUND_WAIT_LIMIT; once it has
                 lasted BACKGROUND_CHECK_AFTER, or at once when a prompt is
-                waiting in the queue, ask the model once per pause whether the
-                tasks are still needed; take back an overdue question; and end
-                the wait on a plain STOP about exactly the tasks still running,
-                after any question of the user's own has been answered."""
-                nonlocal bg_asked, bg_check, bg_stop
+                waiting in the queue, ask the model whether the tasks are
+                still needed - and ask again BACKGROUND_CHECK_AGAIN after a
+                check that did not end the wait, or at once when a prompt
+                joins the queue after a check asked with none waiting; take
+                back an overdue question; and end the wait on a plain STOP
+                about exactly the tasks still running, after any question of
+                the user's own has been answered."""
+                nonlocal bg_check, bg_check_after, bg_check_prompted, bg_stop
                 if pending_result is None or wait_closed or \
                         self._bg_wait_since is None or self.interrupted or \
                         self._turn_stopping:
@@ -3639,11 +3680,10 @@ class SessionHub:
                     if now - bg_check["asked_at"] >= BACKGROUND_CHECK_TIMEOUT:
                         await withdraw_check("no answer in time")
                     return
-                if bg_asked == bg_pause or not live or \
-                        not driver.supports_side_questions:
+                if not live or not driver.supports_side_questions:
                     return
-                if now - bg_paused_at < BACKGROUND_CHECK_AFTER and \
-                        not self._prompt_waiting():
+                prompt_waiting = self._prompt_waiting()
+                if now < bg_check_after and not (prompt_waiting and not bg_check_prompted):
                     return
                 async with self._stdin_lock:
                     proc = self.proc
@@ -3653,10 +3693,16 @@ class SessionHub:
                     request_id = BACKGROUND_CHECK_PREFIX + uuid.uuid4().hex
                     payload = driver.side_question_payload(
                         session, self._driver_ctx,
-                        _background_check_question(self._bg_tasks), [], request_id)
+                        _background_check_question(
+                            self._bg_tasks, now - bg_paused_at, prompt_waiting,
+                            None if bg_kept_at is None else now - bg_kept_at),
+                        [], request_id)
                     if not isinstance(payload, dict):
                         return      # the control channel is not up yet
-                    bg_asked = bg_pause
+                    # whatever becomes of this question - KEEP, doubt, no
+                    # answer, a failed write - the next one waits its turn
+                    bg_check_after = now + BACKGROUND_CHECK_AGAIN
+                    bg_check_prompted = prompt_waiting
                     bg_check = {"id": request_id, "pause": bg_pause,
                                 "tasks": live, "asked_at": now}
                     self._bg_check_id = request_id
@@ -3780,6 +3826,9 @@ class SessionHub:
                         await withdraw_check("a new pause began")
                         bg_pause += 1
                         bg_paused_at = time.monotonic()
+                        bg_check_after = bg_paused_at + BACKGROUND_CHECK_AFTER
+                        bg_check_prompted = False
+                        bg_kept_at = None
                         bg_stop = None
                         self._bg_note = ""
                         self._bg_wait_since = time.time()

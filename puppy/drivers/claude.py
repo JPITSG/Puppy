@@ -401,6 +401,21 @@ async def _read_model_catalog(binary: str, model: str = "") -> list:
         await driver_base.end_probe(process)
 
 
+# Told to every prompt turn with the node's guidance: the CLI keeps a
+# backgrounded command, Monitor wait or backgrounded agent alive until stdin
+# closes, so one still running at the final answer holds the session until
+# the runner's check (runner.background_check) ends it or its end wakes the
+# model. The model can end its own tasks (TaskStop, a kill) before answering.
+BACKGROUND_GUIDANCE = (
+    "Background tasks still running when you give your final answer (a command "
+    "run in the background, a wait on one, a backgrounded agent) hold this "
+    "session: the user's next message cannot start until they end, and Puppy, "
+    "the app running this session, will ask you whether any of them is still "
+    "needed and stop them when none is. Before you answer, stop any server, "
+    "watcher or waiter you no longer need, and leave a task running only when "
+    "its end should wake you to continue the work.")
+
+
 def _task_row(item) -> dict:
     """One live background task as the runner and consoles see it; empty for
     ambient housekeeping the CLI hides from user-visible activity."""
@@ -476,6 +491,7 @@ class ClaudeDriver(Driver):
     supports_steering = True
     steering_acknowledged = True
     supports_side_questions = True
+    background_guidance = BACKGROUND_GUIDANCE
     dynamic_model_options = True
     release_source = {"kind": "npm", "package": "@anthropic-ai/claude-code"}
     upgrade_source = {"kind": "self", "args": ["update"]}
