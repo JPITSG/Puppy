@@ -1204,7 +1204,10 @@ file names. It is deliberately narrow: the node advertises it with the additive
 `upload-preview` capability, serves only PNG/JPEG/WebP/GIF (never SVG, which is
 scriptable) with an explicit content type and `nosniff`, and takes no
 caller-supplied filename - an upload directory holds exactly one file. Older
-nodes omit the capability and their previews stay as named cards.
+nodes omit the capability and their previews stay as named cards. The same route
+serves the pictures a tool gave the model, which the node stores beside the
+session's uploads under a `t`-prefixed id and names on the `tool_result` event's
+`images`; the discard route never accepts those ids.
 
 Controllers stream remote uploads rather than buffering them and preserve TLS
 pinning, token authentication, redirect rejection, and the receiving node's

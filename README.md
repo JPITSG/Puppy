@@ -467,6 +467,15 @@ it simply closes); Forward opens it again. On a touch screen
 the arrows give way to swiping, a tap on the picture hides the controls, and
 pulling it up or down puts it away.
 
+Pictures a tool hands back to the engine open the same way: Claude Code reading
+an image or a screenshot, the managed browser's and VNC captures, and the images
+in Codex's MCP results (an image in an OpenCode tool update is read the same
+way). The backend keeps a copy with the session's files, so a folded tool card
+shows a small thumbnail beside its status and the opened card shows the picture
+under the result. Either one opens
+the viewer on that call's pictures, named for the file the call read. Pictures
+from turns before this release were never kept and still read as `[image]`.
+
 Engines that keep working after answering are handled too: Claude Code's
 background commands, agents and monitors keep their turn alive until they end.
 Their completion, failure and stop updates are labeled and left-aligned, attached
@@ -1141,6 +1150,8 @@ python3 tests/operations_test.py     # cancellation/rollback on both runtimes
 node tests/task_fold_ui_test.js      # task removal and the folded archive card
 node tests/status_bar_ui_test.js     # the status bar: one session setting, followed by every task tab
 node tests/tool_result_ui_test.js    # tool results folded into their call's card
+python3 tests/tool_images_test.py    # tool pictures: the reader, each driver, storage, both runtimes
+node tests/image_viewer_ui_test.js   # the image viewer, and the pictures on tool cards
 node tests/toast_ui_test.js          # notice grammar, tones, lives, folded repeats and their reports
 node tests/notices_ui_test.js        # the notification box: its slide, rows, live arrivals, its clear
 python3 tests/engine_messages_test.py # native notices, safe fallbacks, both runtimes' session sockets

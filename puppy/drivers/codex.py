@@ -578,14 +578,16 @@ def _text_value(value, limit: int = 20000) -> str:
 
 
 def _completed_tool(tool: str, tool_input, result, item_id: str,
-                    is_error: bool = False) -> list:
+                    is_error: bool = False, images=None) -> list:
     """Normalize a completed one-shot CLI item into the shared tool pair."""
+    data = {"tool_use_id": item_id, "content": _text_value(result),
+            "is_error": bool(is_error)}
+    if images:
+        data["images"] = images
     return [
         {"a": "event", "kind": "tool_use",
          "data": {"tool": tool, "input": tool_input, "tool_use_id": item_id}},
-        {"a": "event", "kind": "tool_result",
-         "data": {"tool_use_id": item_id, "content": _text_value(result),
-                  "is_error": bool(is_error)}},
+        {"a": "event", "kind": "tool_result", "data": data},
     ]
 
 
@@ -1329,8 +1331,14 @@ class CodexDriver(Driver):
                 result = item.get("error") or item.get("status") or ""
             failed = str(item.get("status") or "").lower() in \
                 ("failed", "error") or bool(item.get("error"))
+            # An MCP result holding images reads as Claude's does - its text
+            # with [image] where each picture was - and hands the pictures
+            # over, rather than its JSON with the base64 spelled out.
+            images = driver_base.tool_images(result)
+            if images and isinstance(result, dict) and isinstance(result.get("content"), list):
+                result = driver_base.stringify_content(result["content"])
             return _completed_tool(
-                tool, item.get("arguments") or {}, result, iid, failed)
+                tool, item.get("arguments") or {}, result, iid, failed, images)
         if kind == "websearch":
             return _completed_tool(
                 "web_search", _web_search_input(item),

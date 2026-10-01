@@ -62,7 +62,7 @@ import re
 from puppy import questions, quota
 from puppy.drivers import base as driver_base
 from puppy.drivers import messages
-from puppy.drivers.base import Driver, ToolUnavailable, stringify_content
+from puppy.drivers.base import Driver, ToolUnavailable, stringify_content, tool_images
 from puppy.user_paths import service_home
 
 log = logging.getLogger("puppy.drivers")
@@ -1126,10 +1126,13 @@ class ClaudeDriver(Driver):
                                      "ok": True, "error": ""})
                 for blk in content:
                     if isinstance(blk, dict) and blk.get("type") == "tool_result":
-                        acts.append({"a": "event", "kind": "tool_result",
-                                     "data": {"tool_use_id": blk.get("tool_use_id", ""),
-                                              "content": stringify_content(blk.get("content"))[:20000],
-                                              "is_error": bool(blk.get("is_error"))}})
+                        data = {"tool_use_id": blk.get("tool_use_id", ""),
+                                "content": stringify_content(blk.get("content"))[:20000],
+                                "is_error": bool(blk.get("is_error"))}
+                        images = tool_images(blk.get("content"))
+                        if images:
+                            data["images"] = images
+                        acts.append({"a": "event", "kind": "tool_result", "data": data})
             return acts
 
         if t == "control_response":

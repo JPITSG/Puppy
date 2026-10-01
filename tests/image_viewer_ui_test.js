@@ -100,8 +100,15 @@ vm.runInContext([
   between("function plusIcon(size)", "/* the composer's session-tools trigger"),
   between("function attachmentFileIcon(size = 18)", "function sessionPinIcon("),
   between("const ATTACHMENT_PREVIEW_TYPES", "/* Resolve the configuration at the queue tail"),
+  between("function apiPath(bid, path)", "async function api(bid, path"),
+  // a tool's pictures on its card; the card's other helpers are not under test
+  "function toolStateInto() {} function toolInterruptedInto() {} function backgroundTaskStateInto() {}",
+  "function questionMarkChosen() {} const displayValue = value => String(value || '');",
+  "function linkifyInto(node, text) { node.textContent = text; return node; }",
+  between("function fillToolResultInto(card, d, endedAt", "/* The task's ending decides the mark"),
 ].join("\n"), context);
 const api = vm.runInContext(`({ attachmentChipNode, openImageViewer, openImageViewerFrom,
+  fillToolResultInto, toolImageItems, el,
   imageViewerFit, imageViewerRange, imageViewerClamp, imageViewerAround, imageViewerCover,
   imageViewerInset, imageViewerVelocity, IMAGE_VIEWER_MAX_SCALE, IMAGE_VIEWER_TAP_MS })`, context);
 const current = () => vm.runInContext("imageViewerOpen", context);
@@ -571,3 +578,82 @@ console.log("PASS: a pinch about its middle handing over to a pan, a squeeze spr
   motion.reduce = true;
 }
 console.log("PASS: Forward reopens a fresh viewer on the picture last shown, a failed picture says so and still pages, the window refits a fitted picture only, the flight in and home with one radius, quick presses never show a stale picture");
+
+/* ---- a picture a tool gave the model, on its card ---- */
+{
+  const card = (input) => {
+    const n = api.el("div", "tool-card");
+    const head = n.appendChild(api.el("div", "tool-head"));
+    head.appendChild(api.el("span", "t-sum", "summary"));
+    head.appendChild(api.el("span", "t-state"));
+    let folds = 0;
+    head.onclick = () => { folds++; n.classList.toggle("open"); };
+    n.appendChild(api.el("div", "tool-body"));
+    n._toolInput = input;
+    n.folds = () => folds;
+    return n;
+  };
+  const ID = "t1790890786930-9cf6575096";
+  const read = card({file_path: "/tmp/shots/10-crop.png"});
+  api.fillToolResultInto(read, {content: "[image]", images: [{id: ID, type: "image/png", size: 10}]}, 5,
+                         {bid: 0, sid: 7});
+  const head = read.querySelector(".tool-head");
+  const thumb = head.querySelector(".t-thumb");
+  assert.ok(thumb && thumb.tag === "button" && thumb.type === "button", "the head holds the picture's button");
+  assert.ok(thumb.nextSibling === head.querySelector(".t-state"), "just before the call's state");
+  assert.equal(thumb.getAttribute("aria-label"), "View 10-crop.png", "named for the file the call read");
+  const small = thumb.querySelector("img");
+  assert.equal(small.src, "/api/sessions/7/upload/" + ID);
+  assert.equal(small.loading, "lazy", "a long history fetches only what is scrolled to");
+  assert.ok(thumb.querySelector(".t-thumb-more") === null);
+  const body = read.querySelector(".tool-body");
+  assert.ok(body.querySelector("pre") === null, "the [image] line is the picture, not text");
+  const strip = body.querySelector(".attach-strip.tool-images");
+  const chip = strip.querySelector(".attach-chip.image .attach-view .attach-thumb");
+  assert.ok(chip && chip.src === small.src && chip.loading === "lazy", "and under the result the sent image's chip");
+  // a press on the head's picture opens the viewer, never folds the card
+  const press = new FakeEvent("click");
+  thumb.onclick(press);
+  assert.ok(press.propagationStopped, "the card's fold never sees it");
+  assert.equal(read.folds(), 0);
+  const viewer = current();
+  assert.ok(viewer, "the viewer opens");
+  assert.deepEqual(plain(viewer.items.map(item => [item.url, item.name])), [[small.src, "10-crop.png"]]);
+  viewer.dialog.close();
+  assert.ok(current() === null);
+  // the result chip opens the same viewer on the card's pictures
+  strip.querySelector(".attach-view").onclick();
+  assert.deepEqual(plain(current().items.map(item => item.name)), ["10-crop.png"]);
+  current().dialog.close();
+
+  // a capture with a caption and three pictures, on a remote backend
+  const shot = card({});
+  const ids = ["t1790890786931-0000000001", "t1790890786932-0000000002", "t1790890786933-0000000003"];
+  api.fillToolResultInto(shot, {content: "Browser A91O\nCaptured the viewport\n[image]\n[image]\n[image]",
+    images: [{id: ids[0], type: "image/png", size: 1}, {id: ids[1], type: "image/jpeg", size: 2},
+             {id: ids[2], type: "image/webp", size: 3}]}, 5, {bid: 3, sid: 9});
+  assert.equal(shot.querySelector(".tool-body pre").textContent, "Browser A91O\nCaptured the viewport",
+               "the caption stays, its [image] lines go");
+  const several = shot.querySelector(".t-thumb");
+  assert.equal(several.getAttribute("aria-label"), "View 3 images");
+  assert.equal(several.querySelector(".t-thumb-more").textContent, "+2");
+  assert.equal(several.querySelector("img").src, "/api/b/3/sessions/9/upload/" + ids[0], "asked of the backend that holds it");
+  several.onclick(new FakeEvent("click"));
+  assert.deepEqual(plain(current().items.map(item => item.name)), ["image-1.png", "image-2.jpg", "image-3.webp"]);
+  current().dialog.close();
+  // a picture the node no longer has takes its head button with it
+  several.querySelector("img").onerror();
+  assert.ok(shot.querySelector(".t-thumb") === null);
+
+  // only what the node stores is a picture: an id of its form, a raster type
+  assert.deepEqual(plain(api.toolImageItems(0, 7, [{id: "../../etc", type: "image/png"},
+    {id: "1790890786930-9cf6575096", type: "image/png"}, {id: ID, type: "image/svg+xml"}, null], {})), []);
+  const plainResult = card({});
+  api.fillToolResultInto(plainResult, {content: "[image]", images: [{id: "x", type: "image/png"}]}, 5, {bid: 0, sid: 7});
+  assert.ok(plainResult.querySelector(".t-thumb") === null && plainResult.querySelector(".tool-images") === null);
+  assert.equal(plainResult.querySelector("pre").textContent, "[image]", "an older result reads as it always did");
+  const empty = card({});
+  api.fillToolResultInto(empty, {content: ""}, 5, {bid: 0, sid: 7});
+  assert.equal(empty.querySelector("pre").textContent, "(Empty)");
+}
+console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in the head that opens the viewer without folding the card, the sent image's chips under the caption, local and remote, named for the file read, an unknown id or type never a picture");

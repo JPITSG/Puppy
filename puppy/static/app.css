@@ -1547,6 +1547,27 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   max-height:320px;overflow-y:auto;color:var(--txt2);
 }
 .tool-body .tb-label{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.09em;color:var(--txt3);margin:6px 0 3px}
+/* A picture the tool gave the model: a thumbnail in the head that opens the
+   image viewer, standing in the row's centre without growing it (24px in an
+   18px line), and under the result the chips a sent image wears. */
+.tool-head .t-thumb{
+  position:relative;flex-shrink:0;display:block;margin:-3px 0;padding:0;height:24px;
+  border:1px solid var(--line2);border-radius:var(--r-xs);overflow:hidden;background:var(--panel2);
+  line-height:0;cursor:zoom-in;
+}
+.tool-head .t-thumb-img{
+  display:block;height:22px;width:auto;min-width:22px;max-width:44px;object-fit:cover;object-position:left top;
+  transition:transform var(--t-slow) var(--ease),filter var(--t-base) var(--ease);
+}
+@media (hover:hover){.tool-head .t-thumb:hover .t-thumb-img{transform:scale(1.08);filter:brightness(1.06)}}
+.tool-head .t-thumb:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.tool-head .t-thumb-more{
+  position:absolute;right:0;bottom:0;padding:2px 3px;border-top-left-radius:var(--r-xs);
+  background:rgba(6,9,14,.72);color:#fff;font:var(--fs-2xs)/1 var(--mono);pointer-events:none;
+}
+.tool-body .attach-strip.tool-images{margin:8px 0 2px}
+.tool-body .tb-label+.attach-strip.tool-images{margin-top:2px}
+@media (prefers-reduced-motion:reduce){.tool-head .t-thumb-img{transition:none}}
 
 .task-update{
   align-self:stretch;min-width:0;text-align:left;padding:8px 11px;

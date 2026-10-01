@@ -3790,7 +3790,16 @@ class SessionHub:
                 for act in actions:
                     a = act.get("a")
                     if a == "event":
-                        event = self._emit(act["kind"], act["data"])
+                        data = act["data"]
+                        if act["kind"] == "tool_result" and data.get("images"):
+                            # the pictures a tool gave the model, stored off
+                            # the loop; the event names them, never carries them
+                            data = dict(data)
+                            stored = await asyncio.get_running_loop().run_in_executor(
+                                None, uploads.store_tool_images, self.id, data.pop("images"))
+                            if stored:
+                                data["images"] = stored
+                        event = self._emit(act["kind"], data)
                         pending_tools.observe(event["kind"], event["data"])
                     elif a == "transient":
                         msg = act["msg"]

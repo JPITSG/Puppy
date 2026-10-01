@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
@@ -26,6 +28,9 @@ SIZE_HEADER = "X-Puppy-Size"
 STREAM_CHUNK_BYTES = 256 * 1024
 MAX_FILENAME_BYTES = 180
 UPLOAD_ID = re.compile(r"^\d{13}-[0-9a-f]{10}$")
+# Images a tool gave back to the model live beside the session's uploads under
+# an id of their own, a "t" and an upload id: see store_tool_images.
+TOOL_IMAGE_ID = re.compile(r"^t\d{13}-[0-9a-f]{10}$")
 # Previews are served for these raster types only. SVG is deliberately absent:
 # it is scriptable, and this route hands bytes back on the console's own origin.
 PREVIEW_CONTENT_TYPES = {
@@ -187,15 +192,16 @@ def _sweep_due(session_id: int) -> None:
         log.warning("upload sweep failed: %s", exc)
 
 
-def _new_upload_directory(session_id: int) -> Path:
+def _new_upload_directory(session_id: int, prefix: str = "") -> Path:
     root = Path(config.DATA_DIR).resolve() / "uploads"
     _private_directory(root)
     session_root = root / str(int(session_id))
     _private_directory(session_root)
-    _sweep_due(int(session_id))
+    if not prefix:
+        _sweep_due(int(session_id))
     for _attempt in range(8):
-        candidate = session_root / ("{}-{}".format(
-            int(time.time() * 1000), secrets.token_hex(5)))
+        candidate = session_root / ("{}{}-{}".format(
+            prefix, int(time.time() * 1000), secrets.token_hex(5)))
         try:
             candidate.mkdir(mode=0o700)
             return candidate
@@ -429,6 +435,72 @@ def adopt_attachments(source_id: int, target_id: int, text: str) -> str:
     return rewrite_attachment_paths(source_id, target_id, text)
 
 
+# The raster types a stored tool image may be, read from its own first bytes:
+# the engine's declared media type is a claim, these are the picture.
+_IMAGE_SIGNATURES = (
+    (b"\x89PNG\r\n\x1a\n", ".png"),
+    (b"\xff\xd8\xff", ".jpg"),
+    (b"GIF87a", ".gif"),
+    (b"GIF89a", ".gif"),
+)
+
+
+def _image_suffix(raw: bytes):
+    for signature, suffix in _IMAGE_SIGNATURES:
+        if raw.startswith(signature):
+            return suffix
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def store_tool_images(session_id: int, images) -> list:
+    """Store the images a tool gave back to the model and name them.
+
+    ``images`` is a driver's ``tool_images`` list ({type, data} with base64
+    data). Each picture becomes one file in a private directory of its own,
+    exactly an upload's shape, so the preview route, a backup and the
+    session's deletion treat it like one; its id is a "t" and an upload id,
+    which the orphan sweep never takes for an upload (the tool_result event
+    naming it is written right after) and the composer's discard route never
+    accepts. Its type comes from its bytes, never from the engine's word.
+    Returns [{id, type, size}] for the event to carry. Never raises: an image
+    that does not decode, is not a raster type the preview serves, or cannot
+    be written is left out.
+    """
+    from puppy.drivers.base import TOOL_IMAGE_LIMIT, TOOL_IMAGE_MAX_BYTES
+    stored = []
+    for image in list(images or ())[:TOOL_IMAGE_LIMIT]:
+        data = image.get("data") if isinstance(image, dict) else None
+        if not isinstance(data, str):
+            continue
+        try:
+            raw = base64.b64decode(data)
+        except (binascii.Error, ValueError):
+            continue
+        suffix = _image_suffix(raw)
+        if suffix is None or len(raw) > TOOL_IMAGE_MAX_BYTES:
+            continue
+        try:
+            directory = _new_upload_directory(session_id, "t")
+        except OSError as exc:
+            log.warning("session %s tool image could not be stored: %s", session_id, exc)
+            continue
+        target = directory / ("image" + suffix)
+        try:
+            fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(raw)
+        except OSError as exc:
+            log.warning("session %s tool image could not be stored: %s", session_id, exc)
+            _discard_partial(directory, target)
+            continue
+        stored.append({"id": directory.name, "type": PREVIEW_CONTENT_TYPES[suffix],
+                       "size": len(raw)})
+    return stored
+
+
 def remove_session_storage(session_id: int) -> None:
     """Drop a session's entire private upload storage.
 
@@ -608,7 +680,8 @@ async def h_session_upload_preview(request: web.Request):
     if db.get_session(session_id) is None:
         return web.json_response({"error": "session not found"}, status=404)
     upload_id = request.match_info.get("upload_id", "")
-    if not UPLOAD_ID.fullmatch(upload_id):
+    # an upload, or an image a tool gave back to the model (store_tool_images)
+    if not (UPLOAD_ID.fullmatch(upload_id) or TOOL_IMAGE_ID.fullmatch(upload_id)):
         return web.json_response({"error": "invalid upload id"}, status=400)
     try:
         target = _validated_upload_file(session_id, upload_id)
@@ -637,7 +710,7 @@ def register(app: web.Application) -> None:
     app.router.add_patch("/api/uploads/settings", h_settings_patch)
     app.router.add_post("/api/sessions/{sid:\\d+}/upload", h_session_upload)
     app.router.add_get(
-        "/api/sessions/{sid:\\d+}/upload/{upload_id:[0-9]{13}-[0-9a-f]{10}}",
+        "/api/sessions/{sid:\\d+}/upload/{upload_id:t?[0-9]{13}-[0-9a-f]{10}}",
         h_session_upload_preview)
     app.router.add_delete(
         "/api/sessions/{sid:\\d+}/upload/{upload_id:[0-9]{13}-[0-9a-f]{10}}",

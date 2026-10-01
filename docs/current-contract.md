@@ -99,6 +99,14 @@ still contain a value written before that release.
   never recorded. Its content names the interruption and unknown outcome;
   recovery never reruns a call or replaces existing events. This additive
   event field changes no database schema, snapshot format or protocol version.
+- A `tool_result` can carry `images: [{id, type, size}]` naming the pictures a
+  tool gave the model. The node stores each one beside the session's uploads
+  under a `t`-prefixed upload id (`t<13 digits>-<10 hex>`) and serves it through
+  the existing `GET /api/sessions/{sid}/upload/{id}` preview route; the event
+  never carries the bytes. Those directories are never orphan-swept and go with
+  the session's storage and its backups. Older events have no `images` and keep
+  their `[image]` text. This additive field changes no database schema,
+  snapshot format, capability or protocol version.
 - Session reordering requires both starting-order and pin-cohort compare tokens.
   `session-order-recency` adds durable `order_at` timestamps for merging the
   sidebar across backends below all pins, and an optional `expected_recency`

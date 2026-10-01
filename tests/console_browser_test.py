@@ -30,7 +30,7 @@ os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from puppy import auth, backends, browser, config, db, notices, runner, search, session_git, session_tasks, session_aliases, terminal, token_usage, workspaces
+from puppy import auth, backends, browser, config, db, notices, runner, search, session_git, session_tasks, session_aliases, terminal, token_usage, uploads, workspaces
 from puppy import web as webui
 from puppy.drivers import all_drivers, get_driver
 
@@ -1825,6 +1825,116 @@ async def image_viewer_checks(instance, capture=False):
     print("PASS: sent images open from their thumbnails framed and centred, zoom about the wheel, pan without gaps, "
           "double click, keys and download; Escape, Back, Forward and a press beside close or reopen with focus home; "
           "phone taps, pinches, double taps, swipes and pulls in both themes; reduced motion opens in place", flush=True)
+
+
+def demo_png(width, height, colour):
+    """A real PNG of one colour, built with zlib alone."""
+    import struct
+    import zlib
+    row = b"\x00" + bytes(colour) * width
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + \
+            struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress(row * height)) + chunk(b"IEND", b""))
+
+
+async def tool_image_checks(instance):
+    """A picture a tool gave the model opens in the same viewer. The node
+    stores it (uploads.store_tool_images) and the call's card, built by the
+    view itself, wears it as a thumbnail in its folded head - standing in the
+    head's centre without growing it - and as the sent image's chip under its
+    result: a real click on either opens the viewer on the node's own bytes,
+    named for the file the call read, without folding or unfolding the card,
+    and Escape brings focus home to the thumbnail."""
+    page = instance.page_session
+    sid = await evaluate(instance, "demoView.tab.sid")
+    stored = uploads.store_tool_images(sid, [{"type": "image/png", "data": base64.b64encode(
+        demo_png(640, 360, (99, 200, 186))).decode()}])
+    assert len(stored) == 1, stored
+    spot = """(async () => { if (typeof closeDrawer === 'function') closeDrawer();
+        const b = %s;
+        b.scrollIntoView({block: 'center'});
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const r = b.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        return {x, y, hit: !!hit && b.contains(hit)}; })()"""
+
+    async def click(expression):
+        point = await evaluate(instance, spot % expression)
+        assert point["hit"], (expression, point)
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {"type": kind, "x": point["x"], "y": point["y"],
+                                "button": "left", "clickCount": 1}, session=page)
+
+    async def escape():
+        for kind in ("keyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Escape", "code": "Escape",
+                                "windowsVirtualKeyCode": 27}, session=page)
+        await until(instance, "imageViewerOpen === null")
+
+    await evaluate(instance, """(() => {
+        window.toolShot = document.createElement('div');
+        const add = event => { const node = demoView.buildEventNode(event); if (node) toolShot.appendChild(node); };
+        add({kind: 'tool_use', seq: 1, ts: 1, data: {tool: 'Read', tool_use_id: 'toolu_shot',
+             input: {file_path: '/tmp/shots/10-crop.png'}}});
+        add({kind: 'tool_result', seq: 2, ts: 2, data: {tool_use_id: 'toolu_shot', content: '[image]',
+             is_error: false, images: %s}});
+        add({kind: 'tool_use', seq: 3, ts: 3, data: {tool: 'Read', tool_use_id: 'toolu_text',
+             input: {file_path: '/tmp/notes.txt'}}});
+        add({kind: 'tool_result', seq: 4, ts: 4, data: {tool_use_id: 'toolu_text', content: 'notes', is_error: false}});
+        demoView.inner.appendChild(toolShot);
+        window.toolCard = toolShot.querySelector('.tool-card');
+        return true;
+    })()""" % json.dumps(stored))
+    try:
+        await until(instance, "toolCard.querySelector('.t-thumb img').complete && "
+                              "toolCard.querySelector('.t-thumb img').naturalWidth === 640")
+        head = await evaluate(instance, """(() => {
+            const heads = [...toolShot.querySelectorAll('.tool-head')].map(h => h.getBoundingClientRect());
+            const t = toolCard.querySelector('.t-thumb').getBoundingClientRect();
+            const state = toolCard.querySelector('.t-state').getBoundingClientRect();
+            return {with: heads[0].height, without: heads[1].height, thumb: t.height,
+                    centre: t.top + t.height / 2 - (heads[0].top + heads[0].height / 2),
+                    before: state.left - t.right, cursor: getComputedStyle(toolCard.querySelector('.t-thumb')).cursor,
+                    label: toolCard.querySelector('.t-thumb').getAttribute('aria-label')};
+        })()""")
+        assert head["with"] == head["without"], ("the picture never grows its head", head)
+        assert head["thumb"] == 24 and abs(head["centre"]) < 0.6, head
+        assert head["before"] > 0 and head["cursor"] == "zoom-in", head
+        assert head["label"] == "View 10-crop.png", head
+
+        await click("toolCard.querySelector('.t-thumb')")
+        await until(instance, "!!imageViewerOpen && imageViewerOpen.ready")
+        shown = await evaluate(instance, """({name: imageViewerOpen.name.textContent, meta: imageViewerOpen.meta.textContent,
+            href: imageViewerOpen.downloadLink.getAttribute('href'), download: imageViewerOpen.downloadLink.download,
+            open: toolCard.classList.contains('open')})""")
+        assert shown["name"] == "10-crop.png" and shown["meta"] == "640 × 360", shown
+        assert shown["href"].endswith("/api/sessions/%d/upload/%s" % (sid, stored[0]["id"])), shown
+        assert shown["download"] == "10-crop.png" and shown["open"] is False, ("the card stays folded", shown)
+        await escape()
+        assert await evaluate(instance, "document.activeElement === toolCard.querySelector('.t-thumb')")
+
+        # unfolded, the result shows the sent image's chip and opens the same picture
+        await click("toolCard.querySelector('.t-sum')")
+        await until(instance, "toolCard.classList.contains('open') && "
+                              "toolCard.querySelector('.tool-images .attach-thumb').naturalWidth === 640")
+        assert await evaluate(instance, "toolCard.querySelectorAll('.tool-body pre').length === 1 && "
+                                        "[...toolCard.querySelectorAll('.tool-body .tb-label')].pop().nextElementSibling"
+                                        ".classList.contains('tool-images')"), "the result is the picture, no [image] text"
+        await click("toolCard.querySelector('.tool-images .attach-view')")
+        await until(instance, "!!imageViewerOpen && imageViewerOpen.ready && imageViewerOpen.name.textContent === '10-crop.png'")
+        await escape()
+        assert await evaluate(instance, "toolCard.classList.contains('open')")
+    finally:
+        await evaluate(instance, """(() => { if (imageViewerOpen) imageViewerOpen.dialog.close();
+            document.querySelectorAll('.iv-ghost').forEach(node => node.remove());
+            if (window.toolShot) toolShot.remove(); delete window.toolShot; delete window.toolCard;
+            delete demoView.toolCards.toolu_shot; delete demoView.toolCards.toolu_text; return true; })()""")
+    print("PASS: a tool's picture opens in the image viewer from the folded card's head and from its result, "
+          "named for the file read, the card never folded by it, its head never grown, focus home on Escape", flush=True)
 
 
 async def question_scroll_checks(instance, capture=False):
@@ -7343,6 +7453,7 @@ async def main(args):
                 return
             if args.image_viewer_only:
                 await image_viewer_checks(instances[0], args.screenshots)
+                await tool_image_checks(instances[0])
                 return
             await backup_schedule_checks(instances[0], app, args.screenshots)
             if args.backup_schedule_only:
@@ -7362,6 +7473,7 @@ async def main(args):
             await thinking_disclosure_checks(instances[0])
             await loop_checks(instances[0], args.screenshots)
             await image_viewer_checks(instances[0], args.screenshots)
+            await tool_image_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])

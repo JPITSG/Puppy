@@ -9,9 +9,14 @@ Normalized transcript event kinds (persisted):
     assistant    {text}
     thinking     {text}
     tool_use     {tool, input, tool_use_id}
-    tool_result  {tool_use_id, content, is_error}
+    tool_result  {tool_use_id, content, is_error, images?}
                  Runner/startup recovery can add interrupted: true when a
                  call's owner ended without a result; its outcome is unknown.
+                 A driver hands the images a tool gave back to the model as
+                 images [{type, data}] (tool_images: base64, as the engine
+                 sent them); the runner stores them in the session's upload
+                 storage and the persisted event names them instead,
+                 images [{id, type, size}] (uploads.store_tool_images).
     info         {subtype, text, ...}
                  engine_retry {attempt, delay} records that the prompt runs
                  again after a back-off because the engine reported a
@@ -1106,6 +1111,54 @@ def clean_env(env: dict) -> dict:
                 "PUPPY_SETUP_CODE"):
             out.pop(k, None)
     return out
+
+
+# Images a tool handed back to the model, at most this many per result and
+# this size each once decoded; the engines' own limits are far below it.
+TOOL_IMAGE_LIMIT = 8
+TOOL_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+_TOOL_IMAGE_DEPTH = 6
+
+
+def tool_images(content) -> list:
+    """The images inside a tool result, in order, as {type, data} with the
+    engine's own base64 data and declared media type (the node decides the
+    real type from the bytes when it stores them).
+
+    One reader for every engine's spelling, at any depth of lists and dicts:
+    the Anthropic block Claude Code sends ({type: image, source: {type:
+    base64, media_type, data}}), the MCP and ACP block ({type: image, data,
+    mimeType}) and ACP's {type: content, content: ...} wrapper around it.
+    Bounded by TOOL_IMAGE_LIMIT and TOOL_IMAGE_MAX_BYTES; anything else,
+    including an image given only by URL, is not an image here."""
+    found = []
+    longest = (TOOL_IMAGE_MAX_BYTES * 4) // 3 + 4
+
+    def visit(value, depth):
+        if len(found) >= TOOL_IMAGE_LIMIT or depth > _TOOL_IMAGE_DEPTH:
+            return
+        if isinstance(value, list):
+            for item in value:
+                visit(item, depth + 1)
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("type") == "image":
+            source = value.get("source")
+            if isinstance(source, dict):
+                data = source.get("data") if source.get("type") == "base64" else None
+                kind = source.get("media_type")
+            else:
+                data, kind = value.get("data"), value.get("mimeType") or value.get("media_type")
+            if isinstance(data, str) and data and len(data) <= longest:
+                found.append({"type": str(kind or "").lower()[:40], "data": data})
+            return
+        for item in value.values():
+            if isinstance(item, (list, dict)):
+                visit(item, depth + 1)
+
+    visit(content, 0)
+    return found
 
 
 def stringify_content(content) -> str:

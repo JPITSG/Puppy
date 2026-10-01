@@ -15249,7 +15249,7 @@ function backgroundTaskUpdateNode(d) {
 /* A result belongs inside its call's card, folded away like every other
    card's body until the reader opens it. `endedAt` is the result event's own
    stamp, which the mark's hover measures the call to. */
-function fillToolResultInto(card, d, endedAt) {
+function fillToolResultInto(card, d, endedAt, source = null) {
   card._toolEndedAt = Number(endedAt);
   toolStateInto(card.querySelector(".t-state"), true, d.is_error);
   card.classList.toggle("err", !!d.is_error);
@@ -15260,7 +15260,64 @@ function fillToolResultInto(card, d, endedAt) {
   if (card._questions && !d.is_error)
     questionMarkChosen(card._questions.list, card._questions.rows, d.content);
   body.appendChild(el("div", "tb-label", d.interrupted ? "interrupted" : d.is_error ? "error" : "result"));
-  body.appendChild(linkifyInto(el("pre"), displayValue(d.content) || "(Empty)"));
+  const images = source ? toolImageItems(source.bid, source.sid, d.images, card._toolInput) : [];
+  /* The engine's text keeps an [image] line where each picture was; the
+     pictures themselves stand in for those lines here. */
+  const text = images.length
+    ? String(displayValue(d.content) || "").split("\n").filter(line => line.trim() !== "[image]").join("\n").trim()
+    : displayValue(d.content);
+  if (text || !images.length) body.appendChild(linkifyInto(el("pre"), text || "(Empty)"));
+  if (images.length) toolImagesInto(card, body, images);
+}
+
+/* ================= tool images =================
+   A picture a tool gave back to the model - Claude reading a screenshot, the
+   browser's or a remote screen's capture - is stored by the node beside the
+   session's uploads (uploads.store_tool_images) and named by the result's
+   `images` ({id, type, size}). The card shows it twice: a small thumbnail in
+   the head, there while the card is folded, and under the result the chip a
+   sent image wears. Either opens the image viewer on the card's pictures. */
+const TOOL_IMAGE_ID = /^t\d{13}-[0-9a-f]{10}$/;
+const TOOL_IMAGE_EXTENSIONS = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif" };
+
+/* The pictures as the viewer takes them, named for download: a file the
+   call read keeps its own name, anything else is image.png, image-2.png. */
+function toolImageItems(bid, sid, images, input) {
+  const list = (Array.isArray(images) ? images : []).filter(image =>
+    image && TOOL_IMAGE_ID.test(String(image.id || "")) && TOOL_IMAGE_EXTENSIONS[image.type]);
+  const path = input && typeof input === "object"
+    ? [input.file_path, input.filePath, input.path].find(value => typeof value === "string" && value)
+    : "";
+  const own = list.length === 1 && path && /\.(png|jpe?g|webp|gif)$/i.test(path) ? baseName(path) : "";
+  return list.map((image, index) => ({
+    url: apiPath(bid, `sessions/${sid}/upload/${image.id}`),
+    name: own || `image${list.length > 1 ? "-" + (index + 1) : ""}${TOOL_IMAGE_EXTENSIONS[image.type]}`,
+    size: Number(image.size) || 0,
+  }));
+}
+
+function toolImagesInto(card, body, images) {
+  const strip = el("div", "attach-strip tool-images");
+  for (const item of images)
+    strip.appendChild(attachmentChipNode({ name: item.name, size: item.size }, item.url, false, { lazy: true }));
+  body.appendChild(strip);
+  const head = card.querySelector(".tool-head");
+  if (!head || head.querySelector(".t-thumb")) return;
+  const view = el("button", "t-thumb");
+  view.type = "button";
+  view.setAttribute("aria-label", images.length === 1 ? `View ${images[0].name}` : `View ${images.length} images`);
+  const img = el("img", "t-thumb-img");
+  img.alt = images[0].name;
+  img.loading = "lazy";
+  img.onerror = () => view.remove();   // gone from the node: the result's own chip says so
+  img.src = images[0].url;
+  view.appendChild(img);
+  if (images.length > 1) view.appendChild(el("span", "t-thumb-more", `+${images.length - 1}`));
+  view.onclick = event => {
+    event.stopPropagation();   // a picture to look at, not the card's fold
+    openImageViewer(images.map((item, index) => ({ url: item.url, name: item.name, thumb: index ? null : img })), 0, img);
+  };
+  head.insertBefore(view, head.querySelector(".t-state"));
 }
 
 /* The task's ending decides the mark, so the call took until that ending. */
@@ -15600,6 +15657,7 @@ function toolCardNode(data, completed = false) {
     body.appendChild(el("div", "tb-label", "input"));
     body.appendChild(linkifyInto(el("pre"), displayValue(d.input)));
   }
+  n._toolInput = d.input;
   head.onclick = () => n.classList.toggle("open");
   n.appendChild(head); n.appendChild(body);
   return n;
@@ -15663,7 +15721,7 @@ function parseAttachmentMarker(line) {
    here so the two presentations cannot drift apart. `url` is the preview to
    show; "" gives the named-file card, which is also what an image falls back
    to once its local preview is gone. */
-function attachmentChipNode(a, url, uploading = false) {
+function attachmentChipNode(a, url, uploading = false, { lazy = false } = {}) {
   const chip = el("span", "attach-chip");
   const asFile = () => {
     chip.className = "attach-chip file" + (uploading ? " uploading" : "");
@@ -15696,6 +15754,7 @@ function attachmentChipNode(a, url, uploading = false) {
     asFile();
     if (remove) chip.appendChild(remove);
   };
+  if (lazy) img.loading = "lazy";   // before src, or the load has already begun
   img.src = url;
   view.appendChild(img);
   chip.appendChild(view);
@@ -20016,7 +20075,7 @@ class SessionView {
           /* Paging back reunites the pair: the result this call was missing
              moves into it and stops standing alone. */
           for (const orphan of this.orphanResults.get(d.tool_use_id) || []) {
-            fillToolResultInto(n, orphan.data, orphan.ts);
+            fillToolResultInto(n, orphan.data, orphan.ts, this.tab);
             orphan.node.remove();
           }
           this.orphanResults.delete(d.tool_use_id);
@@ -20026,13 +20085,13 @@ class SessionView {
       }
       case "tool_result": {
         const card = d.tool_use_id && this.toolCards[d.tool_use_id];
-        if (card) { fillToolResultInto(card, d, ev.ts); return null; }
+        if (card) { fillToolResultInto(card, d, ev.ts, this.tab); return null; }
         /* The call is outside this window - the newest page starts partway
            through a turn, or the reader jumped into history - so the result
            stands on its own until paging back brings its card in. It is still
            a result: folded away like any other, never opened for the reader. */
         const n = toolCardNode({tool: d.tool || "tool_result", is_error: d.is_error}, true);
-        fillToolResultInto(n, d, ev.ts);
+        fillToolResultInto(n, d, ev.ts, this.tab);
         if (d.tool_use_id) {
           const waiting = this.orphanResults.get(d.tool_use_id) || [];
           waiting.push({node: n, data: d, ts: ev.ts});

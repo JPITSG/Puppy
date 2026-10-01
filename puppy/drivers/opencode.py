@@ -23,7 +23,7 @@ from urllib.parse import quote
 from puppy import __version__
 from puppy.drivers import base as driver_base
 from puppy.drivers import messages
-from puppy.drivers.base import Driver, clean_env
+from puppy.drivers.base import Driver, clean_env, tool_images
 from puppy.drivers.opencode_compact import NativeCompaction, serve_command
 from puppy.user_paths import service_home
 
@@ -328,6 +328,8 @@ def _content_text(value) -> str:
             return "{}\n--- before\n{}\n+++ after\n{}".format(path, old, new).strip()
         if kind == "content":
             return _content_text(value.get("content"))
+        if kind == "image":
+            return "[image]"   # the picture itself travels as the result's images
         try:
             return json.dumps(value, ensure_ascii=False, indent=2)
         except Exception:
@@ -657,9 +659,12 @@ class OpenCodeDriver(Driver):
             if output is None:
                 output = update.get("content")
             content = _content_text(output)[:20000]
-            actions.append({"a": "event", "kind": "tool_result", "data": {
-                "tool": tool, "tool_use_id": tool_id, "content": content,
-                "is_error": status in ("failed", "error")}})
+            data = {"tool": tool, "tool_use_id": tool_id, "content": content,
+                    "is_error": status in ("failed", "error")}
+            images = tool_images(update.get("content")) or tool_images(update.get("rawOutput"))
+            if images:
+                data["images"] = images
+            actions.append({"a": "event", "kind": "tool_result", "data": data})
             record["finished"] = True
         return actions
 
