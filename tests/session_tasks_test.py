@@ -426,6 +426,7 @@ async def toggle_api(app, parent, child):
         await configured_creation_api(client, parent)
         await resolution_api(client, parent)
         await remove_api(client, app, parent)
+        await busy_creation_api(client, app)
         for value in (None, 'true', 0, 1, [], {}):
             response = await client.patch(route, json={'tasks_digest': value})
             assert response.status == 400, await response.text()
@@ -557,6 +558,189 @@ async def remove_api(client, app, parent):
         assert (await client.post(route, json={'fold': True})).status == 409
         assert len(tasks.folded(parent, 64)) == before + 1
     print('PASS: ' + app['puppy_role'] + ' fold route validation, snapshot gate, archive row and single removal')
+
+
+def committed_project(name):
+    """A scratch repository whose one commit is all it holds."""
+    project = ROOT / name
+    project.mkdir()
+    tasks._git(project, 'init', '--quiet')
+    (project / 'a.txt').write_text('committed a\n')
+    tasks._git(project, 'add', '-A')
+    tasks._git(project, 'commit', '-qm', 'Initial')
+    return project
+
+
+def drop_tasks(ids):
+    for tid in ids:
+        runner.hub(tid).status = 'idle'
+        workspaces.remove_temporary(db.get_session(tid))
+        runner.drop_hub(tid)
+        db.delete_session(tid)
+
+
+async def busy_main_creation():
+    """A turn working in the project, or waiting in its queue, no longer
+    blocks a new task while git says the project holds nothing uncommitted
+    or unpushed: the task starts from the last commit, which git checks out
+    itself, so the files the turn is writing are never read. Anything git
+    still holds - or git not answering - keeps the old refusal, naming why."""
+    from puppy import session_git
+    project = committed_project('busy-project')
+    (project / '.gitignore').write_text('CLAUDE.md\nbuild/\n')
+    (project / 'tool.sh').write_text('#!/bin/sh\n')
+    (project / 'tool.sh').chmod(0o755)
+    (project / 'link').symlink_to('a.txt')
+    (project / 'nested').mkdir()
+    (project / 'nested' / 'b.txt').write_text('committed b\n')
+    tasks._git(project, 'add', '-A')
+    tasks._git(project, 'commit', '-qm', 'More')
+    (project / 'CLAUDE.md').write_text('ignored notes\n')
+    (project / 'build').mkdir()
+    (project / 'build' / 'out').write_text('artifact\n')
+    parent = db.create_session('Busy project', 'codex', str(project), '', '', '#e0784f', 'workspace-write')
+    hub, created, starts = runner.hub(parent), [], []
+    copy_project = tasks._copy_project
+
+    def in_flight(root, path, committed=False):
+        # the running turn writes Main's files after the look said clean
+        starts.append(committed)
+        if committed:
+            (project / 'a.txt').write_text('edit in flight\n')
+            (project / 'new.txt').write_text('new in flight\n')
+        return copy_project(root, path, committed)
+
+    def settle():
+        tasks._git(project, 'checkout', '--', 'a.txt')
+        (project / 'new.txt').unlink(missing_ok=True)
+
+    async def create(key):
+        try:
+            row = await tasks.create(parent, {'prompt': 'Task ' + key, 'request_id': key})
+        finally:
+            settle()
+        created.append(row['id'])
+        return Path(row['cwd'])
+
+    def mark():
+        return session_git.record(str(project))
+
+    try:
+        with patch.object(runner.SessionHub, '_start_turn', start), \
+                patch.object(tasks, '_copy_project', in_flight):
+            hub.status = 'running'
+            copy = await create('clean')
+            assert starts == [True]
+            assert (copy / 'a.txt').read_text() == 'committed a\n' and not (copy / 'new.txt').exists()
+            assert (copy / 'nested' / 'b.txt').read_text() == 'committed b\n'
+            assert os.readlink(copy / 'link') == 'a.txt' and os.access(copy / 'tool.sh', os.X_OK)
+            assert (copy / 'CLAUDE.md').read_text() == 'ignored notes\n' and not (copy / 'build').exists()
+            assert tasks._git(copy, 'status', '--porcelain') == b''
+            assert tasks._git(copy, 'remote') == b''
+            assert tasks._git(copy, 'rev-parse', 'refs/puppy/base').decode().strip() == \
+                tasks.record(created[-1])['base']
+            # the look is the mark's own, published like a focus refresh
+            assert mark()['changes'] == 0 and mark()['unpushed'] is None
+            assert not tasks._busy_roots
+            # uncommitted work refuses, and the mark says so at once
+            (project / 'a.txt').write_text('uncommitted\n')
+            await rejected(create('dirty'), 'Main or another session is using this project and it has '
+                           'uncommitted changes; try again when it is idle, or once that work is '
+                           'committed and pushed')
+            assert mark()['changes'] == 1
+            (project / 'untracked.txt').write_text('new\n')
+            await rejected(create('untracked'), 'it has uncommitted changes;')
+            (project / 'untracked.txt').unlink()
+            # commits no remote holds refuse too; pushed, the task starts
+            remote = ROOT / 'busy-remote.git'
+            tasks._git(ROOT, 'init', '--quiet', '--bare', str(remote))
+            tasks._git(project, 'remote', 'add', 'origin', str(remote))
+            await rejected(create('unpushed'), 'it has unpushed commits;')
+            assert mark()['unpushed'] == 2
+            (project / 'a.txt').write_text('uncommitted\n')
+            await rejected(create('both'), 'it has uncommitted changes and unpushed commits;')
+            tasks._git(project, 'push', '--quiet', 'origin', 'HEAD:refs/heads/main')
+            assert (await create('pushed') / 'a.txt').read_text() == 'committed a\n'
+            assert starts[-1] is True and mark()['unpushed'] == 0
+            # a prompt waiting in the queue is a busy project as well
+            hub.status, hub.queue = 'idle', ['Later']
+            await create('queued')
+            assert starts[-1] is True
+            (project / 'a.txt').write_text('uncommitted\n')
+            await rejected(create('queued-dirty'), 'it has uncommitted changes;')
+            # an idle project is still copied as it stands, uncommitted work included
+            hub.queue = []
+            (project / 'a.txt').write_text('uncommitted\n')
+            copy = await create('idle')
+            assert starts[-1] is False and (copy / 'a.txt').read_text() == 'uncommitted\n'
+            # a session busy in another project is no business of this one
+            elsewhere = committed_project('busy-elsewhere')
+            other = db.create_session('Elsewhere', 'codex', str(elsewhere), '', '', '#e0784f', 'workspace-write')
+            runner.hub(other).status = 'running'
+            try:
+                assert not tasks._project_busy(str(project)) and tasks._project_busy(str(elsewhere))
+                assert not tasks._project_busy(str(elsewhere), exclude=other)
+            finally:
+                runner.hub(other).status = 'idle'
+                runner.drop_hub(other)
+                db.delete_session(other)
+            hub.status = 'running'
+            # git not answering is no answer: refused with its reason
+            unchecked = {'repo': True, 'checked_at': 0, 'changes': None, 'unpushed': None,
+                         'error': 'git did not answer within 30 seconds'}
+            with patch.object(session_git, 'refresh', AsyncMock(return_value=unchecked)):
+                await rejected(create('unchecked'), 'Main or another session is using this project; try '
+                               'again when it is idle · Git could not check it for uncommitted work: '
+                               'git did not answer within 30 seconds')
+            # the commit's checkout keeps the copy's bounds and symlink rule,
+            # and a refused copy leaves nothing behind
+            spare = set(os.listdir(workspaces.temporary_root()))
+            with patch.object(tasks, 'COPY_FILES', 4):
+                await rejected(create('many'), 'too many files')
+            with patch.object(tasks, 'COPY_BYTES', 24):
+                await rejected(create('large'), '512 MiB')
+            (project / 'escape').symlink_to(str(ROOT))
+            tasks._git(project, 'add', 'escape')
+            tasks._git(project, 'commit', '-qm', 'Escape')
+            tasks._git(project, 'push', '--quiet', 'origin', 'HEAD:refs/heads/main')
+            await rejected(create('escape'), 'relative symlinks within the project: escape')
+            assert set(os.listdir(workspaces.temporary_root())) == spare
+            assert starts[-3:] == [True, True, True] and not tasks._busy_roots
+    finally:
+        hub.status, hub.queue = 'idle', []
+        drop_tasks(created)
+        runner.drop_hub(parent)
+        db.delete_session(parent)
+    print('PASS: a task starts beside a running or queued turn from a clean, pushed project\'s last '
+          'commit (never the files in flight, notes kept, bounds and symlink rule held); '
+          'uncommitted, unpushed or unchecked work refuses with its cause; idle copies unchanged')
+
+
+async def busy_creation_api(client, app):
+    """The same over either runtime's route: a clean project's task starts
+    beside a running Main, uncommitted work is refused naming it."""
+    project = committed_project('busy-http-' + app['puppy_role'])
+    parent = db.create_session('Busy over HTTP', 'codex', str(project), '', '', '#e0784f', 'workspace-write')
+    route = '/api/sessions/{}/tasks'.format(parent)
+    created = []
+    try:
+        with patch.object(runner.SessionHub, '_start_turn', start):
+            runner.hub(parent).status = 'running'
+            response = await client.post(route, json={'prompt': 'Beside a turn', 'request_id': 'busy-clean'})
+            data = await response.json()
+            assert response.status == 200, data
+            created.append(data['session']['id'])
+            assert (Path(data['session']['cwd']) / 'a.txt').read_text() == 'committed a\n'
+            (project / 'a.txt').write_text('uncommitted\n')
+            response = await client.post(route, json={'prompt': 'Beside a dirty turn', 'request_id': 'busy-dirty'})
+            data = await response.json()
+            assert response.status == 409 and 'it has uncommitted changes;' in data['error'], data
+    finally:
+        runner.hub(parent).status = 'idle'
+        drop_tasks(created)
+        runner.drop_hub(parent)
+        db.delete_session(parent)
+    print('PASS: ' + app['puppy_role'] + ' route starts a task beside a running Main from a clean project')
 
 
 async def configured_creation_api(client, parent):
@@ -735,6 +919,7 @@ async def main():
     config.ensure_dirs()
     auto_titles()
     await conflict_resolution()
+    await busy_main_creation()
     # Match developing Puppy through itself: its private data/workspaces and
     # independent task repositories are physically inside Main's project.
     project = ROOT / 'project'
@@ -867,7 +1052,8 @@ async def main():
         assert str(project) in tasks._busy_roots
         tasks._busy_roots.clear()
         runner.hub(parent).status = 'running'
-        await rejected(tasks.create(parent, {'prompt':'C','request_id':'c'}),'idle')
+        await rejected(tasks.create(parent, {'prompt':'C','request_id':'c'}),
+                       'using this project and it has uncommitted changes; try again when it is idle')
         runner.hub(parent).status = 'idle'
         tasks.validate_persisted(db.connect())
         rows = runner.sessions_payload()['sessions']

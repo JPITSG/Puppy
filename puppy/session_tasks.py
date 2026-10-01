@@ -49,6 +49,13 @@ _busy_roots = set()
 _locks = {}
 _project_locks = {}
 MAX_PATCH = 16 * 1024 * 1024
+# The most a task copy holds, whether copied from Main's working files or
+# checked out from its last commit.
+COPY_FILES = 50000
+COPY_BYTES = 512 * 1024 * 1024
+# Project notes a copy keeps even when the project ignores them.
+NOTES = ("AGENTS.md", "CLAUDE.md")
+BUSY_PROJECT = "Main or another session is using this project"
 
 
 class TaskError(ValueError):
@@ -499,13 +506,44 @@ def _project_contains(root, path):
                 os.path.commonpath([managed, root]) != managed)
 
 
-def _idle_project(root, exclude=0):
+def _project_busy(root, exclude=0):
+    """Whether a turn is running, or waiting in a queue, anywhere in the
+    project: the engine may be writing its files."""
     from puppy import runner
     for sid, hub in runner._hubs.items():
-        session = db.get_session(sid)
-        if session and sid != exclude and _project_contains(root, os.path.realpath(session["cwd"])) and \
-                (hub.status == "running" or hub.queue):
-            raise TaskError("Main or another session is using this project; try again when it is idle")
+        if sid != exclude and (hub.status == "running" or hub.queue):
+            session = db.get_session(sid)
+            if session and _project_contains(root, os.path.realpath(session["cwd"])):
+                return True
+    return False
+
+
+def _idle_project(root, exclude=0):
+    if _project_busy(root, exclude):
+        raise TaskError(BUSY_PROJECT + "; try again when it is idle")
+
+
+async def _from_commit(parent, root):
+    """Whether a new task starts from the project's last commit rather than
+    a copy of its working files. An idle project is copied as it stands. A
+    turn working in the project, or waiting in its queue, may be writing
+    those files, so a task starts beside it only when a fresh look says the
+    repository holds nothing uncommitted or unpushed - the plain Git mark.
+    The last commit is then all Main has, and the copy is git's own checkout
+    of it, which no edit in flight can tear. The look also brings the mark
+    up to date, so a refusal and the sidebar agree."""
+    if not _project_busy(root):
+        return False
+    git = await session_git.refresh(parent, fresh=True) or {}
+    if git.get("repo") is not True or git.get("error") or type(git.get("changes")) is not int:
+        raise TaskError(BUSY_PROJECT + "; try again when it is idle · Git could not check it "
+                        "for uncommitted work" + (": " + git["error"] if git.get("error") else ""))
+    held = " and ".join(text for count, text in ((git["changes"], "uncommitted changes"),
+                                                 (git.get("unpushed"), "unpushed commits")) if count)
+    if held:
+        raise TaskError(BUSY_PROJECT + " and it has " + held +
+                        "; try again when it is idle, or once that work is committed and pushed")
+    return True
 
 
 def overlaps_busy(root):
@@ -580,31 +618,71 @@ def reset_blocker(session):
     return None
 
 
-def _copy_project(root, destination):
+def _checkout_size(destination):
+    """The bytes of a clone's own checkout of the last commit, held to the
+    bounds and the symlink rule the working-file copy enforces as it goes:
+    git wrote these files, so no copy loop has seen them."""
+    top = os.path.realpath(destination)
+    files = total = 0
+    folders = [top]
+    while folders:
+        with os.scandir(folders.pop()) as entries:
+            for entry in entries:
+                if entry.is_symlink():
+                    link = os.readlink(entry.path)
+                    resolved = os.path.realpath(os.path.join(os.path.dirname(entry.path), link))
+                    if os.path.isabs(link) or os.path.commonpath([top, resolved]) != top:
+                        raise TaskError("Task copies require relative symlinks within the project: " +
+                                        os.path.relpath(entry.path, top))
+                elif entry.is_dir(follow_symlinks=False):
+                    if entry.path != os.path.join(top, ".git"):
+                        folders.append(entry.path)
+                    continue
+                else:
+                    total += entry.stat(follow_symlinks=False).st_size
+                files += 1
+                if files > COPY_FILES:
+                    raise TaskError("Project has too many files for a task copy")
+                if total > COPY_BYTES:
+                    raise TaskError("Project working files exceed the 512 MiB task-copy limit")
+    return total
+
+
+def _copy_project(root, destination, committed=False):
+    """Clone the project into ``destination`` and give it Main's files: its
+    working files as they stand, or with ``committed`` its last commit -
+    the clone's own checkout, which reads nothing a running turn may be
+    writing - plus the notes either way. Answers the starting commit."""
     stage = _git(root, "ls-files", "--stage", "-z")
     if any(entry.startswith(b"160000 ") for entry in stage.split(b"\0")):
         raise TaskError("Submodules need to be handled in their own session")
     _git(root, "clone", "--quiet", "--no-local", "--", root, destination, timeout=120)
     _git(destination, "remote", "remove", "origin")
-    tracked = _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
-    paths = list(dict.fromkeys(os.fsdecode(path) for path in tracked if path))
-    # Project conventions remain available even when the notes are gitignored.
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        if os.path.lexists(os.path.join(root, name)) and name not in paths:
-            paths.append(name)
-    if len(paths) > 50000:
-        raise TaskError("Project has too many files for a task copy")
-    # Start with an empty owned tree, retaining only Git's independent objects.
-    # This handles deleted files and directory/file changes without ever writing
-    # through a symlink checked out by clone.
-    for entry in Path(destination).iterdir():
-        if entry.name == ".git":
-            continue
-        if entry.is_symlink() or not entry.is_dir():
-            entry.unlink()
-        else:
-            shutil.rmtree(entry)
-    total = 0
+    if committed:
+        total = _checkout_size(destination)
+        # A note the commit holds is already there; an ignored one is not.
+        paths = [name for name in NOTES if os.path.lexists(os.path.join(root, name)) and
+                 not os.path.lexists(os.path.join(destination, name))]
+    else:
+        total = 0
+        tracked = _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
+        paths = list(dict.fromkeys(os.fsdecode(path) for path in tracked if path))
+        # Project conventions remain available even when the notes are gitignored.
+        for name in NOTES:
+            if os.path.lexists(os.path.join(root, name)) and name not in paths:
+                paths.append(name)
+        if len(paths) > COPY_FILES:
+            raise TaskError("Project has too many files for a task copy")
+        # Start with an empty owned tree, retaining only Git's independent objects.
+        # This handles deleted files and directory/file changes without ever writing
+        # through a symlink checked out by clone.
+        for entry in Path(destination).iterdir():
+            if entry.name == ".git":
+                continue
+            if entry.is_symlink() or not entry.is_dir():
+                entry.unlink()
+            else:
+                shutil.rmtree(entry)
     from puppy.workspace_sync import _RootWalker, validate_relpath
     walker = _RootWalker(root)
     for rel in paths:
@@ -643,7 +721,7 @@ def _copy_project(root, destination):
                 target.symlink_to(link)
             elif stat.S_ISREG(info.st_mode):
                 total += info.st_size
-                if total > 512 * 1024 * 1024:
+                if total > COPY_BYTES:
                     raise TaskError("Project working files exceed the 512 MiB task-copy limit")
                 source_fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
                 with os.fdopen(source_fd, "rb") as source, target.open("wb") as output:
@@ -1027,14 +1105,14 @@ async def create(parent_id, args):
         except uploads.AttachmentError as exc:
             raise TaskError(str(exc))
         root = await operations.to_thread(_repo, parent)
-        _idle_project(root)
+        committed = await _from_commit(parent, root)
         if overlaps_busy(root):
             raise TaskError("The project is preparing or applying another task")
         _busy_roots.add(root)
         path, sid = "", None
         try:
             path = workspaces.create_temporary()
-            base = await operations.to_thread(_copy_project, root, path)
+            base = await operations.to_thread(_copy_project, root, path, committed)
             rows = db.get_events(parent_id, limit=40)
             context = "\n\n".join("{}: {}".format(row["kind"], row["data"].get("text", ""))
                                     for row in rows if row["kind"] in ("user", "assistant"))[-22000:]

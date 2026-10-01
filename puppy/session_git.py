@@ -550,13 +550,16 @@ def _broadcast() -> None:
     runner.broadcast_sessions()
 
 
-async def refresh(session: dict) -> Optional[dict]:
+async def refresh(session: dict, fresh: bool = False) -> Optional[dict]:
     """Re-check one session's directory now (a console focused it) and
-    publish the list if its mark changed."""
+    publish the list if its mark changed. ``fresh`` is for a caller about to
+    rely on the answer - a task starting beside a running turn: an
+    inspection already under way may have read the directory before it
+    asked, so it is not joined (see _check)."""
     cwd = str((session or {}).get("cwd") or "")
     if not cwd:
         return None
-    entry = await _check(cwd)
+    entry = await _check(cwd, fresh=fresh)
     if _store(cwd, entry):
         _broadcast()
     return _public(entry)

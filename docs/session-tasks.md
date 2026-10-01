@@ -179,9 +179,22 @@ untracked files. Untracked ignored files/dependencies are omitted; root AGENTS.m
 CLAUDE.md are retained. Submodules and absolute or outside-project symlinks are
 refused. Each source snapshot is bounded to 50,000 files / 512 MiB, reviews to
 16 MiB, and each session to 64 tasks. Main and other Puppy sessions working in the
-source directory must be idle during creation, refresh and apply. Other isolated tasks can
+source directory must be idle during refresh and apply. Other isolated tasks can
 continue running. External editors remain the user's responsibility; these
 working copies are not an OS security sandbox.
+
+Creation does not wait for an idle project when Git says it holds nothing
+uncommitted or unpushed - the plain Git mark. While a turn runs or a prompt
+waits in a queue anywhere in the project, a fresh look at the repository (the
+mark's own check, published like a focus refresh) decides: with no changes and
+no commit missing from every remote (a repository without remotes has nothing
+to push), the task starts from the last commit. Git checks that commit out into
+the clone itself, so a file the running turn is writing is never read; only an
+ignored root AGENTS.md or CLAUDE.md is copied from Main, and the checkout is held
+to the same file, size and symlink limits. Uncommitted changes, unpushed commits
+or a repository Git could not read keep the refusal, which names the cause. An
+idle project is still copied from its working files, uncommitted changes
+included, and no look is taken for it.
 
 Task conversations, grouping and Git working copies are covered by the existing
 full backup/restore. Copies live at `<data-dir>/workspaces/session-<random>/`
