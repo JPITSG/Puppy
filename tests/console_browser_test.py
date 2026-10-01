@@ -122,8 +122,18 @@ def demo_token_usage(now=None):
     now = now or time.time()
     sessions = [row for row in db.list_sessions() if not session_tasks.record(row["id"])]
     rows = []
+    today = time.localtime(now)
+
+    def midnight(back):
+        # mktime normalises the day, across a month's end or a DST change
+        return time.mktime((today.tm_year, today.tm_mon, today.tm_mday - back, 0, 0, 0, 0, 0, -1))
+
     for day in range(DEMO_USAGE_DAYS):
-        start = now - (DEMO_USAGE_DAYS - 1 - day) * 86400
+        # every day's work inside that local day and never after now, so a
+        # chart of the last N days has N columns at any hour, midnight included
+        back = DEMO_USAGE_DAYS - 1 - day
+        start = midnight(back)
+        room = min(midnight(back - 1), now) - start
         weekday = time.localtime(start).tm_wday
         weight = 0.35 if weekday >= 5 else 1.0
         for index, session in enumerate(sessions):
@@ -131,7 +141,7 @@ def demo_token_usage(now=None):
             engine = session["engine"]
             models = DEMO_USAGE_MODELS.get(engine, ("preview-standard",))
             for turn in range(turns):
-                at = start - 3600 * (2 + (turn * 5 + index) % 9)
+                at = start + room * (2 + (turn * 5 + index) % 9) / 12
                 model = models[-1] if day % 3 == 0 else models[0]
                 scale = 1 + ((day * 13 + turn * 7 + index * 3) % 10) / 4
                 ref = "turn:{}:{}".format(session["id"], day * 100 + turn)
@@ -145,7 +155,7 @@ def demo_token_usage(now=None):
                                                  "preview-helper", {"input": 2400, "output": 300,
                                                  "cache_read": 0, "cache_write": 0, "reasoning": 0}))
         if day % 4 == 0:
-            rows.append(token_usage._row("spawn:title{}:{}".format(day, int(start)), start - 1800,
+            rows.append(token_usage._row("spawn:title{}:{}".format(day, int(start)), start + room / 2,
                                          None, "title", "claude", "preview-helper",
                                          {"input": 600, "output": 20, "cache_read": 0,
                                           "cache_write": 0, "reasoning": 0}))
@@ -249,8 +259,33 @@ async def until(instance, expression):
     raise AssertionError("browser condition timed out: " + expression)
 
 
+def settle_viewports(instance):
+    """An emulated size reaches the page after the CDP call returns, and its
+    resize event - which closes every open menu and float - a frame after
+    that, so a press made at once can open a menu the late resize then shuts.
+    Every size change on the console page returns once the page has the size
+    and two frames have passed (a phone's layout width can differ from the
+    device's, so a size the page never reports only costs the wait)."""
+    call = instance.call
+
+    async def settled(method, params=None, **kwargs):
+        answer = await call(method, params, **kwargs)
+        if method == "Emulation.setDeviceMetricsOverride" and \
+                kwargs.get("session") == instance.page_session:
+            end = time.monotonic() + 2
+            expected = "innerWidth===%d && innerHeight===%d" % (params["width"], params["height"])
+            while time.monotonic() < end and not await evaluate(instance, expected):
+                await asyncio.sleep(.03)
+            await evaluate(instance, """new Promise(r=>{ setTimeout(r,500,true);
+                requestAnimationFrame(()=>requestAnimationFrame(()=>r(true))); })""")
+        return answer
+
+    instance.call = settled
+
+
 async def open_console(instance, url, sid):
     await instance.ensure_started()
+    settle_viewports(instance)
     await instance.call("Page.navigate", {"url": url}, session=instance.page_session)
     await until(instance, "typeof fetch === 'function' && location.pathname === '/' && document.querySelector('input') !== null")
     await evaluate(instance, "fetch('/api/auth/login', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'mira',password:'preview-password'})}).then(r=>r.json())")
@@ -970,6 +1005,11 @@ async def loop_checks(instance, capture=False):
         await evaluate(instance, "if(window.loopMedia) {window.matchMedia=loopMedia;delete window.loopMedia;} true")
         await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
             "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        # later lanes count the fixture's five sessions
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+        runner.broadcast_sessions()
+        await until(instance, "!findSessionMeta(0,%d)" % sid)
     print("PASS: @Loop shared/per-iteration choices, desktop/phone in both themes, Back/Forward cleanup, validation, keyboard send, busy-session ordering and three configured turns", flush=True)
 
 
@@ -979,7 +1019,14 @@ async def thinking_disclosure_checks(instance):
         demoView.setStatus('Thinking…'); demoView.appendLive('thinking','');
         demoView.flushLive(); demoView.scrollBottom(true); true""")
 
+    # A tap's click is synthesised after touchEnd returns: count the clicks
+    # that reach the page so every reading waits for the one it follows.
+    await evaluate(instance, """window.thinkClicks=0;
+        window.thinkCount=()=>window.thinkClicks++;
+        document.addEventListener('click', thinkCount, true); true""")
+
     async def press(target, touch=False, update=True):
+        clicks = await evaluate(instance, "thinkClicks")
         point = await evaluate(instance, """(() => {
             const n=demoView.liveEl.querySelector(%s);
             n.scrollIntoView({block:'nearest'});
@@ -1000,6 +1047,7 @@ async def thinking_disclosure_checks(instance):
         else:
             await instance.call("Input.dispatchMouseEvent", dict(point, type="mouseReleased", button="left", clickCount=1),
                                 session=instance.page_session)
+        await until(instance, "thinkClicks > %d" % clicks)
 
     try:
         for touch in (False, True):
@@ -1030,7 +1078,8 @@ async def thinking_disclosure_checks(instance):
                     **({"text": "\r" if key == "Enter" else " "} if kind == "keyDown" else {})}, session=instance.page_session)
             assert await evaluate(instance, "demoView.liveEl.open") == (key == "Enter"), (key, "keyboard toggle")
     finally:
-        await evaluate(instance, "demoView.clearLive(); demoView.status='idle'; demoView.setStatus(''); true")
+        await evaluate(instance, """demoView.clearLive(); demoView.status='idle'; demoView.setStatus('');
+            document.removeEventListener('click', thinkCount, true); true""")
         await instance.call("Emulation.setTouchEmulationEnabled", {"enabled": False}, session=instance.page_session)
         await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
             "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
@@ -1165,6 +1214,10 @@ async def show_focus_checks(instance):
             "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
         await evaluate(instance, "window.demoView=sessionViewFor(0,1); true")
     await evaluate(instance, "closeTab('s:0:%d'); true" % sid)
+    runner.drop_hub(sid)
+    db.delete_session(sid)
+    runner.broadcast_sessions()
+    await until(instance, "!findSessionMeta(0,%d)" % sid)
     print("PASS: switching sessions and tabs on a touch screen leaves the prompt box and its keyboard alone until tapped; a mouse device still lands in the box", flush=True)
     print("PASS: leaving the app and reopening a saved draft puts the caret at its visible end on desktop and phone; reconnects preserve selections", flush=True)
 
@@ -2813,7 +2866,8 @@ async def task_refresh_checks(instance):
             before = await evaluate(instance, "({requests:refreshRequests, history:history.length})")
             await press(view + ".root.querySelector('.menu-btn')")
             labels = await evaluate(instance, "[...document.querySelectorAll('.menu button')].map(b=>b.textContent)")
-            assert labels.index("Refresh from Main") == labels.index("Review changes") + 1, labels
+            assert "Refresh from Main" in labels and \
+                labels.index("Refresh from Main") == labels.index("Review changes") + 1, labels
             await press(row("Refresh from Main"))
             await until(instance, "refreshRequests===%d && !refreshingTasks.has('0:%d') && "
                                   "document.querySelector('#toasts').textContent.includes('Refreshed from Main')" %
@@ -3799,8 +3853,10 @@ async def text_inset_checks(instance):
         "the host Chromium does not trim leading (text-box needs 133 or newer)"
     await evaluate(instance, """(() => {
         window.insetProbe=el('div');
+        // room under the last child: a capture's margin never reaches past
+        // the probe into whatever the page draws beneath it
         insetProbe.style.cssText='position:fixed;left:24px;top:24px;width:360px;z-index:2147483647;'+
-            'display:flex;flex-direction:column;gap:14px;background:var(--bg)';
+            'display:flex;flex-direction:column;gap:14px;padding-bottom:24px;background:var(--bg)';
         document.body.appendChild(insetProbe);
         const place=(node,probe,css,parent)=>{
             node.dataset.probe=probe; node.style.cssText+=';'+css;
@@ -3879,7 +3935,9 @@ async def text_inset_checks(instance):
             const bg=margin?px(1,1):px(ox+inner+6,oy+1);
             const inside=(dx,dy)=>{
                 if (margin) return true;
-                if (dx<0||dy<0||dy>=innerH) return false;
+                // a box off the device grid has its border snapped onto it:
+                // the device pixel just inside the border edge is border
+                if (dx<step||dy<step||dy>=innerH-step) return false;
                 if (dx<inner&&(dy<inner||dy>=innerH-inner)) {   // a corner: only well inside the curve
                     const cx=inner-dx, cy=dy<inner?inner-dy:dy-(innerH-inner);
                     return cx*cx+cy*cy<(inner-1.5)*(inner-1.5);
@@ -5368,8 +5426,10 @@ async def terminal_io_checks(console):
         await evaluate(console, "window.ioView=state.views[%s]; true" % json.dumps(tab_id))
         await until(console, "!!ioView.term && !!ioView.dataSub")
         await evaluate(console, """window.ioText = () => {
+            // the whole screen and the 50 lines above it: 'ready' is the
+            // first row, which a screen taller than 50 rows still shows
             const b=ioView.term.buffer.active, lines=[];
-            for (let i=Math.max(0,b.length-50);i<b.length;i++)
+            for (let i=Math.max(0,b.length-ioView.term.rows-50);i<b.length;i++)
                 lines.push(b.getLine(i).translateToString(true));
             return lines.join('\\n');
         }; true""")

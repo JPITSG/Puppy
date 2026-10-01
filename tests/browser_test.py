@@ -614,9 +614,12 @@ def check_free_identifiers(ui_source: str) -> None:
 
     A name is fine when the method takes it as a parameter or declares it
     anywhere in its own body (including nested closures); only a genuinely
-    free reference is reported."""
+    free reference is reported. Comments are prose, not references: "a saved
+    anchor." in a comment names no variable."""
     import re
-    lines = ui_source.split("\n")
+    lines = [re.sub(r"(?:^|(?<=\s))//.*$", "", line)
+             for line in re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"),
+                                ui_source, flags=re.S).split("\n")]
     watched = ("tab", "session", "view", "anchor", "event")
     offenders = []
     for index, line in enumerate(lines):
@@ -2873,6 +2876,12 @@ class Target {
     return {width:parseFloat(document.documentElement.style.value("--side-w")) || 0};
   }
   get offsetWidth() { return this.getBoundingClientRect().width; }
+  // The sidebar's contents hold the open width while the column slides.
+  querySelector(selector) {
+    if (this.id !== "side" || selector !== ".side-content") return null;
+    return {getBoundingClientRect:() => ({width:
+      parseFloat(document.documentElement.style.value("--side-w-open")) || 0})};
+  }
 }
 const nodes = {app:new Target("app"), side:new Target("side"),
   "side-resize":new Target("side-resize"), "drawer-edge":new Target("drawer-edge")};
@@ -5590,8 +5599,12 @@ console.log(JSON.stringify({
     head_start = ui_source.index("  updateHead() {")
     head_end = ui_source.index("\n  updateRunState()", head_start)
     head = ui_source[head_start:head_end]
-    assert "const identityText = `${backendName(this.tab.bid)} · ${engineText} · ${modelText}`;" \
-        in head
+    # backend · engine · model, the model its own span so a stand-in can wear
+    # the warn tone, and the whole line read back as the chip's identity
+    assert "label.textContent = `${backendName(this.tab.bid)} · ${engineText} · `;" in head
+    assert ('label.appendChild(el("span", "eng-model" + (sub ? " substituted" : ""), '
+            'modelText));') in head
+    assert "const identityText = label.textContent;" in head
     assert "cwd.textContent = workspaceLocationLabel(s, this.tab.bid);" in head
     assert "workspaceLocationTitle(s, this.tab.bid)" in head
     assert 'querySelector(".chip.be")' not in head
