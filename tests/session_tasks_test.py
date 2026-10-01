@@ -581,10 +581,11 @@ def drop_tasks(ids):
 
 async def busy_main_creation():
     """A turn working in the project, or waiting in its queue, no longer
-    blocks a new task while git says the project holds nothing uncommitted
-    or unpushed: the task starts from the last commit, which git checks out
-    itself, so the files the turn is writing are never read. Anything git
-    still holds - or git not answering - keeps the old refusal, naming why."""
+    blocks a new task while git says the work tree has no uncommitted
+    changes, whatever a remote holds: the task starts from the last commit,
+    which git checks out itself, so the files the turn is writing are never
+    read. Uncommitted changes - or git not answering - keep the old refusal,
+    naming why."""
     from puppy import session_git
     project = committed_project('busy-project')
     (project / '.gitignore').write_text('CLAUDE.md\nbuild/\n')
@@ -645,23 +646,20 @@ async def busy_main_creation():
             # uncommitted work refuses, and the mark says so at once
             (project / 'a.txt').write_text('uncommitted\n')
             await rejected(create('dirty'), 'Main or another session is using this project and it has '
-                           'uncommitted changes; try again when it is idle, or once that work is '
-                           'committed and pushed')
+                           'uncommitted changes; try again when it is idle, or once they are committed')
             assert mark()['changes'] == 1
             (project / 'untracked.txt').write_text('new\n')
             await rejected(create('untracked'), 'it has uncommitted changes;')
             (project / 'untracked.txt').unlink()
-            # commits no remote holds refuse too; pushed, the task starts
+            # only the local state counts: commits no remote holds are fine,
+            # and a refusal never names them
             remote = ROOT / 'busy-remote.git'
             tasks._git(ROOT, 'init', '--quiet', '--bare', str(remote))
             tasks._git(project, 'remote', 'add', 'origin', str(remote))
-            await rejected(create('unpushed'), 'it has unpushed commits;')
-            assert mark()['unpushed'] == 2
+            assert (await create('unpushed') / 'a.txt').read_text() == 'committed a\n'
+            assert starts[-1] is True and mark()['unpushed'] == 2
             (project / 'a.txt').write_text('uncommitted\n')
-            await rejected(create('both'), 'it has uncommitted changes and unpushed commits;')
-            tasks._git(project, 'push', '--quiet', 'origin', 'HEAD:refs/heads/main')
-            assert (await create('pushed') / 'a.txt').read_text() == 'committed a\n'
-            assert starts[-1] is True and mark()['unpushed'] == 0
+            await rejected(create('both'), 'it has uncommitted changes; try again')
             # a prompt waiting in the queue is a busy project as well
             hub.status, hub.queue = 'idle', ['Later']
             await create('queued')
@@ -690,7 +688,7 @@ async def busy_main_creation():
                          'error': 'git did not answer within 30 seconds'}
             with patch.object(session_git, 'refresh', AsyncMock(return_value=unchecked)):
                 await rejected(create('unchecked'), 'Main or another session is using this project; try '
-                               'again when it is idle · Git could not check it for uncommitted work: '
+                               'again when it is idle · Git could not check it for uncommitted changes: '
                                'git did not answer within 30 seconds')
             # the commit's checkout keeps the copy's bounds and symlink rule,
             # and a refused copy leaves nothing behind
@@ -702,7 +700,6 @@ async def busy_main_creation():
             (project / 'escape').symlink_to(str(ROOT))
             tasks._git(project, 'add', 'escape')
             tasks._git(project, 'commit', '-qm', 'Escape')
-            tasks._git(project, 'push', '--quiet', 'origin', 'HEAD:refs/heads/main')
             await rejected(create('escape'), 'relative symlinks within the project: escape')
             assert set(os.listdir(workspaces.temporary_root())) == spare
             assert starts[-3:] == [True, True, True] and not tasks._busy_roots
@@ -711,9 +708,9 @@ async def busy_main_creation():
         drop_tasks(created)
         runner.drop_hub(parent)
         db.delete_session(parent)
-    print('PASS: a task starts beside a running or queued turn from a clean, pushed project\'s last '
-          'commit (never the files in flight, notes kept, bounds and symlink rule held); '
-          'uncommitted, unpushed or unchecked work refuses with its cause; idle copies unchanged')
+    print('PASS: a task starts beside a running or queued turn from a clean project\'s last commit, '
+          'pushed or not (never the files in flight, notes kept, bounds and symlink rule held); '
+          'uncommitted or unchecked work refuses with its cause; idle copies unchanged')
 
 
 async def busy_creation_api(client, app):

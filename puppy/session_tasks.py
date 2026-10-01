@@ -528,21 +528,19 @@ async def _from_commit(parent, root):
     a copy of its working files. An idle project is copied as it stands. A
     turn working in the project, or waiting in its queue, may be writing
     those files, so a task starts beside it only when a fresh look says the
-    repository holds nothing uncommitted or unpushed - the plain Git mark.
-    The last commit is then all Main has, and the copy is git's own checkout
-    of it, which no edit in flight can tear. The look also brings the mark
-    up to date, so a refusal and the sidebar agree."""
+    work tree has no uncommitted changes. Only that local state counts:
+    the last commit is then all of Main's files, pushed or not, and the copy
+    is git's own checkout of it, which no edit in flight can tear. The look
+    also brings the sidebar's Git mark up to date, so the two agree."""
     if not _project_busy(root):
         return False
     git = await session_git.refresh(parent, fresh=True) or {}
     if git.get("repo") is not True or git.get("error") or type(git.get("changes")) is not int:
         raise TaskError(BUSY_PROJECT + "; try again when it is idle · Git could not check it "
-                        "for uncommitted work" + (": " + git["error"] if git.get("error") else ""))
-    held = " and ".join(text for count, text in ((git["changes"], "uncommitted changes"),
-                                                 (git.get("unpushed"), "unpushed commits")) if count)
-    if held:
-        raise TaskError(BUSY_PROJECT + " and it has " + held +
-                        "; try again when it is idle, or once that work is committed and pushed")
+                        "for uncommitted changes" + (": " + git["error"] if git.get("error") else ""))
+    if git["changes"]:
+        raise TaskError(BUSY_PROJECT + " and it has uncommitted changes; try again when it "
+                        "is idle, or once they are committed")
     return True
 
 

@@ -183,15 +183,15 @@ source directory must be idle during refresh and apply. Other isolated tasks can
 continue running. External editors remain the user's responsibility; these
 working copies are not an OS security sandbox.
 
-Creation does not wait for an idle project when Git says it holds nothing
-uncommitted or unpushed - the plain Git mark. While a turn runs or a prompt
-waits in a queue anywhere in the project, a fresh look at the repository (the
-mark's own check, published like a focus refresh) decides: with no changes and
-no commit missing from every remote (a repository without remotes has nothing
-to push), the task starts from the last commit. Git checks that commit out into
-the clone itself, so a file the running turn is writing is never read; only an
-ignored root AGENTS.md or CLAUDE.md is copied from Main, and the checkout is held
-to the same file, size and symlink limits. Uncommitted changes, unpushed commits
+Creation does not wait for an idle project when Git says its work tree has no
+uncommitted changes. While a turn runs or a prompt waits in a queue anywhere in
+the project, a fresh look at the repository (the Git mark's own check,
+published like a focus refresh) decides: with nothing staged, unstaged or
+untracked, the task starts from the last commit. Only this local state counts;
+whether a remote holds the commit makes no difference. Git checks that commit
+out into the clone itself, so a file the running turn is writing is never read;
+only an ignored root AGENTS.md or CLAUDE.md is copied from Main, and the
+checkout is held to the same file, size and symlink limits. Uncommitted changes
 or a repository Git could not read keep the refusal, which names the cause. An
 idle project is still copied from its working files, uncommitted changes
 included, and no look is taken for it.

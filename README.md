@@ -521,11 +521,12 @@ conversation with its own engine choice, queue, approvals and Stop control,
 working in an independent Git clone of Main's project that starts from Main's
 current files, uncommitted changes included. Run several at once on different
 features. A task can start while Main or another session is working in the
-project as long as Git says the project holds nothing uncommitted or unpushed
-(a plain Git mark): it then starts from the last commit, never from files the
-running turn may be writing. Otherwise the refusal names what Git holds. New
-tasks initially select Main's engine and use that backend's saved model,
-effort and permission defaults. Adjust these choices before starting.
+project as long as Git reports no uncommitted changes there; unpushed commits
+do not matter. It then starts from the last commit, never from files the
+running turn may be writing. With uncommitted changes, creation is refused
+until the project is idle or the changes are committed. New tasks initially
+select Main's engine and use that backend's saved model, effort and
+permission defaults. Adjust these choices before starting.
 An unnamed task is named from its prompt's first line, or by a model when
 **Generate a title from the task** is on (offered while Session titles are
 configured; a typed name is kept). Attachments are locked while the task is
