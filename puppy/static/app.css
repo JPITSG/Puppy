@@ -67,6 +67,8 @@
      the strong one is for a glyph sitting on a tinted surface */
   --hov-soft:rgba(255,255,255,.035); --hov-strong:rgba(255,255,255,.12);
   --scrollbar-thumb:#242b3a; --stage-bg:#000;
+  /* the image viewer's veil over the console, frosted by a blur behind it */
+  --viewer-scrim:rgba(5,7,11,.86);
   --prov-anthropic:#d97757; --prov-openai:#10a37f;
   /* Full form fields and dense settings rows are two distinct control tiers. */
   --settings-control-h:30px;
@@ -1960,8 +1962,18 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   display:block;height:54px;width:auto;max-width:140px;min-width:26px;
   object-fit:cover;object-position:left center;background:var(--panel2);
 }
+/* A thumbnail is the image viewer's button: it fills its chip, invites a
+   zoom on a mouse and grows a little under the pointer, inside the chip's
+   own clipped corners. */
+.attach-chip .attach-view{
+  display:block;margin:0;padding:0;border:0;border-radius:inherit;background:none;color:inherit;
+  line-height:0;cursor:zoom-in;
+}
+.attach-chip .attach-view .attach-thumb{transition:transform var(--t-slow) var(--ease),filter var(--t-base) var(--ease)}
+@media (hover:hover){.attach-chip .attach-view:hover .attach-thumb{transform:scale(1.04);filter:brightness(1.06)}}
+.attach-chip .attach-view:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
 .attach-chip .attach-state{
-  position:absolute;left:4px;bottom:4px;padding:3px 5px;border-radius:var(--btn-r);
+  position:absolute;left:4px;bottom:4px;padding:3px 5px;border-radius:var(--btn-r);pointer-events:none;
   background:rgba(6,9,14,.72);color:#fff;font:var(--fs-2xs)/1 var(--mono);letter-spacing:.03em;
 }
 .attach-chip.file{
@@ -2954,6 +2966,118 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
    above the copy; a long automatic title wraps rather than overflowing */
 .modal-subject{color:var(--txt);font-weight:600;overflow-wrap:anywhere}
 .engine-defaults-modal #ed-reset,.session-request-modal .sr-cancel{margin-right:auto}
+
+/* ---------- image viewer ---------- */
+/* A modal() whose box is the whole window: no card and no padding, its own
+   scrim under a stage the picture is drawn on, and the chrome floating over
+   both on the tooltip's frosted material. */
+.modal-backdrop.iv-backdrop{padding:0;background:none;-webkit-backdrop-filter:none;backdrop-filter:none}
+.modal.image-viewer{
+  position:relative;width:100%;height:100%;max-width:none;max-height:none;overflow:hidden;
+  padding:0;border:0;border-radius:0;background:none;box-shadow:none;outline:none;
+}
+.iv-scrim{
+  position:absolute;inset:0;background:var(--viewer-scrim);
+  -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);
+  transition:opacity var(--t-slow) var(--ease);
+}
+.iv-stage{position:absolute;inset:0;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
+.iv-img{
+  position:absolute;left:0;top:0;display:block;max-width:none;max-height:none;
+  transform-origin:0 0;user-select:none;-webkit-user-drag:none;
+}
+.iv-img.iv-anim{
+  transition:transform var(--t-slow) var(--ease),clip-path var(--t-slow) var(--ease),
+    opacity var(--t-base) var(--ease);
+}
+.iv-img.iv-leaving{opacity:0}
+.iv-img.iv-anim.iv-leaving{transition-duration:var(--t-fast)}
+/* magnified four times or more - inspecting pixels rather than reading - a
+   picture is drawn as square pixels instead of smeared ones; below that it
+   stays smooth */
+.iv-img.iv-crisp{image-rendering:pixelated}
+.image-viewer.iv-loading .iv-img,.image-viewer.iv-failed .iv-img,.image-viewer.iv-failed .iv-bar{visibility:hidden}
+.image-viewer.iv-dragging .iv-img{will-change:transform}
+.image-viewer.iv-dragging .iv-scrim{transition:none}
+/* a fitted picture invites a zoom, a zoomed one that still fits takes it
+   back, and one larger than the window is grabbed */
+.image-viewer:not(.iv-pannable) .iv-img{cursor:zoom-in}
+.image-viewer.iv-zoomed:not(.iv-pannable) .iv-img{cursor:zoom-out}
+.image-viewer.iv-pannable .iv-stage{cursor:grab}
+.image-viewer.iv-pannable.iv-dragging .iv-stage{cursor:grabbing}
+.iv-status{
+  position:absolute;inset:0;display:grid;place-items:center;margin:0;pointer-events:none;
+  color:var(--txt2);font-size:var(--fs-md);
+}
+.iv-status.bad{color:var(--err)}
+.iv-caption,.iv-bar,.image-viewer .modal-close,.iv-nav{
+  background:var(--tip-bg);border:1px solid var(--tip-line);box-shadow:var(--tip-shadow);
+  -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
+}
+.image-viewer .modal-head{
+  position:absolute;z-index:1;top:calc(12px + env(safe-area-inset-top));left:12px;right:12px;
+  margin:0;gap:10px;pointer-events:none;
+}
+.image-viewer .modal-head>*{pointer-events:auto}
+.iv-caption{
+  display:flex;align-items:baseline;gap:10px;min-width:0;max-width:min(640px,100%);
+  margin-right:auto;padding:8px 12px;border-radius:var(--r-md);
+}
+/* a file name, not a dialog's kicker: its own case, in the body voice */
+.image-viewer .iv-caption h2{
+  flex:0 1 auto;min-width:0;margin:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  overflow-wrap:normal;font-size:var(--fs-md);font-weight:600;text-transform:none;letter-spacing:0;color:var(--txt);
+}
+.iv-meta{flex:none;white-space:nowrap;color:var(--txt3);font-size:var(--fs-xs);font-variant-numeric:tabular-nums}
+.image-viewer .modal-close{width:36px;height:36px;border-radius:50%;color:var(--txt)}
+.iv-nav{position:absolute;z-index:1;top:50%;width:40px;height:40px;margin-top:-20px;border-radius:50%;color:var(--txt)}
+.iv-prev{left:16px}
+.iv-next{right:16px}
+.image-viewer.iv-single .iv-nav{display:none}
+/* a touch screen pages with a swipe, so the arrows give their width back to
+   the picture there; the caption's counter still says where it is */
+@media (hover:none) and (pointer:coarse){.iv-nav{display:none}}
+.iv-bar{
+  position:absolute;z-index:1;left:50%;bottom:calc(16px + env(safe-area-inset-bottom));transform:translateX(-50%);
+  display:flex;align-items:center;gap:2px;padding:3px;border-radius:var(--r-md);
+}
+.iv-bar .icon-btn{width:34px;height:34px;color:var(--txt)}
+/* the download stands apart from the zoom it is not part of */
+.iv-sep{flex:none;width:1px;height:20px;margin:0 4px;background:var(--tip-line)}
+.iv-level{
+  min-width:58px;height:34px;padding:0 8px;border:1px solid transparent;border-radius:var(--btn-r);
+  background:none;color:var(--txt);font:600 var(--fs-sm)/1 var(--sans);font-variant-numeric:tabular-nums;
+  cursor:pointer;transition:background var(--t-base) var(--ease),border-color var(--t-base) var(--ease);
+}
+@media (hover:hover){.iv-level:hover{background:var(--hov);border-color:var(--line)}}
+.iv-level:active{background:var(--hov)}
+.iv-level:disabled{opacity:.4;pointer-events:none}
+/* the chrome fades in behind the opening flight; a tap on the picture hides
+   it, and hidden it takes no press and no focus */
+.image-viewer .modal-head,.iv-bar{transition:opacity var(--t-base) var(--ease),visibility 0s linear}
+.iv-nav{
+  transition:opacity var(--t-base) var(--ease),visibility 0s linear,background var(--t-base) var(--ease),
+    color var(--t-base) var(--ease),border-color var(--t-base) var(--ease),transform var(--t-fast) var(--ease);
+}
+.image-viewer.iv-enter .iv-scrim,.image-viewer.iv-enter .modal-head,
+.image-viewer.iv-enter .iv-bar,.image-viewer.iv-enter .iv-nav{opacity:0}
+.image-viewer.iv-bare .modal-head,.image-viewer.iv-bare .iv-bar,.image-viewer.iv-bare .iv-nav{
+  opacity:0;visibility:hidden;transition:opacity var(--t-base) var(--ease),visibility 0s linear var(--t-base);
+}
+/* the picture flying back to its thumbnail once the viewer has closed */
+.iv-ghost{position:fixed;inset:0;z-index:var(--z-modal);pointer-events:none}
+.iv-ghost.iv-going .iv-scrim{opacity:0}
+@media (max-width:560px){
+  .image-viewer .modal-head{top:calc(8px + env(safe-area-inset-top));left:8px;right:8px;gap:8px}
+  .iv-bar{bottom:calc(10px + env(safe-area-inset-bottom))}
+  .iv-nav{width:36px;height:36px;margin-top:-18px}
+  .iv-prev{left:8px}
+  .iv-next{right:8px}
+}
+@media (prefers-reduced-motion:reduce){
+  .iv-img.iv-anim,.iv-scrim,.image-viewer .modal-head,.iv-bar,.iv-nav,
+  .attach-chip .attach-view .attach-thumb{transition:none}
+}
 .engine-pick{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;margin-bottom:10px}
 .engine-pick .ep{
   flex:1;padding:11px 10px;border-radius:var(--r-md);border:1px solid var(--line2);cursor:pointer;
@@ -3334,6 +3458,7 @@ html.light{
   --hov:rgba(15,23,42,.06); --tab-hov:rgba(15,23,42,.045);
   --hov-soft:rgba(15,23,42,.035); --hov-strong:rgba(15,23,42,.09);
   --scrollbar-thumb:#c0c9d8;
+  --viewer-scrim:rgba(232,236,243,.9);
   --tab-active-bg:rgba(15,23,42,.075);
   --tab-active-focus-bg:rgba(59,130,224,.17);
   --tab-drag-bg:#ffffff;

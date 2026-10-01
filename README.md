@@ -452,6 +452,21 @@ the session's backend and stay private under `data/uploads/`. Images preview in
 the transcript. Images in Markdown replies shrink to fit the available width
 while keeping their proportions; smaller images keep their natural size.
 
+Press an image's preview, in a sent message or in a prompt box before it is
+sent, to open it full screen. The picture grows out of its thumbnail and fits
+the window, never past its own size. Zoom with the wheel, a pinch, a double
+click or double tap, the bar's − and + buttons or the `+`, `-`, `0` (fit) and
+`1` (actual size) keys, up to 800%; from 400% the pixels are drawn square. Drag
+a zoomed picture to pan it. The side arrows, a swipe, PageUp/PageDown or the
+arrow keys step through the other images of the same message or prompt box;
+while a zoomed picture is wider than the window, the arrow keys pan it instead.
+The bar's download button saves the picture shown under its own name.
+Escape, Back, the close button or a press beside the picture close it, and the
+picture flies back to its thumbnail when that is in view (with reduced motion
+it simply closes); Forward opens it again. On a touch screen
+the arrows give way to swiping, a tap on the picture hides the controls, and
+pulling it up or down puts it away.
+
 Engines that keep working after answering are handled too: Claude Code's
 background commands, agents and monitors keep their turn alive until they end.
 Their completion, failure and stop updates are labeled and left-aligned, attached

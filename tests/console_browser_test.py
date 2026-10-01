@@ -1423,6 +1423,357 @@ async def reply_image_checks(instance, capture=False):
     print("PASS: large reply images fit the transcript without distortion or horizontal overflow; small images retain their natural size in both themes", flush=True)
 
 
+async def image_viewer_checks(instance, capture=False):
+    """A sent image opens full screen from its thumbnail, behaving the way a
+    picture viewer is expected to. Real clicks, wheel turns, drags, double
+    clicks, keys and taps against Chromium's own layout: the picture grows out
+    of the pressed thumbnail and settles fitted between the caption and the
+    zoom bar - never past its own pixels - centred in the window; a wheel
+    zooms about the pointer, a drag pans a zoomed picture and never leaves a
+    gap at its edges, a double click zooms where it lands and back, the keys
+    zoom, fit and page, the bar's download saves the picture shown under its
+    own name, and a magnified picture is drawn with square pixels. Escape, a
+    press beside the picture and Back close it at once while the picture
+    flies home to its thumbnail, focus returns to the thumbnail that opened
+    it, and Forward opens it again on the picture last shown. On a phone in
+    both themes a tap opens it with the arrows' width given to the picture,
+    two fingers zoom about their middle, a double tap zooms, a swipe pages
+    and a pull closes; with reduced motion nothing flies."""
+    page = instance.page_session
+    settled = ("Promise.all(document.getAnimations().filter(a => a.effect && "
+               "a.effect.getTiming().iterations !== Infinity).map(a => a.finished.catch(() => {})))"
+               ".then(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(true)))))")
+    geometry = """(() => {
+        const v = imageViewerOpen;
+        if (!v) return null;
+        const r = v.img.getBoundingClientRect(), head = v.head.getBoundingClientRect();
+        const bar = v.bar.getBoundingClientRect(), prev = v.prevButton.getBoundingClientRect();
+        return {s: v.s, x: v.x, y: v.y, fit: v.fit, index: v.index, w: v.width, h: v.height, ready: v.ready,
+            left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height,
+            headBottom: head.bottom, barTop: bar.top, barBottom: bar.bottom, navRight: prev.width ? prev.right : 0,
+            vw: innerWidth, vh: innerHeight, meta: v.meta.textContent, name: v.name.textContent,
+            level: v.level.textContent, href: v.downloadLink.getAttribute('href'),
+            download: v.downloadLink.download, rendering: getComputedStyle(v.img).imageRendering,
+            focused: document.activeElement === v.m || v.m.contains(document.activeElement),
+            layers: (history.state && history.state.layers || []).length};
+    })()"""
+    # the thumbnail on the screen and nothing over it - an earlier lane may
+    # leave the phone's drawer open - where a press will land
+    thumb = """(async () => { if (typeof closeDrawer === 'function') closeDrawer();
+        const b = viewerNode.querySelectorAll('.attach-view')[%d];
+        b.scrollIntoView({block: 'center'});
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const r = b.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        return {x, y, hit: !!hit && b.contains(hit), what: hit ? hit.className : ''}; })()"""
+
+    async def settle():
+        await evaluate(instance, settled)
+
+    async def mouse(kind, x, y, count=1, buttons=0):
+        await instance.call("Input.dispatchMouseEvent", {
+            "type": kind, "x": x, "y": y, "button": "left" if kind != "mouseMoved" or buttons else "none",
+            "buttons": buttons, "clickCount": count}, session=page)
+
+    async def click(x, y, count=1):
+        await mouse("mousePressed", x, y, count, 1)
+        await mouse("mouseReleased", x, y, count, 0)
+
+    async def key(name, code, vk, text=None):
+        for kind in ("keyDown", "keyUp"):
+            params = {"type": kind, "key": name, "code": code, "windowsVirtualKeyCode": vk}
+            if text and kind == "keyDown":
+                params["text"] = text
+            await instance.call("Input.dispatchKeyEvent", params, session=page)
+
+    async def touch(kind, *points):
+        await instance.call("Input.dispatchTouchEvent", {"type": kind, "touchPoints": [
+            {"x": x, "y": y, "id": n} for n, (x, y) in enumerate(points)]}, session=page)
+
+    async def open_by_click(index):
+        spot = await evaluate(instance, thumb % index)
+        assert spot["hit"], ("the thumbnail is under the press", spot)
+        await click(spot["x"], spot["y"])
+        await until(instance, "!!imageViewerOpen && imageViewerOpen.ready")
+        await settle()
+        return await evaluate(instance, geometry)
+
+    def framed(g, multiple=True):
+        pad_y = max(g["headBottom"], g["vh"] - g["barTop"]) + 12
+        pad_x = max(24, g["navRight"] + 12) if multiple else 24
+        assert g["top"] >= pad_y - 0.6 and g["bottom"] <= g["vh"] - pad_y + 0.6, g
+        assert g["left"] >= pad_x - 0.6 and g["right"] <= g["vw"] - pad_x + 0.6, g
+        assert min(g["top"] - pad_y, g["left"] - pad_x) < 0.6 or abs(g["s"] - 1) < 1e-9, \
+            ("the fitted picture fills its frame on one axis", g)
+        assert abs((g["left"] + g["right"]) / 2 - g["vw"] / 2) < 0.6, g
+        assert abs((g["top"] + g["bottom"]) / 2 - g["vh"] / 2) < 0.6, g
+        assert abs(g["width"] / g["height"] - g["w"] / g["h"]) < 0.01 * g["w"] / g["h"], g
+        assert g["width"] <= g["w"] + 0.5, ("never past its own pixels", g)
+
+    def shows(g):
+        """The drawn picture is where the viewer says it is."""
+        assert abs(g["left"] - g["x"]) < 0.6 and abs(g["top"] - g["y"]) < 0.6, g
+        assert abs(g["width"] - g["w"] * g["s"]) < 0.6, g
+
+    await evaluate(instance, r"""(async () => {
+        const draw = (w, h, base, accent, label) => new Promise(resolve => {
+            const c = document.createElement('canvas'); c.width = w; c.height = h;
+            const g = c.getContext('2d');
+            g.fillStyle = base; g.fillRect(0, 0, w, h);
+            g.fillStyle = accent; g.fillRect(w * .05, h * .08, w * .9, h * .84);
+            g.fillStyle = base; g.font = Math.round(Math.min(w, h) / 9) + 'px sans-serif';
+            g.fillText(label, w * .1, h * .3);
+            for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+                g.fillStyle = (x + y) % 2 ? '#ffffff' : '#000000'; g.fillRect(x, y, 1, 1);
+            }
+            c.toBlob(blob => resolve(URL.createObjectURL(blob)), 'image/png');
+        });
+        window.viewerUrls = [await draw(2400, 1500, '#19364c', '#63c8ba', 'Harbor desktop'),
+                             await draw(900, 1950, '#281c46', '#9d7bff', 'Phone'),
+                             await draw(360, 220, '#3c1e14', '#ffb64d', 'Detail')];
+        const paths = ['desktop.png', 'phone.png', 'detail.png'].map((name, n) =>
+            '/home/mira/.puppy/uploads/1/179000000000' + n + '-a1b2c3d4e' + n + '/' + name);
+        paths.forEach((path, n) => demoView.composer.sentThumbs.set(path, viewerUrls[n]));
+        window.viewerNode = demoView.buildEventNode({kind: 'user', data: {text: 'The current screens\n' +
+            paths.map(path => ATTACH_IMAGE_PREFIX + path + ATTACH_IMAGE_SUFFIX).join('\n')}});
+        demoView.inner.appendChild(viewerNode);
+        viewerNode.scrollIntoView({block: 'center'});
+        await Promise.all([...viewerNode.querySelectorAll('.attach-thumb')].map(img => img.decode()));
+        return true;
+    })()""")
+    try:
+        assert await evaluate(instance, """viewerNode.querySelectorAll('.attach-view').length === 3 &&
+            getComputedStyle(viewerNode.querySelector('.attach-view')).cursor === 'zoom-in'""")
+        before = await evaluate(instance, "(history.state && history.state.layers || []).length")
+
+        # opened by a real click on the second thumbnail, framed and centred
+        g = await open_by_click(1)
+        assert g["index"] == 1 and g["name"] == "phone.png" and g["meta"] == "900 × 1950 · 2 of 3", g
+        assert g["href"] == await evaluate(instance, "viewerUrls[1]") and g["download"] == "phone.png", g
+        assert g["focused"] and g["layers"] == before + 1, g
+        framed(g)
+        shows(g)
+        assert g["level"] == str(round(g["s"] * 100)) + "%", g
+
+        # a wheel zooms about the pointer
+        px, py = (g["left"] + g["right"]) / 2, g["top"] + g["height"] * 0.4
+        point = ((px - g["x"]) / g["s"], (py - g["y"]) / g["s"])
+        await mouse("mouseMoved", px, py)
+        await instance.call("Input.dispatchMouseEvent", {"type": "mouseWheel", "x": px, "y": py,
+            "deltaX": 0, "deltaY": -300}, session=page)
+        await settle()
+        g = await evaluate(instance, geometry)
+        assert abs(g["s"] / g["fit"] - math.exp(0.6)) < 1e-6, g
+        assert abs((px - g["x"]) / g["s"] - point[0]) < 0.5 and abs((py - g["y"]) / g["s"] - point[1]) < 0.5, \
+            ("the picture point under the wheel stays under it", g, point)
+        shows(g)
+
+        # a drag pans the zoomed picture, and never past its edge
+        y0 = g["y"]
+        await mouse("mousePressed", px, py, 1, 1)
+        for step in range(1, 6):
+            await mouse("mouseMoved", px + 16 * step, py - 30 * step, 0, 1)
+        await asyncio.sleep(0.15)
+        await mouse("mouseReleased", px + 80, py - 150, 1, 0)
+        await settle()
+        g = await evaluate(instance, geometry)
+        assert abs(g["y"] - (y0 - 150)) < 0.6, ("followed the drag", g, y0)
+        assert abs((g["left"] + g["right"]) / 2 - g["vw"] / 2) < 0.6, ("a picture narrower than the window stays centred", g)
+        await mouse("mousePressed", px, py, 1, 1)
+        for step in range(1, 6):
+            await mouse("mouseMoved", px, py + 150 * step, 0, 1)
+        await asyncio.sleep(0.15)
+        await mouse("mouseReleased", px, py + 750, 1, 0)
+        await settle()
+        g = await evaluate(instance, geometry)
+        assert abs(g["top"]) < 0.6, ("dragged past its edge, it settles flush with it", g)
+        shows(g)
+
+        # a double click fits, another zooms to its own pixels where it lands
+        await click(px, g["top"] + 200)
+        await click(px, g["top"] + 200, 2)
+        await settle()
+        g = await evaluate(instance, geometry)
+        assert abs(g["s"] - g["fit"]) < 1e-9, g
+        framed(g)
+        await click(px, (g["top"] + g["bottom"]) / 2)
+        await click(px, (g["top"] + g["bottom"]) / 2, 2)
+        await settle()
+        g = await evaluate(instance, geometry)
+        assert abs(g["s"] - 1) < 1e-9 and g["level"] == "100%", g
+        shows(g)
+
+        # keys: 0 fits, the arrow pages, + magnifies with square pixels
+        await key("0", "Digit0", 48, "0")
+        await settle()
+        await key("ArrowRight", "ArrowRight", 39)
+        await until(instance, "imageViewerOpen.ready && imageViewerOpen.index === 2")
+        await settle()
+        g = await evaluate(instance, geometry)
+        assert g["name"] == "detail.png" and g["meta"] == "360 × 220 · 3 of 3" and g["level"] == "100%", g
+        assert abs(g["width"] - 360) < 0.6, ("a small picture at its own size", g)
+        assert g["download"] == "detail.png" and g["href"] == await evaluate(instance, "viewerUrls[2]"), g
+        assert await evaluate(instance, "imageViewerOpen.nextButton.disabled && !imageViewerOpen.prevButton.disabled")
+        framed(g)
+        # a real press on the bar's download saves the picture shown, by its own name
+        saved = Path(instance.root) / "downloads" / "detail.png"
+        if saved.exists():
+            saved.unlink()
+        link = await evaluate(instance, """(() => { const r = imageViewerOpen.downloadLink.getBoundingClientRect();
+            return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()""")
+        await click(link["x"], link["y"])
+        end = time.monotonic() + 10
+        while time.monotonic() < end and not (saved.exists() and saved.stat().st_size > 24):
+            await asyncio.sleep(0.05)
+        data = saved.read_bytes()
+        assert data[:8] == b"\x89PNG\r\n\x1a\n" and \
+            (int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")) == (360, 220), data[:24]
+        assert await evaluate(instance, "!!imageViewerOpen && imageViewerOpen.index === 2"), "downloading keeps the viewer"
+        for _ in range(2):
+            await key("+", "Equal", 187, "+")
+        await settle()
+        g = await evaluate(instance, geometry)
+        assert abs(g["s"] - 2.25) < 1e-9 and g["rendering"] == "auto", ("smooth while reading", g)
+        for _ in range(2):
+            await key("+", "Equal", 187, "+")
+        await settle()
+        g = await evaluate(instance, geometry)
+        assert abs(g["s"] - 1.5 ** 4) < 1e-9 and g["rendering"] == "pixelated", ("square pixels when inspecting", g)
+        if capture:
+            shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=page)
+            (BASE / "data" / "image-viewer-zoomed.png").write_bytes(base64.b64decode(shot["data"]))
+        await key("PageUp", "PageUp", 33)
+        await until(instance, "imageViewerOpen.ready && imageViewerOpen.index === 1")
+
+        # Escape closes at once; the picture flies home; focus returns
+        await key("Escape", "Escape", 27)
+        assert await evaluate(instance, "!imageViewerOpen && !document.querySelector('.image-viewer')")
+        assert await evaluate(instance, "!!document.querySelector('.iv-ghost')"), "the picture flies home"
+        assert await evaluate(instance, "(history.state && history.state.layers || []).length") == before
+        await settle()
+        await until(instance, "!document.querySelector('.iv-ghost')")
+        assert await evaluate(instance, "document.activeElement === viewerNode.querySelectorAll('.attach-view')[1]"), \
+            "focus is back on the thumbnail that opened it"
+
+        # Back closes, Forward opens a fresh viewer on the picture last shown
+        await open_by_click(0)
+        await key("ArrowRight", "ArrowRight", 39)
+        await until(instance, "imageViewerOpen.ready && imageViewerOpen.index === 1")
+        await evaluate(instance, "history.back(); true")
+        await until(instance, "!imageViewerOpen && !document.querySelector('.image-viewer')")
+        await evaluate(instance, "history.forward(); true")
+        await until(instance, "!!imageViewerOpen && imageViewerOpen.ready && imageViewerOpen.index === 1")
+        await settle()
+        framed(await evaluate(instance, geometry))
+
+        # a press beside the picture closes
+        g = await evaluate(instance, geometry)
+        await click(g["left"] - 60, g["vh"] / 2)
+        await until(instance, "!imageViewerOpen")
+        await settle()
+
+        # both themes on the desktop, for the eye
+        for theme in ("dark", "light"):
+            await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+            g = await open_by_click(0)
+            framed(g)
+            if capture:
+                shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=page)
+                (BASE / "data" / ("image-viewer-desktop-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
+            await key("Escape", "Escape", 27)
+            await settle()
+
+        # a phone: taps, pinches, double taps, swipes and pulls
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844,
+            "deviceScaleFactor": 2, "mobile": True}, session=page)
+        await instance.call("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 5},
+                            session=page)
+        try:
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                await settle()
+                spot = await evaluate(instance, thumb % 0)
+                assert spot["hit"], ("the thumbnail is under the tap", theme, spot)
+                # straight after the previous pass's pull, a synthetic tap lands in
+                # Chromium's own tap suppression after a fling; a finger lifted
+                # and put down again takes longer than this
+                await asyncio.sleep(0.5)
+                await touch("touchStart", (spot["x"], spot["y"]))
+                await touch("touchEnd")
+                await until(instance, "!!imageViewerOpen && imageViewerOpen.ready")
+                await settle()
+                g = await evaluate(instance, geometry)
+                assert g["navRight"] == 0, ("no arrows on a touch screen", g)
+                framed(g)
+                assert abs(g["width"] - (390 - 48)) < 0.6, ("the arrows' width goes to the picture", g)
+                assert g["barBottom"] <= g["vh"] and g["headBottom"] > 0, g
+                if capture:
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=page)
+                    (BASE / "data" / ("image-viewer-phone-" + theme + ".png")).write_bytes(base64.b64decode(shot["data"]))
+                cx, cy = g["vw"] / 2, g["vh"] / 2
+                await touch("touchStart", (cx - 40, cy), (cx + 40, cy))
+                for step in range(1, 5):
+                    await touch("touchMove", (cx - 40 - 20 * step, cy), (cx + 40 + 20 * step, cy))
+                await touch("touchEnd")
+                await settle()
+                g = await evaluate(instance, geometry)
+                assert abs(g["s"] / g["fit"] - 3) < 0.02, ("two fingers 80px apart spread to 240 zoom three times", g)
+                assert abs((g["left"] + g["right"]) / 2 - cx) < 1, ("about their middle", g)
+                for _ in range(2):
+                    await touch("touchStart", (cx, cy))
+                    await touch("touchEnd")
+                await settle()
+                g = await evaluate(instance, geometry)
+                assert abs(g["s"] - g["fit"]) < 1e-9, ("a double tap fits again", g)
+                await touch("touchStart", (cx + 80, cy))
+                for step in range(1, 5):
+                    await touch("touchMove", (cx + 80 - 45 * step, cy + 2))
+                await touch("touchEnd")
+                await until(instance, "imageViewerOpen.ready && imageViewerOpen.index === 1")
+                await settle()
+                g = await evaluate(instance, geometry)
+                assert g["name"] == "phone.png", ("a swipe pages", g)
+                framed(g)
+                await touch("touchStart", (cx, cy - 100))
+                for step in range(1, 6):
+                    await touch("touchMove", (cx, cy - 100 + 50 * step))
+                await touch("touchEnd")
+                await until(instance, "!imageViewerOpen")
+                await settle()
+        finally:
+            await instance.call("Emulation.setTouchEmulationEnabled", {"enabled": False}, session=page)
+            await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+                "deviceScaleFactor": 1, "mobile": False}, session=page)
+
+        # reduced motion: nothing flies in and nothing flies home
+        await evaluate(instance, "applyTheme('dark'); true")
+        await instance.call("Emulation.setEmulatedMedia", {"features": [
+            {"name": "prefers-reduced-motion", "value": "reduce"}]}, session=page)
+        try:
+            spot = await evaluate(instance, thumb % 2)
+            assert spot["hit"], spot
+            await click(spot["x"], spot["y"])
+            await until(instance, "!!imageViewerOpen && imageViewerOpen.ready")
+            assert await evaluate(instance, """!imageViewerOpen.img.classList.contains('iv-anim') &&
+                !imageViewerOpen.img.style.clipPath"""), "it opens in place"
+            await key("Escape", "Escape", 27)
+            assert await evaluate(instance, "!imageViewerOpen && !document.querySelector('.iv-ghost')"), \
+                "and closes without a flight"
+        finally:
+            await instance.call("Emulation.setEmulatedMedia", {"features": []}, session=page)
+    finally:
+        await evaluate(instance, """(() => {
+            if (imageViewerOpen) imageViewerOpen.dialog.close();
+            document.querySelectorAll('.iv-ghost').forEach(node => node.remove());
+            if (window.viewerNode) viewerNode.remove();
+            (window.viewerUrls || []).forEach(url => URL.revokeObjectURL(url));
+            delete window.viewerNode; delete window.viewerUrls; applyTheme('dark'); return true;
+        })()""")
+    print("PASS: sent images open from their thumbnails framed and centred, zoom about the wheel, pan without gaps, "
+          "double click, keys and download; Escape, Back, Forward and a press beside close or reopen with focus home; "
+          "phone taps, pinches, double taps, swipes and pulls in both themes; reduced motion opens in place", flush=True)
+
+
 async def question_scroll_checks(instance, capture=False):
     """A real wheel scrolls the question first, then its history at either
     edge. The card fits the chat pane, including short windows and phones;
@@ -6930,6 +7281,9 @@ async def main(args):
             if args.question_scroll_only:
                 await question_scroll_checks(instances[0], args.screenshots)
                 return
+            if args.image_viewer_only:
+                await image_viewer_checks(instances[0], args.screenshots)
+                return
             await backup_schedule_checks(instances[0], app, args.screenshots)
             if args.backup_schedule_only:
                 return
@@ -6947,6 +7301,7 @@ async def main(args):
             await show_focus_checks(instances[0])
             await thinking_disclosure_checks(instances[0])
             await loop_checks(instances[0], args.screenshots)
+            await image_viewer_checks(instances[0], args.screenshots)
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])
@@ -6979,6 +7334,7 @@ if __name__ == "__main__":
     parser.add_argument("--task-refresh-only", action="store_true")
     parser.add_argument("--token-usage-only", action="store_true")
     parser.add_argument("--question-scroll-only", action="store_true")
+    parser.add_argument("--image-viewer-only", action="store_true")
     parser.add_argument("--sidebar-width-only", action="store_true")
     parser.add_argument("--backup-schedule-only", action="store_true")
     parser.add_argument("--lazy-assets-only", action="store_true")

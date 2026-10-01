@@ -260,6 +260,63 @@ function plusIcon(size) {
   return svg;
 }
 
+/* The image viewer's zoom-out, on plus's own 12-box so the pair reads as one. */
+function minusIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M2.75 6 L9.25 6");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.5");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("fill", "none");
+  svg.appendChild(p);
+  return svg;
+}
+
+/* An arrow into a tray on the same 12-box: the image viewer's download. */
+function downloadIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M6 2.25 L6 7.5 M3.75 5.5 6 7.75 8.25 5.5 M2.5 9.75 L9.5 9.75");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.5");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  p.setAttribute("fill", "none");
+  svg.appendChild(p);
+  return svg;
+}
+
+/* A chevron pointing left or right on the same 12-box: the image viewer's
+   previous and next. */
+function chevronIcon(size, direction = "right") {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", direction === "left" ? "M7.25 2.75 4 6 7.25 9.25" : "M4.75 2.75 8 6 4.75 9.25");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.5");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  p.setAttribute("fill", "none");
+  svg.appendChild(p);
+  return svg;
+}
+
 /* the composer's session-tools trigger: a wrench on the same 24-grid the
    settings gear uses, so both read as chrome rather than as content */
 function toolsIcon(size) {
@@ -15621,6 +15678,13 @@ function attachmentChipNode(a, url, uploading = false) {
   };
   if (!url) { asFile(); return chip; }
   chip.className = "attach-chip image" + (uploading ? " uploading" : "");
+  /* The thumbnail is a button of its own beside the chip's remove control,
+     never around it: a press, Enter or Space opens the image viewer on the
+     images of this strip. */
+  const view = el("button", "attach-view");
+  view.type = "button";
+  view.setAttribute("aria-label", "View " + a.name);
+  view.onclick = () => openImageViewerFrom(view);
   const img = el("img", "attach-thumb");
   img.alt = a.name;
   /* A node too old to serve previews, or an upload since discarded, answers
@@ -15633,7 +15697,8 @@ function attachmentChipNode(a, url, uploading = false) {
     if (remove) chip.appendChild(remove);
   };
   img.src = url;
-  chip.appendChild(img);
+  view.appendChild(img);
+  chip.appendChild(view);
   if (uploading) chip.appendChild(el("span", "attach-state", "Uploading"));
   return chip;
 }
@@ -15682,6 +15747,761 @@ function filesFromDataTransfer(transfer) {
   }
   result.files = transfer.files ? [...transfer.files] : [];
   return result;
+}
+
+/* ================= image viewer ================= */
+/* An image sent to the agent - or waiting in a prompt box to be sent - opens
+   from its thumbnail over the whole window. The picture grows out of the chip
+   it was pressed in and settles fitted between the viewer's two bars, never
+   past its own size. A wheel turn, a pinch, a double press, the bar's buttons
+   or the + and - keys zoom around the point under the pointer, up to
+   IMAGE_VIEWER_MAX_SCALE times the image's own pixels; a drag pans a picture
+   larger than the window and glides on when let go; the other images of the
+   same strip are an arrow, a key or a swipe away; the bar's download saves
+   the picture shown under its own name; on a touch screen a tap on the
+   picture hides the chrome and a pull puts the picture back. It is one
+   modal() layer like any dialog - Escape, Back, the X or a press beside the
+   picture close it, Tab stays inside, focus returns to the thumbnail - and
+   Forward opens it again on the image last shown. Closing is synchronous for
+   the dialog stack and browser history alike; the flight back to the
+   thumbnail is a ghost drawn over the page. */
+const IMAGE_VIEWER_MAX_SCALE = 8;   // the most an image is magnified, in its own pixels
+const IMAGE_VIEWER_STEP = 1.5;      // one press of + or -, or of the bar's buttons
+const IMAGE_VIEWER_CRISP = 4;       // from here on the image's pixels are drawn square
+const IMAGE_VIEWER_FRAME = 12;      // air between the fitted picture and the chrome
+const IMAGE_VIEWER_RADIUS = 8;      // the picture's corners on the screen, a chip's --r-sm
+const IMAGE_VIEWER_TAP_MS = 300;    // two taps closer than this are one double tap
+const IMAGE_VIEWER_GLIDE_MS = 280;  // how long a released drag keeps its speed
+let imageViewerOpen = null;         // the viewer on the screen, if any
+
+/* The scale that shows the whole picture inside the room it is given, never
+   above the picture's own size: a small screenshot stays sharp at 100%. */
+function imageViewerFit(width, height, room) {
+  if (!(width > 0 && height > 0 && room.width > 0 && room.height > 0)) return 1;
+  return Math.min(1, room.width / width, room.height / height);
+}
+
+/* Where a picture `size` px long may stand on an axis `extent` px long:
+   centred while it fits, otherwise never leaving a gap at either edge. */
+function imageViewerRange(size, extent) {
+  return size <= extent ? [(extent - size) / 2, (extent - size) / 2] : [extent - size, 0];
+}
+
+/* A position held inside its range; with `give`, a finger may pull it past
+   an edge by that share of the overshoot, and the picture springs back. */
+function imageViewerClamp(value, range, give = 0) {
+  if (value < range[0]) return give ? range[0] - (range[0] - value) * give : range[0];
+  if (value > range[1]) return give ? range[1] + (value - range[1]) * give : range[1];
+  return value;
+}
+
+/* A new scale for a picture at `view` that keeps the image point under
+   (px, py) exactly where it is. */
+function imageViewerAround(view, scale, px, py) {
+  const k = scale / view.s;
+  return { s: scale, x: px - (px - view.x) * k, y: py - (py - view.y) * k };
+}
+
+/* How a thumbnail shows its picture: covering the chip's box, anchored left
+   like the chip's object-position, with the inset (top, right, bottom, left,
+   in the picture's own pixels) that crops away what the box hid. The viewer
+   flies the picture from and back to exactly this. */
+function imageViewerCover(box, width, height, origin) {
+  const s = Math.max(box.width / width, box.height / height);
+  const right = Math.max(0, width - box.width / s);
+  const edge = Math.max(0, (height - box.height / s) / 2);
+  return {
+    s, x: box.left - origin.left, y: box.top - origin.top + (box.height - height * s) / 2,
+    inset: [edge, right, edge, 0],
+  };
+}
+
+function imageViewerInset(inset, radius) {
+  return "inset(" + inset.map(value => value + "px").join(" ") + " round " + radius + "px)";
+}
+
+/* The speed of the last moments of a drag, px per ms; nothing when the
+   finger stood still before letting go. */
+function imageViewerVelocity(track, releasedAt) {
+  const last = track[track.length - 1];
+  if (!last || releasedAt - last.t > 80) return { x: 0, y: 0 };
+  const first = track.find(sample => last.t - sample.t <= 100) || last;
+  const span = last.t - first.t;
+  return span > 0 ? { x: (last.x - first.x) / span, y: (last.y - first.y) / span } : { x: 0, y: 0 };
+}
+
+function imageViewerMotion() {
+  return !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
+/* One of the motion tokens in milliseconds, for the waits that follow a CSS
+   transition the viewer started. */
+function imageViewerMs(token) {
+  const value = typeof getComputedStyle === "function" ?
+    getComputedStyle(document.documentElement).getPropertyValue(token).trim() : "";
+  const number = parseFloat(value);
+  if (!Number.isFinite(number)) return 0;
+  return /ms$/.test(value) ? number : number * 1000;
+}
+
+/* The thumbnail's box while it is on the screen to fly to or from. */
+function imageViewerVisibleBox(node) {
+  if (!node || !node.isConnected) return null;
+  const box = node.getBoundingClientRect();
+  if (!(box.width > 0 && box.height > 0)) return null;
+  if (box.bottom <= 0 || box.right <= 0 || box.top >= window.innerHeight ||
+      box.left >= window.innerWidth) return null;
+  return box;
+}
+
+class ImageViewer {
+  constructor(items, index = 0) {
+    this.items = items;
+    this.index = Math.min(Math.max(0, index), items.length - 1);
+    this.width = 0; this.height = 0;
+    this.s = 1; this.x = 0; this.y = 0; this.fit = 1;
+    this.origin = { left: 0, top: 0 };
+    this.extent = { width: 0, height: 0 };
+    this.pointers = new Map();
+    this.gesture = null;
+    this.pointerType = "mouse";
+    this.pinchMid = null;
+    this.generation = 0;
+    this.ready = false;
+    this.closed = false;
+    this.bare = false;
+    this.lastTap = null;
+    this.timers = new Set();
+  }
+
+  open(thumb = null) {
+    // a picture still flying home from a viewer just closed lands at once
+    for (const ghost of document.querySelectorAll(".iv-ghost")) ghost.remove();
+    const dialog = modal(`<h2 class="iv-name"></h2>
+      <div class="iv-scrim"></div>
+      <div class="iv-stage"><img class="iv-img" alt="" draggable="false"><p class="iv-status hidden" role="status"></p></div>
+      <button type="button" class="icon-btn iv-nav iv-prev" aria-label="Previous image"></button>
+      <button type="button" class="icon-btn iv-nav iv-next" aria-label="Next image"></button>
+      <div class="iv-bar">
+        <button type="button" class="icon-btn iv-out" aria-label="Zoom out"></button>
+        <button type="button" class="iv-level"></button>
+        <button type="button" class="icon-btn iv-in" aria-label="Zoom in"></button>
+        <span class="iv-sep" aria-hidden="true"></span>
+        <a class="icon-btn iv-download" aria-label="Download image"></a>
+      </div>`, "image-viewer", () => openImageViewer(this.items, this.index));
+    this.dialog = dialog;
+    const m = this.m = dialog.m;
+    const q = selector => m.querySelector(selector);
+    m.parentNode.classList.add("iv-backdrop");
+    m.classList.add("iv-enter");
+    m.classList.toggle("iv-single", this.items.length < 2);
+    this.head = q(".modal-head");
+    this.name = q(".iv-name");
+    this.meta = el("span", "iv-meta");
+    const caption = el("div", "iv-caption");
+    this.head.insertBefore(caption, this.name);
+    caption.append(this.name, this.meta);
+    this.scrim = q(".iv-scrim");
+    this.stage = q(".iv-stage");
+    this.img = q(".iv-img");
+    this.status = q(".iv-status");
+    this.prevButton = q(".iv-prev");
+    this.nextButton = q(".iv-next");
+    this.bar = q(".iv-bar");
+    this.outButton = q(".iv-out");
+    this.level = q(".iv-level");
+    this.inButton = q(".iv-in");
+    this.downloadLink = q(".iv-download");
+    this.downloadLink.appendChild(downloadIcon(14));
+    this.prevButton.appendChild(chevronIcon(18, "left"));
+    this.nextButton.appendChild(chevronIcon(18, "right"));
+    this.outButton.appendChild(minusIcon(14));
+    this.inButton.appendChild(plusIcon(14));
+    this.prevButton.onclick = () => this.go(this.index - 1);
+    this.nextButton.onclick = () => this.go(this.index + 1);
+    this.outButton.onclick = () => this.zoomTo(this.s / IMAGE_VIEWER_STEP);
+    this.inButton.onclick = () => this.zoomTo(this.s * IMAGE_VIEWER_STEP);
+    this.level.onclick = () => this.toggleZoom();
+    this.stage.addEventListener("pointerdown", event => this.down(event));
+    this.stage.addEventListener("pointermove", event => this.move(event));
+    this.stage.addEventListener("pointerup", event => this.up(event));
+    this.stage.addEventListener("pointercancel", event => this.up(event));
+    this.stage.addEventListener("wheel", event => this.wheel(event), { passive: false });
+    this.stage.addEventListener("dblclick", event => this.doubleClick(event));
+    m.addEventListener("keydown", event => this.key(event));
+    this.resize = () => this.relayout();
+    window.addEventListener("resize", this.resize);
+    dialog.onDismiss(() => this.dismiss());
+    dialog.onClose(() => this.teardown());
+    imageViewerOpen = this;
+    m.focus({ preventScroll: true });
+    void this.scrim.offsetWidth;   // the faded first frame is committed before the fade
+    requestAnimationFrame(() => m.classList.remove("iv-enter"));
+    this.show(this.index, 0, thumb || this.thumbFor(this.index));
+    return this;
+  }
+
+  later(fn, ms) {
+    const timer = setTimeout(() => { this.timers.delete(timer); if (!this.closed) fn(); }, ms);
+    this.timers.add(timer);
+    return timer;
+  }
+
+  /* The thumbnail an item came from, or the same picture's thumbnail now on
+     the page when the transcript was drawn again since. */
+  thumbFor(index) {
+    const item = this.items[index];
+    if (!item) return null;
+    if (item.thumb && item.thumb.isConnected) return item.thumb;
+    return [...document.querySelectorAll(".attach-view .attach-thumb")]
+      .find(img => (img.currentSrc || img.src) === item.url) || null;
+  }
+
+  counter() {
+    const parts = [];
+    if (this.width && this.height) parts.push(this.width + " × " + this.height);
+    if (this.items.length > 1) parts.push((this.index + 1) + " of " + this.items.length);
+    return parts.join(" · ");
+  }
+
+  /* A button about to be disabled hands its focus to the dialog first, so
+     the keys keep reaching the viewer. */
+  enable(button, on) {
+    if (!on && document.activeElement === button) this.m.focus({ preventScroll: true });
+    button.disabled = !on;
+  }
+
+  show(index, direction = 0, thumb = null) {
+    const item = this.items[index];
+    if (!item) return;
+    const generation = ++this.generation;
+    this.index = index;
+    this.ready = false;
+    this.gesture = null;
+    this.pointers.clear();
+    this.width = this.height = 0;
+    this.name.textContent = item.name || "Image";
+    this.img.alt = item.name || "";
+    this.downloadLink.href = item.url;
+    this.downloadLink.download = item.name || "image";
+    this.downloadLink.setAttribute("aria-label", "Download " + (item.name || "image"));
+    this.meta.textContent = this.counter();
+    this.enable(this.prevButton, index > 0);
+    this.enable(this.nextButton, index < this.items.length - 1);
+    this.m.classList.remove("iv-failed");
+    this.m.classList.add("iv-loading");
+    this.status.classList.add("hidden");
+    this.later(() => {
+      if (generation === this.generation && !this.ready) this.note("Loading…", "");
+    }, 250);
+    const img = this.img;
+    const settle = ok => {
+      if (generation !== this.generation || this.closed) return;
+      if (ok && img.naturalWidth > 0) this.loaded(direction, thumb);
+      else this.failed();
+    };
+    img.onload = img.onerror = null;
+    img.src = item.url;
+    if (typeof img.decode === "function")
+      img.decode().then(() => settle(true), () => settle(img.complete));
+    else {
+      img.onload = () => settle(true);
+      img.onerror = () => settle(false);
+    }
+  }
+
+  note(text, tone) {
+    this.status.textContent = text;
+    this.status.className = "iv-status" + (tone ? " " + tone : "");
+  }
+
+  failed() {
+    this.ready = false;
+    this.width = this.height = 0;
+    this.m.classList.remove("iv-loading");
+    this.m.classList.add("iv-failed");
+    this.note("Could not load this image", "bad");
+    this.enable(this.outButton, false);
+    this.enable(this.inButton, false);
+    this.enable(this.level, false);
+  }
+
+  loaded(direction, thumb) {
+    const img = this.img;
+    this.width = img.naturalWidth;
+    this.height = img.naturalHeight;
+    img.style.width = this.width + "px";
+    img.style.height = this.height + "px";
+    this.meta.textContent = this.counter();
+    this.m.classList.remove("iv-loading");
+    this.status.classList.add("hidden");
+    this.enable(this.level, true);
+    this.measure();
+    this.placeFit();
+    this.ready = true;
+    const box = imageViewerMotion() ? imageViewerVisibleBox(thumb) : null;
+    if (box) this.flyFrom(box);
+    else if (direction && imageViewerMotion()) this.slideIn(direction);
+    else this.apply(false);
+  }
+
+  /* The stage is the whole window; the picture fits inside the frame the
+     chrome leaves, kept symmetric so a fitted picture and a zoomed one share
+     one centre and zooming never makes it jump sideways. */
+  measure() {
+    const stage = this.stage.getBoundingClientRect();
+    this.origin = { left: stage.left, top: stage.top };
+    this.extent = { width: stage.width, height: stage.height };
+    const head = this.head.getBoundingClientRect(), bar = this.bar.getBoundingClientRect();
+    const padY = Math.max(0, head.bottom - stage.top, stage.bottom - bar.top) + IMAGE_VIEWER_FRAME;
+    let padX = IMAGE_VIEWER_FRAME * 2;
+    if (this.items.length > 1) {
+      const nav = this.prevButton.getBoundingClientRect();
+      padX = Math.max(padX, nav.right - stage.left + IMAGE_VIEWER_FRAME);
+    }
+    this.fit = imageViewerFit(this.width, this.height,
+      { width: stage.width - padX * 2, height: stage.height - padY * 2 });
+  }
+
+  placeFit() {
+    this.s = this.fit;
+    [this.x, this.y] = this.clamped(0, 0, this.fit);
+  }
+
+  relayout() {
+    if (!this.ready || this.closed) return;
+    const fitted = this.s <= this.fit * 1.001;
+    this.measure();
+    if (fitted) this.placeFit();
+    else {
+      this.s = Math.min(this.maxScale(), Math.max(this.fit, this.s));
+      [this.x, this.y] = this.clamped(this.x, this.y, this.s);
+    }
+    this.apply(false);
+  }
+
+  maxScale() { return Math.max(IMAGE_VIEWER_MAX_SCALE, this.fit); }
+
+  clamped(x, y, s, give = 0) {
+    return [imageViewerClamp(x, imageViewerRange(this.width * s, this.extent.width), give),
+            imageViewerClamp(y, imageViewerRange(this.height * s, this.extent.height), give)];
+  }
+
+  pannable() {
+    return this.width * this.s > this.extent.width + 0.5 ||
+      this.height * this.s > this.extent.height + 0.5;
+  }
+
+  hits(point) {
+    return point.x >= this.x && point.x <= this.x + this.width * this.s &&
+      point.y >= this.y && point.y <= this.y + this.height * this.s;
+  }
+
+  point(event) {
+    return { x: event.clientX - this.origin.left, y: event.clientY - this.origin.top };
+  }
+
+  /* Where the picture is drawn this instant: mid-zoom or mid-glide the
+     transition's own value, not the place it is heading for. */
+  rendered() {
+    if (typeof getComputedStyle === "function" && typeof DOMMatrixReadOnly === "function") {
+      const shown = getComputedStyle(this.img).transform;
+      if (shown && shown !== "none") {
+        const matrix = new DOMMatrixReadOnly(shown);
+        return { s: matrix.a, x: matrix.e, y: matrix.f };
+      }
+    }
+    return { s: this.s, x: this.x, y: this.y };
+  }
+
+  apply(animate = false) {
+    const img = this.img;
+    img.classList.toggle("iv-anim", !!animate && imageViewerMotion());
+    img.style.transform = `translate3d(${this.x}px,${this.y}px,0) scale(${this.s})`;
+    img.style.borderRadius = IMAGE_VIEWER_RADIUS / this.s + "px";
+    img.classList.toggle("iv-crisp", this.s >= IMAGE_VIEWER_CRISP);
+    const zoomed = this.s > this.fit * 1.001;
+    this.m.classList.toggle("iv-zoomed", zoomed);
+    this.m.classList.toggle("iv-pannable", this.pannable());
+    this.level.textContent = Math.round(this.s * 100) + "%";
+    this.level.setAttribute("aria-label", zoomed ? "Zoom to fit" :
+      "Zoom to " + Math.round(this.zoomTarget() * 100) + "%");
+    this.enable(this.outButton, zoomed);
+    this.enable(this.inButton, this.s < this.maxScale() * 0.999);
+  }
+
+  /* A press catches a running zoom or glide where it is drawn. */
+  hold() {
+    const img = this.img;
+    if (!img.classList.contains("iv-anim") && !img.style.clipPath) return;
+    const shown = this.rendered();
+    img.style.clipPath = "";
+    this.s = shown.s; this.x = shown.x; this.y = shown.y;
+    this.apply(false);
+  }
+
+  zoomTarget() {
+    return 1 / this.fit >= 1.6 ? 1 : Math.min(this.maxScale(), this.fit * 2.5);
+  }
+
+  zoomTo(scale, px = this.extent.width / 2, py = this.extent.height / 2, animate = true) {
+    if (!this.ready) return;
+    const s = Math.min(this.maxScale(), Math.max(this.fit, scale));
+    const next = imageViewerAround(this, s, px, py);
+    this.s = s;
+    [this.x, this.y] = this.clamped(next.x, next.y, s);
+    this.apply(animate);
+  }
+
+  toggleZoom(px, py) {
+    if (this.s > this.fit * 1.001) this.zoomTo(this.fit, px, py);
+    else this.zoomTo(this.zoomTarget(), px, py);
+  }
+
+  setBare(on) {
+    this.bare = on;
+    this.m.classList.toggle("iv-bare", on);
+  }
+
+  wheel(event) {
+    event.preventDefault();
+    if (!this.ready || this.gesture) return;
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? this.extent.height : 1;
+    const dx = event.deltaX * unit, dy = event.deltaY * unit;
+    // a trackpad's sideways stroke pans a picture wider than the window
+    if (!event.ctrlKey && Math.abs(dx) > Math.abs(dy)) {
+      if (!this.pannable()) return;
+      [this.x, this.y] = this.clamped(this.x - dx, this.y, this.s);
+      return this.apply(false);
+    }
+    if (!dy) return;
+    // a pinch on a trackpad arrives as small ctrl+wheel steps and follows the
+    // fingers; a mouse wheel's notch is one large step, eased rather than jumped
+    const p = this.point(event);
+    this.zoomTo(this.s * Math.exp(-dy * (event.ctrlKey ? 0.01 : 0.002)), p.x, p.y,
+      !event.ctrlKey && Math.abs(dy) >= 40);
+  }
+
+  doubleClick(event) {
+    if (!this.ready || this.pointerType !== "mouse") return;
+    const p = this.point(event);
+    if (this.hits(p)) this.toggleZoom(p.x, p.y);
+  }
+
+  key(event) {
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+    const target = event.target;
+    if ((event.key === "Enter" || event.key === " ") && target && target.tagName === "BUTTON") return;
+    const panX = this.width * this.s > this.extent.width + 0.5;
+    const panY = this.height * this.s > this.extent.height + 0.5;
+    const step = 0.15;
+    switch (event.key) {
+      case "+": case "=": this.zoomTo(this.s * IMAGE_VIEWER_STEP); break;
+      case "-": case "_": this.zoomTo(this.s / IMAGE_VIEWER_STEP); break;
+      case "0": this.zoomTo(this.fit); break;
+      case "1": this.zoomTo(1); break;
+      case "PageUp": this.go(this.index - 1); break;
+      case "PageDown": this.go(this.index + 1); break;
+      case "ArrowLeft": case "ArrowRight": {
+        const sign = event.key === "ArrowLeft" ? 1 : -1;
+        if (!panX) { this.go(this.index - sign); break; }
+        [this.x, this.y] = this.clamped(this.x + sign * this.extent.width * step, this.y, this.s);
+        this.apply(true);
+        break;
+      }
+      case "ArrowUp": case "ArrowDown": {
+        if (!panY) return;
+        const sign = event.key === "ArrowUp" ? 1 : -1;
+        [this.x, this.y] = this.clamped(this.x, this.y + sign * this.extent.height * step, this.s);
+        this.apply(true);
+        break;
+      }
+      default: return;
+    }
+    event.preventDefault();
+  }
+
+  /* A picture that failed to load still takes a press: beside nothing, it
+     closes, and a finger still swipes to the next picture or pulls away. */
+  down(event) {
+    if (!this.ready && !this.m.classList.contains("iv-failed")) return;
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    this.pointerType = event.pointerType || "mouse";
+    try { this.stage.setPointerCapture(event.pointerId); } catch (error) { /* already released */ }
+    this.hold();
+    const p = this.point(event);
+    this.pointers.set(event.pointerId, p);
+    if (this.pointerType === "mouse") event.preventDefault();
+    if (this.pointers.size === 2) return this.pinchStart();
+    if (this.pointers.size > 2) return;
+    this.gesture = {
+      kind: "press", start: p, s: this.s, x: this.x, y: this.y, dx: 0, dy: 0,
+      at: event.timeStamp, onImage: this.hits(p), type: this.pointerType,
+      track: [{ t: event.timeStamp, x: p.x, y: p.y }],
+    };
+  }
+
+  move(event) {
+    if (!this.pointers.has(event.pointerId)) return;
+    const p = this.point(event);
+    this.pointers.set(event.pointerId, p);
+    const g = this.gesture;
+    if (!g) return;
+    if (g.kind === "pinch") return this.pinchMove();
+    g.track.push({ t: event.timeStamp, x: p.x, y: p.y });
+    if (g.track.length > 8) g.track.shift();
+    const dx = g.dx = p.x - g.start.x, dy = g.dy = p.y - g.start.y;
+    if (g.kind === "press") {
+      if (Math.hypot(dx, dy) < 6) return;
+      // a zoomed picture pans; at its fit a finger swipes between pictures
+      // or pulls the viewer away, while a mouse drag there means nothing
+      g.kind = this.pannable() ? "pan" : g.type === "mouse" ? "still" :
+        Math.abs(dx) > Math.abs(dy) ? "swipe" : "pull";
+      if (g.kind !== "still") this.m.classList.add("iv-dragging");
+    }
+    if (g.kind === "pan") [this.x, this.y] = this.clamped(g.x + dx, g.y + dy, this.s, 0.35);
+    else if (g.kind === "swipe") {
+      const edge = dx > 0 ? this.index === 0 : this.index === this.items.length - 1;
+      this.x = g.x + (edge ? dx * 0.35 : dx);
+    } else if (g.kind === "pull") {
+      const shrink = 1 - Math.min(0.25, Math.abs(dy) / Math.max(1, this.extent.height) * 0.5);
+      this.s = g.s * shrink;
+      this.x = g.x + dx * 0.5 + this.width * g.s * (1 - shrink) / 2;
+      this.y = g.y + dy + this.height * g.s * (1 - shrink) / 2;
+      this.scrim.style.opacity = String(Math.max(0, 1 - Math.abs(dy) / (Math.max(1, this.extent.height) * 0.6)));
+    } else return;
+    this.apply(false);
+  }
+
+  up(event) {
+    if (!this.pointers.has(event.pointerId)) return;
+    this.pointers.delete(event.pointerId);
+    const g = this.gesture;
+    if (!g) return;
+    if (g.kind === "pinch") {
+      if (this.pointers.size === 1) {
+        // the finger still down carries on panning from where the pinch left it
+        const [p] = this.pointers.values();
+        this.gesture = { kind: "pan", start: p, s: this.s, x: this.x, y: this.y, dx: 0, dy: 0,
+          type: g.type, track: [{ t: event.timeStamp, x: p.x, y: p.y }] };
+      } else if (!this.pointers.size) {
+        this.gesture = null;
+        this.m.classList.remove("iv-dragging");
+        this.settle();
+      }
+      return;
+    }
+    if (this.pointers.size) return;
+    this.gesture = null;
+    this.m.classList.remove("iv-dragging");
+    const cancelled = event.type === "pointercancel";
+    const velocity = imageViewerVelocity(g.track, event.timeStamp);
+    if (g.kind === "press") { if (!cancelled) this.tap(g); }
+    else if (g.kind === "pan") this.glide(cancelled ? { x: 0, y: 0 } : velocity);
+    else if (g.kind === "swipe") this.swipeEnd(g, velocity, cancelled);
+    else if (g.kind === "pull") this.pullEnd(g, velocity, cancelled);
+  }
+
+  /* A mouse press beside the picture closes at once. A finger waits a beat
+     for a second tap, which zooms there; one tap beside the picture closes
+     and one on it hides or brings back the chrome. */
+  tap(g) {
+    if (g.type === "mouse") {
+      if (!g.onImage) this.dismiss();
+      return;
+    }
+    const last = this.lastTap;
+    if (last && g.at - last.at < IMAGE_VIEWER_TAP_MS &&
+        Math.hypot(g.start.x - last.x, g.start.y - last.y) < 30) {
+      this.lastTap = null;
+      clearTimeout(this.tapTimer);
+      this.toggleZoom(g.start.x, g.start.y);
+      return;
+    }
+    this.lastTap = { at: g.at, x: g.start.x, y: g.start.y };
+    clearTimeout(this.tapTimer);
+    this.tapTimer = this.later(() => {
+      this.lastTap = null;
+      if (g.onImage) this.setBare(!this.bare);
+      else this.dismiss();
+    }, IMAGE_VIEWER_TAP_MS);
+  }
+
+  glide(velocity) {
+    if (this.s < this.fit || this.s > this.maxScale()) return this.settle();
+    const reach = imageViewerMotion() && Math.hypot(velocity.x, velocity.y) > 0.2 ? IMAGE_VIEWER_GLIDE_MS : 0;
+    [this.x, this.y] = this.clamped(this.x + velocity.x * reach, this.y + velocity.y * reach, this.s);
+    this.apply(true);
+  }
+
+  settle() {
+    const s = Math.min(this.maxScale(), Math.max(this.fit, this.s));
+    const mid = this.pinchMid || { x: this.extent.width / 2, y: this.extent.height / 2 };
+    const next = s === this.s ? this : imageViewerAround(this, s, mid.x, mid.y);
+    this.s = s;
+    [this.x, this.y] = this.clamped(next.x, next.y, s);
+    this.scrim.style.opacity = "";
+    this.apply(true);
+  }
+
+  pinchStart() {
+    const [a, b] = [...this.pointers.values()];
+    this.scrim.style.opacity = "";
+    this.pinchMid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    this.gesture = { kind: "pinch", span: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+      mid: this.pinchMid, s: this.s, x: this.x, y: this.y, type: this.pointerType };
+    this.m.classList.add("iv-dragging");
+  }
+
+  pinchMove() {
+    const g = this.gesture, [a, b] = [...this.pointers.values()];
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    let s = g.s * Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)) / g.span;
+    // past either bound the picture follows the fingers reluctantly
+    const low = this.fit, high = this.maxScale();
+    if (s < low) s = low * Math.pow(s / low, 0.4);
+    else if (s > high) s = high * Math.pow(s / high, 0.4);
+    const k = s / g.s;
+    this.s = s;
+    [this.x, this.y] = this.clamped(mid.x - (g.mid.x - g.x) * k, mid.y - (g.mid.y - g.y) * k, s, 0.35);
+    this.pinchMid = mid;
+    this.apply(false);
+  }
+
+  swipeEnd(g, velocity, cancelled) {
+    const dir = g.dx < 0 ? 1 : -1, target = this.index + dir;
+    const far = Math.abs(g.dx) > this.extent.width * 0.18 ||
+      (Math.abs(velocity.x) > 0.45 && Math.sign(velocity.x) === Math.sign(g.dx));
+    if (!cancelled && far && target >= 0 && target < this.items.length) return this.go(target, dir);
+    this.s = g.s; this.x = g.x; this.y = g.y;
+    this.apply(true);
+  }
+
+  pullEnd(g, velocity, cancelled) {
+    const far = Math.abs(g.dy) > Math.min(140, this.extent.height * 0.18) || Math.abs(velocity.y) > 0.55;
+    if (!cancelled && far) return this.dismiss();
+    this.s = g.s; this.x = g.x; this.y = g.y;
+    this.scrim.style.opacity = "";
+    this.apply(true);
+  }
+
+  /* The picture leaves the way the next one comes from, which then slides
+     in. The index moves at once, so a second press counts from the picture
+     it asked for and cuts the first one's exit short. */
+  go(index, dir = Math.sign(index - this.index)) {
+    if (index < 0 || index >= this.items.length || index === this.index) return;
+    const leaving = this.ready && imageViewerMotion();
+    this.index = index;
+    this.ready = false;
+    clearTimeout(this.leaveTimer);
+    if (!leaving) return this.show(index, dir);
+    this.enable(this.prevButton, index > 0);
+    this.enable(this.nextButton, index < this.items.length - 1);
+    this.img.classList.add("iv-leaving");
+    this.x -= dir * this.extent.width * 0.2;
+    this.apply(true);
+    this.leaveTimer = this.later(() => this.show(index, dir), imageViewerMs("--t-fast"));
+  }
+
+  slideIn(dir) {
+    const img = this.img, x = this.x;
+    img.classList.add("iv-leaving");
+    this.x = x + dir * this.extent.width * 0.2;
+    this.apply(false);
+    void img.offsetWidth;   // the start is laid out before the move begins
+    img.classList.remove("iv-leaving");
+    this.x = x;
+    this.apply(true);
+  }
+
+  /* One corner radius for the whole flight - the fitted picture's - so the
+     corners grow into place with the scale instead of swelling mid-way. */
+  flyFrom(box) {
+    const img = this.img, start = imageViewerCover(box, this.width, this.height, this.origin);
+    const fit = { s: this.s, x: this.x, y: this.y }, radius = IMAGE_VIEWER_RADIUS / fit.s;
+    img.classList.remove("iv-leaving");
+    this.s = start.s; this.x = start.x; this.y = start.y;
+    this.apply(false);
+    img.style.borderRadius = radius + "px";
+    img.style.clipPath = imageViewerInset(start.inset, radius);
+    void img.offsetWidth;   // the start is laid out before the flight begins
+    this.s = fit.s; this.x = fit.x; this.y = fit.y;
+    this.apply(true);
+    img.style.clipPath = imageViewerInset([0, 0, 0, 0], radius);
+    this.later(() => { img.style.clipPath = ""; }, imageViewerMs("--t-slow"));
+  }
+
+  /* Close now - the layer, history and focus are released in this same
+     moment - and let a copy of the picture fly back to its thumbnail, or
+     fade where it stands when the thumbnail is out of sight. */
+  dismiss() {
+    if (this.closed) return;
+    if (this.ready && imageViewerMotion()) this.ghost(imageViewerVisibleBox(this.thumbFor(this.index)));
+    this.dialog.close();
+  }
+
+  ghost(box) {
+    const layer = el("div", "iv-ghost");
+    layer.setAttribute("aria-hidden", "true");
+    const scrim = el("div", "iv-scrim");
+    scrim.style.opacity = this.scrim.style.opacity;
+    const img = this.img, shown = this.rendered();
+    const left = this.origin.left, top = this.origin.top;
+    const place = (s, x, y) => {
+      img.style.transform = `translate3d(${x + left}px,${y + top}px,0) scale(${s})`;
+    };
+    img.classList.remove("iv-anim", "iv-leaving");
+    img.style.clipPath = "";
+    img.alt = "";
+    place(shown.s, shown.x, shown.y);
+    img.style.borderRadius = IMAGE_VIEWER_RADIUS / shown.s + "px";
+    layer.append(scrim, img);
+    document.body.appendChild(layer);
+    void img.offsetWidth;
+    layer.classList.add("iv-going");
+    img.classList.add("iv-anim");
+    if (box) {
+      const end = imageViewerCover(box, this.width, this.height, this.origin);
+      place(end.s, end.x, end.y);
+      img.style.clipPath = imageViewerInset(end.inset, IMAGE_VIEWER_RADIUS / shown.s);
+    } else {
+      const shrink = 0.94, w = this.width * shown.s, h = this.height * shown.s;
+      place(shown.s * shrink, shown.x + w * (1 - shrink) / 2, shown.y + h * (1 - shrink) / 2);
+      img.classList.add("iv-leaving");
+    }
+    setTimeout(() => layer.remove(), imageViewerMs("--t-slow") + 60);
+  }
+
+  teardown() {
+    this.closed = true;
+    this.generation++;
+    window.removeEventListener("resize", this.resize);
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers.clear();
+    this.img.onload = this.img.onerror = null;
+    if (imageViewerOpen === this) imageViewerOpen = null;
+  }
+}
+
+/* Open the viewer on `items` ({url, name, thumb}) at `index`, flying from
+   `thumb` when it is on the screen. */
+function openImageViewer(items, index = 0, thumb = null) {
+  const list = (items || []).filter(item => item && item.url);
+  if (!list.length) return null;
+  const at = Math.max(0, list.indexOf(items[index]));
+  return new ImageViewer(list, at).open(thumb || (list[at] && list[at].thumb));
+}
+
+/* A thumbnail's own button: the viewer opens on the images of its strip -
+   one message's attachments, or the ones waiting in one prompt box. */
+function openImageViewerFrom(button) {
+  const strip = button.closest(".attach-strip");
+  const buttons = strip ? [...strip.querySelectorAll(".attach-view")] : [button];
+  const items = buttons.map(node => {
+    const img = node.querySelector(".attach-thumb");
+    return { url: img ? img.currentSrc || img.src : "", name: img ? img.alt : "", thumb: img };
+  });
+  return openImageViewer(items, Math.max(0, buttons.indexOf(button)));
 }
 
 /* Resolve the configuration at the queue tail in visible order. Engine rows
