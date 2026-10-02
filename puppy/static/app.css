@@ -1412,7 +1412,10 @@ select.choice-native{display:none!important}
 .prompt-plate.up svg{transform:rotate(-90deg)}
 .prompt-plate.down svg{transform:rotate(90deg)}
 @media (hover:hover){.prompt-plate:not(:disabled):hover{background:var(--acc);border-color:var(--acc);color:#fff}}
-.prompt-plate:disabled{opacity:.35;cursor:default}
+/* a greyed plate keeps its solid disc - the thread ends under it - and
+   fades only its arrow and rim */
+.prompt-plate:disabled{cursor:default;border-color:var(--line)}
+.prompt-plate:disabled svg{opacity:.35}
 .prompt-plate:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 @media (prefers-reduced-motion:reduce){.prompt-pin,.prompt-pin-dot,.prompt-plate{transition:none}}
 /* Keep every event and live block mounted: pairing, history cursors, folded

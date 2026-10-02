@@ -1990,6 +1990,8 @@ async def prompt_gutter_checks(instance):
                 threadTop: thread.top, threadBottom: thread.bottom, upMiddle: middle(up), downMiddle: middle(down),
                 inner: inner.left, composer: composer.left, scrollTop: scroll.top,
                 upDisabled: g.up.disabled, downDisabled: g.down.disabled, violet,
+                discs: [g.up, g.down].map(b => { const c = getComputedStyle(b);
+                    return {opacity: c.opacity, background: c.backgroundColor}; }),
                 hidden: g.layer.classList.contains('hidden') || g.plates.classList.contains('hidden'),
                 gutter: v.root.style.getPropertyValue('--prompt-gutter'),
                 oldest: v.oldestSeq, detached: v.detached};
@@ -2029,6 +2031,9 @@ async def prompt_gutter_checks(instance):
             steer = [pin for pin in g["pins"] if pin["steer"]]
             assert steer and all(pin["border"] == g["violet"] and pin["number"] == "" for pin in steer), (theme, steer)
             assert g["downDisabled"] and not g["upDisabled"], ("at the tail only the top plate steps", g)
+            # a greyed plate fades its arrow, never its disc: the thread ends under it
+            assert all(d["opacity"] == "1" and not d["background"].startswith("rgba") for d in g["discs"]), \
+                ("both discs solid, the greyed one too", theme, g["discs"])
         await evaluate(instance, "applyTheme('dark'); true")
 
         # real clicks on the top plate, prompt by prompt, back into history not on the page
