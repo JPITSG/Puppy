@@ -1937,6 +1937,168 @@ async def tool_image_checks(instance):
           "named for the file read, the card never folded by it, its head never grown, focus home on Escape", flush=True)
 
 
+async def prompt_gutter_checks(instance):
+    """The prompt gutter in real layout. A session longer than the page, its
+    first prompts not loaded: a pin level with every prompt on the page,
+    numbered from the session's first prompt (the node's index) with a steer
+    a violet ring; pins, thread and plates on one line, the thread running
+    from under one plate to under the other; the column still aligned with
+    the composer. Real clicks on the top plate step back prompt by prompt,
+    each landing just under the plate with its pin lit, into history the
+    page did not hold, until the first prompt greys it; the bottom plate steps
+    back to the tail. A narrow pane makes the gutter's room with every column
+    moving together; a phone and a transcript with Questions filtered out
+    show none. Both themes."""
+    page = instance.page_session
+    sid = db.create_session("Prompt history", "claude", "/home/mira/projects/harbor", "", "", "", "default")
+    steered = {7, 19, 28}
+    for turn in range(1, 31):
+        db.add_event(sid, "user", {"text": "Step %d of the migration" % turn})
+        for index in range(7):
+            db.add_event(sid, "assistant", {"text": "Working on step %d, part %d." % (turn, index + 1)})
+            if turn in steered and index == 3:
+                db.add_event(sid, "user", {"text": "Keep the old column for step %d" % turn, "steering": True,
+                                           "request_id": "steer-%d" % turn, "turn_id": "turn-%d" % turn})
+        db.add_event(sid, "result", {"ok": True, "duration_ms": 1000})
+    runner.broadcast_sessions()
+    view = "sessionViewFor(0,%d)" % sid
+    await until(instance, "!!findSessionMeta(0,%d)" % sid)
+    await instance.call("Emulation.setEmulatedMedia", {"features": [
+        {"name": "prefers-reduced-motion", "value": "reduce"}]}, session=page)
+    await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+        "deviceScaleFactor": 1, "mobile": False}, session=page)
+    await evaluate(instance, "openSessionTab(0,%d,findSessionMeta(0,%d)); true" % (sid, sid))
+    await until(instance, "!!%s && %s.draftReady && %s.promptGutter.index.size === 33 && "
+                          "%s.scroll.querySelectorAll('.prompt-pin').length > 0" % (view, view, view, view))
+    measure = """(() => {
+        const v = %s, g = v.promptGutter, r = n => n.getBoundingClientRect();
+        const scroll = r(v.scroll), up = r(g.up), down = r(g.down), thread = r(g.thread);
+        const centre = box => box.left + box.width / 2, middle = box => box.top + box.height / 2;
+        const inner = r(v.inner), composer = r(v.composer.box);
+        const bubbles = new Map(g.bubbles().map(node => [node.dataset.seq, node]));
+        const pins = [...g.pins.entries()].map(([seq, pin]) => {
+            const box = r(pin), dot = r(pin.querySelector('.prompt-pin-dot'));
+            return {seq, number: pin.querySelector('.prompt-pin-dot').textContent, steer: pin.classList.contains('steer'),
+                    centre: centre(dot), gap: box.top - r(bubbles.get(String(seq))).top, right: box.right,
+                    tucked: pin.classList.contains('tucked'), on: pin.classList.contains('on'),
+                    border: getComputedStyle(pin.querySelector('.prompt-pin-dot')).borderTopColor};
+        });
+        const probe = document.createElement('span');
+        probe.style.color = 'var(--viz-7)'; document.body.appendChild(probe);
+        const violet = getComputedStyle(probe).color; probe.remove();
+        return {pins, up: centre(up), down: centre(down), thread: centre(thread),
+                threadTop: thread.top, threadBottom: thread.bottom, upMiddle: middle(up), downMiddle: middle(down),
+                inner: inner.left, composer: composer.left, scrollTop: scroll.top,
+                upDisabled: g.up.disabled, downDisabled: g.down.disabled, violet,
+                hidden: g.layer.classList.contains('hidden') || g.plates.classList.contains('hidden'),
+                gutter: v.root.style.getPropertyValue('--prompt-gutter'),
+                oldest: v.oldestSeq, detached: v.detached};
+    })()""" % view
+
+    def lined(g, label):
+        assert not g["hidden"] and g["pins"], (label, g)
+        for pin in g["pins"]:
+            assert abs(pin["centre"] - g["thread"]) < 0.6, ("each pin on the thread", label, pin, g["thread"])
+            assert abs(pin["gap"] - 4) < 0.6, ("level with its prompt", label, pin)
+            assert pin["right"] <= g["inner"] - 4, ("clear of the column", label, pin, g["inner"])
+        assert abs(g["up"] - g["thread"]) < 0.6 and abs(g["down"] - g["thread"]) < 0.6, (label, g)
+        assert abs(g["threadTop"] - g["upMiddle"]) < 0.6 and abs(g["threadBottom"] - g["downMiddle"]) < 0.6, \
+            ("the thread ends under both plates", label, g)
+        assert abs(g["inner"] - g["composer"]) < 0.6, ("the column still lines up with the composer", label, g)
+
+    async def press(plate):
+        point = await evaluate(instance, """(() => { const b = %s.promptGutter.%s.getBoundingClientRect();
+            return {x: b.left + b.width / 2, y: b.top + b.height / 2}; })()""" % (view, plate))
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1),
+                                session=page)
+        await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+
+    try:
+        for theme in ("dark", "light"):
+            await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+            await evaluate(instance, "%s.returnToTail ? %s.returnToTail(false) : null" % (view, view))
+            await until(instance, "!%s.detached && %s.scroll.querySelectorAll('.prompt-pin').length > 0" % (view, view))
+            await evaluate(instance, "%s.scrollBottom(true); %s.promptGutter.render(); true" % (view, view))
+            g = await evaluate(instance, measure)
+            lined(g, theme)
+            assert g["gutter"] == "0px", ("a 1440px desktop column keeps its own margin", g["gutter"])
+            numbers = [pin["number"] for pin in g["pins"] if not pin["steer"]]
+            assert numbers[-1] == "30" and int(numbers[0]) > 1, ("numbered from the session's first prompt", numbers)
+            assert g["oldest"] > 1, "the first prompts are not on the page"
+            steer = [pin for pin in g["pins"] if pin["steer"]]
+            assert steer and all(pin["border"] == g["violet"] and pin["number"] == "" for pin in steer), (theme, steer)
+            assert g["downDisabled"] and not g["upDisabled"], ("at the tail only the top plate steps", g)
+        await evaluate(instance, "applyTheme('dark'); true")
+
+        # real clicks on the top plate, prompt by prompt, back into history not on the page
+        seen = []
+        for _ in range(40):
+            g = await evaluate(instance, measure)
+            if g["upDisabled"]:
+                break
+            await press("up")
+            await until(instance, "!!%s.promptGutter.layout && %s.promptGutter.layout.some(e => e.pin.classList.contains('on'))" % (view, view))
+            landed = await evaluate(instance, """(() => { const v = %s, g = v.promptGutter;
+                const lit = g.layout.find(e => e.pin.classList.contains('on'));
+                const node = g.bubbles().find(n => n.dataset.seq === String(lit.seq));
+                return {seq: lit.seq, offset: node.getBoundingClientRect().top - v.scroll.getBoundingClientRect().top,
+                        flashed: node.classList.contains('search-flash'), scrollTop: v.scroll.scrollTop}; })()""" % view)
+            seen.append(landed["seq"])
+            if landed["scrollTop"] > 0:
+                assert abs(landed["offset"] - 54) < 2, ("landed under the top plate", landed)
+            assert landed["flashed"], landed
+        # from the tail, where the last prompt is already in view below the
+        # reading line, every earlier prompt in turn: 32 of the 33
+        assert len(seen) == 32 and seen == sorted(seen, reverse=True) and seen[-1] == 1, \
+            ("every prompt, newest to oldest", seen)
+        g = await evaluate(instance, measure)
+        assert g["upDisabled"] and g["oldest"] == 1, ("the first prompt reached through older history", g)
+        first = [pin for pin in g["pins"] if pin["on"]]
+        assert first and first[0]["number"] == "1", first
+        # and the bottom plate walks back down to the tail
+        for _ in range(40):
+            if (await evaluate(instance, measure))["downDisabled"]:
+                break
+            await press("down")
+        assert (await evaluate(instance, "%s.promptGutter.layout.at(-1).pin.classList.contains('on')" % view)), \
+            "the last prompt reached"
+
+        # a narrow pane: the gutter takes its room and every column moves with it
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 920, "height": 800,
+            "deviceScaleFactor": 1, "mobile": False}, session=page)
+        await evaluate(instance, "%s.promptGutter.render(); true" % view)
+        g = await evaluate(instance, measure)
+        assert g["gutter"] == "44px", ("the gutter's room", g["gutter"])
+        lined(g, "narrow")
+        # a phone shows none, and neither does a transcript without its questions
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844,
+            "deviceScaleFactor": 2, "mobile": True}, session=page)
+        await evaluate(instance, "closeDrawer(); %s.promptGutter.render(); true" % view)
+        g = await evaluate(instance, measure)
+        assert g["hidden"] and g["gutter"] == "0px", ("no gutter on a phone", g)
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=page)
+        await evaluate(instance, "%s.applyChatLogMask(6); %s.promptGutter.render(); true" % (view, view))
+        assert (await evaluate(instance, measure))["hidden"], "Questions filtered out: no gutter"
+        await evaluate(instance, "%s.applyChatLogMask(7); %s.promptGutter.render(); true" % (view, view))
+        assert not (await evaluate(instance, measure))["hidden"]
+    finally:
+        await instance.call("Emulation.setEmulatedMedia", {"features": []}, session=page)
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=page)
+        await evaluate(instance, "applyTheme('dark'); if (%s) closeTab('s:0:%d'); activateTab('s:0:1'); true" % (view, sid))
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+        runner.broadcast_sessions()
+        await until(instance, "!findSessionMeta(0,%d)" % sid)
+    print("PASS: the prompt gutter's pins level with their prompts and numbered from the session's first, steers as violet "
+          "rings, pins, thread and plates on one line with the thread ending under both plates and the column aligned "
+          "with the composer, in both themes; real plate clicks stepping prompt by prompt into history not on the page "
+          "and back, each landing under the top plate; a narrow pane making room, a phone and a filtered transcript "
+          "showing none", flush=True)
+
+
 async def session_request_checks(instance):
     """The session request sheet in real layout, on a desktop and a phone in
     both themes: the facts on one column, the sessions on one list with no
@@ -2062,6 +2224,10 @@ async def question_scroll_checks(instance, capture=False):
         for(let i=0;i<18;i++) questionScrollHistory.appendChild(
             el('p',null,'Earlier dashboard discussion '+(i+1)+': keep the activity feed easy to scan.'));
         demoView.inner.appendChild(questionScrollHistory);
+        // The live status row stays the transcript's last row, as the console
+        // keeps it. Left above this history, the next status repaint would
+        // move it back down and re-pin the tail in the middle of a check.
+        demoView.syncLiveStatus();
         const preview=Array.from({length:12},(_,i)=>
             '- Detail '+(i+1)+': keep the project status and recent updates readable.').join('\\n');
         window.questionScrollReq={request_id:'question-scroll',tool_name:'AskUserQuestion',kind:'question',
@@ -5107,6 +5273,7 @@ async def checks(a, b, hub, capture=False):
     await status_color_checks(a, capture)
     await identity_pill_checks(a, capture)
     await session_request_checks(a)
+    await prompt_gutter_checks(a)
     await vnc_throughput_checks(a, capture)
     await vnc_connection_checks(a)
     await operation_cancellation_checks(a)
@@ -7566,6 +7733,9 @@ async def main(args):
             if args.question_scroll_only:
                 await question_scroll_checks(instances[0], args.screenshots)
                 return
+            if args.prompt_gutter_only:
+                await prompt_gutter_checks(instances[0])
+                return
             if args.session_request_only:
                 await session_request_checks(instances[0])
                 return
@@ -7626,6 +7796,7 @@ if __name__ == "__main__":
     parser.add_argument("--question-scroll-only", action="store_true")
     parser.add_argument("--image-viewer-only", action="store_true")
     parser.add_argument("--session-request-only", action="store_true")
+    parser.add_argument("--prompt-gutter-only", action="store_true")
     parser.add_argument("--sidebar-width-only", action="store_true")
     parser.add_argument("--backup-schedule-only", action="store_true")
     parser.add_argument("--lazy-assets-only", action="store_true")

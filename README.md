@@ -158,6 +158,17 @@ reading anywhere further up is never pulled away from it.
   Notices, errors and pending questions or approvals remain visible. Filtering
   keeps the transcript intact; opening a search hit or message link temporarily
   reveals its target without changing the saved choices.
+- **Skip between your prompts.** Every prompt you sent has a numbered pin in
+  the transcript's left gutter, level with it and showing its time; a prompt
+  you steered into a running turn is a violet ring instead. The pins sit on a
+  thread between two round buttons at the gutter's ends: **↑** goes to the
+  previous prompt and **↓** to the next, landing it just under the top button
+  with its pin lit, and a press on a pin goes to that prompt. Numbers count from
+  the session's first prompt, and the buttons reach prompts in older history
+  that is not loaded yet (on a backend without the prompt-history read, both
+  cover only the prompts on the page). The gutter uses the column's own margin and takes
+  room only from a narrow pane; it is not shown on a phone or while the chat
+  log hides Questions. Stepping between prompts adds no browser history entry.
 - **Three workspaces to choose from.** Point a session at a project directory,
   start it in a private disposable **Scratch** workspace with no folder to
   choose, or work on a project that lives on another backend
@@ -1157,6 +1168,7 @@ node tests/tool_result_ui_test.js    # tool results folded into their call's car
 python3 tests/tool_images_test.py    # tool pictures: the reader, each driver, storage, both runtimes
 node tests/image_viewer_ui_test.js   # the image viewer, and the pictures on tool cards
 node tests/session_request_ui_test.js # the session request and workflow sheet
+node tests/prompt_gutter_ui_test.js   # the prompt gutter: pins, numbers, plates and steps
 node tests/toast_ui_test.js          # notice grammar, tones, lives, folded repeats and their reports
 node tests/notices_ui_test.js        # the notification box: its slide, rows, live arrivals, its clear
 python3 tests/engine_messages_test.py # native notices, safe fallbacks, both runtimes' session sockets

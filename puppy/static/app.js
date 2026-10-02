@@ -18148,6 +18148,261 @@ class SharedDraft {
   }
 }
 
+/* ================= prompt gutter =================
+   Every prompt of a conversation is a numbered pin in the transcript's left
+   gutter, level with its bubble and scrolling with it, its time under it; a
+   prompt steered into a turn already running is a violet ring with no number
+   of its own. A thread runs down the gutter between two plates that stay at
+   its ends - the previous prompt at the top, the next at the bottom - and a
+   pin sliding behind a plate fades. A step lands its prompt just under the
+   top plate with the pin lit and the bubble flashed, loading history that is
+   not on the page through the message jump's own paging. The index of
+   prompts is the node's (kind=user pages, behind session-prompt-history), so
+   numbers count from the session's first prompt and the plates reach history
+   not loaded yet; live prompts join it as they arrive, and a node without the
+   read numbers the prompts on the page. The gutter takes PROMPT_GUTTER from
+   the column only where the column's own margin is too narrow (--prompt-
+   gutter, which the composer, queue strip and approval card share so they
+   stay aligned), stays out of a transcript narrower than
+   PROMPT_GUTTER_MIN_WIDTH, and out of one whose Questions filter is off. */
+const PROMPT_GUTTER = 44;
+const PROMPT_GUTTER_MIN_WIDTH = 520;
+const PROMPT_PIN_REACH = 52;     // from a pin's left edge to the column
+const PROMPT_PLATE = 32;
+const PROMPT_PLATE_INSET = 8;    // a plate's distance from the pane's edge
+const PROMPT_LANDING = 54;       // a step's prompt, just under the top plate
+const PROMPT_INDEX_PAGE = 500;
+
+class PromptGutter {
+  constructor(view) {
+    this.view = view;
+    this.index = new Map();        // seq -> {seq, at, steering}, the whole session's
+    this.indexGeneration = 0;
+    this.pins = new Map();         // seq -> pin, for the prompts on the page
+    this.frame = 0;
+    this.active = false;
+    this.room = "";               // the --prompt-gutter last written
+    this.layer = el("div", "prompt-pins hidden");
+    this.layer.setAttribute("aria-hidden", "true");
+    view.scroll.appendChild(this.layer);
+    /* the thread stands still between the plates, so it lives outside the
+       scroller, under it, and a scroll never has to move it */
+    this.thread = el("span", "prompt-thread hidden");
+    view.root.insertBefore(this.thread, view.scroll);
+    this.plates = el("div", "prompt-plates hidden");
+    this.up = this.plates.appendChild(this.plate("up", "Previous prompt"));
+    this.down = this.plates.appendChild(this.plate("down", "Next prompt"));
+    view.root.appendChild(this.plates);
+    this.mutations = new MutationObserver(() => this.schedule());
+    this.mutations.observe(view.inner, { childList: true });
+    this.sizes = new ResizeObserver(() => this.schedule());
+    this.sizes.observe(view.inner);
+    this.sizes.observe(view.scroll);
+    this.onScroll = () => this.follow();
+    view.scroll.addEventListener("scroll", this.onScroll, { passive: true });
+  }
+
+  plate(direction, label) {
+    const button = el("button", "prompt-plate " + direction);
+    button.type = "button";
+    button.setAttribute("aria-label", label);
+    button.appendChild(chevronIcon(12));
+    button.onclick = () => {
+      const seq = this.neighbour(direction === "up" ? -1 : 1);
+      if (seq) this.view.jumpToPrompt(seq);
+    };
+    return button;
+  }
+
+  destroy() {
+    this.indexGeneration++;
+    if (this.frame) cancelAnimationFrame(this.frame);
+    this.mutations.disconnect();
+    this.sizes.disconnect();
+    this.view.scroll.removeEventListener("scroll", this.onScroll);
+    this.thread.remove();
+  }
+
+  schedule() {
+    if (this.frame) return;
+    this.frame = requestAnimationFrame(() => { this.frame = 0; this.render(); });
+  }
+
+  /* The whole session's prompts, newest page first, as prompt recall reads
+     them; a failed or unsupported read leaves the prompts on the page. */
+  async refreshIndex() {
+    const { bid, sid } = this.view.tab;
+    const generation = ++this.indexGeneration;
+    if (bid && !backendHasCapability(state.backends.find(b => b.id === Number(bid)),
+      "session-prompt-history")) return;
+    const found = new Map();
+    let before = null;
+    try {
+      for (;;) {
+        const cursor = before === null ? "" : `&before_seq=${before}`;
+        const page = await api(bid,
+          `sessions/${sid}/events?kind=user&limit=${PROMPT_INDEX_PAGE}${cursor}`, { cache: "no-store" });
+        if (generation !== this.indexGeneration) return;
+        const events = page && Array.isArray(page.events) ? page.events : [];
+        for (const ev of events) {
+          if (!ev || ev.kind !== "user" || !Number.isSafeInteger(ev.seq)) continue;
+          found.set(ev.seq, { seq: ev.seq, at: Number(ev.ts) || 0,
+            steering: !!(ev.data && ev.data.steering) });
+        }
+        if (events.length < PROMPT_INDEX_PAGE || !Number.isSafeInteger(events[0] && events[0].seq) ||
+            (before !== null && events[0].seq >= before)) break;
+        before = events[0].seq;
+      }
+    } catch (_) { return; }
+    // a prompt that arrived while the pages were read is kept
+    for (const [seq, prompt] of this.index) if (!found.has(seq)) found.set(seq, prompt);
+    this.index = found;
+    this.schedule();
+  }
+
+  /* The prompt bubbles on the page, each with its seq. */
+  bubbles() {
+    return [...this.view.inner.children].filter(node =>
+      node.classList.contains("msg-user") && node.dataset.seq);
+  }
+
+  render() {
+    const view = this.view, scroll = view.scroll;
+    const bubbles = this.bubbles();
+    for (const node of bubbles) {
+      const seq = Number(node.dataset.seq);
+      if (!this.index.has(seq))
+        this.index.set(seq, { seq, at: Number(node.dataset.at) || 0, steering: node.dataset.steering === "1" });
+    }
+    const width = scroll.clientWidth;
+    const active = bubbles.length > 0 && scroll.clientHeight > 0 && width >= PROMPT_GUTTER_MIN_WIDTH &&
+      !!(view.chatLogMask & CHAT_LOG_TYPES[0].bit);
+    this.active = active;
+    this.layer.classList.toggle("hidden", !active);
+    this.thread.classList.toggle("hidden", !active);
+    this.plates.classList.toggle("hidden", !active);
+    /* the column's own margin when it is wide enough, the gutter's room when not */
+    const column = Math.min(900, width - 32);
+    const room = active && 16 + (width - 32 - column) / 2 < PROMPT_PIN_REACH + PROMPT_PLATE_INSET;
+    const gutter = (room ? PROMPT_GUTTER : 0) + "px";
+    if (this.room !== gutter) view.root.style.setProperty("--prompt-gutter", this.room = gutter);
+    if (!active) { this.layout = null; return; }
+    // numbers count the session's prompts, steers aside
+    const numbers = new Map();
+    let count = 0;
+    for (const prompt of [...this.index.values()].sort((a, b) => a.seq - b.seq))
+      numbers.set(prompt.seq, prompt.steering ? 0 : ++count);
+    // every place is read before anything is written
+    const box = scroll.getBoundingClientRect(), rootBox = view.root.getBoundingClientRect();
+    const height = scroll.clientHeight;
+    const centre = view.inner.getBoundingClientRect().left - box.left - PROMPT_PIN_REACH + 20;
+    const tops = bubbles.map(node => node.getBoundingClientRect().top - box.top + scroll.scrollTop);
+    const seen = new Set();
+    this.layout = bubbles.map((node, at) => {
+      const seq = Number(node.dataset.seq);
+      const prompt = this.index.get(seq);
+      seen.add(seq);
+      let pin = this.pins.get(seq);
+      if (!pin) {
+        pin = el("button", "prompt-pin");
+        pin.type = "button";
+        pin.tabIndex = -1;
+        pin._dot = pin.appendChild(el("span", "prompt-pin-dot"));
+        pin._time = pin.appendChild(el("span", "prompt-pin-time"));
+        pin.onclick = () => this.view.jumpToPrompt(seq);
+        this.pins.set(seq, pin);
+        this.layer.appendChild(pin);
+      }
+      const number = numbers.get(seq) || 0;
+      pin.classList.toggle("steer", prompt.steering);
+      pin._dot.textContent = prompt.steering ? "" : String(number);
+      const time = prompt.at ? fmtTime(prompt.at) : "";
+      pin._time.textContent = time;
+      pin.setAttribute("aria-label", (prompt.steering ? "Steered prompt" : `Prompt ${number}`) + (time ? ` · ${time}` : ""));
+      pin.style.top = tops[at] + 4 + "px";
+      pin.style.left = centre + "px";
+      return { seq, top: tops[at], pin, height: 0 };
+    });
+    for (const [seq, pin] of this.pins)
+      if (!seen.has(seq)) { pin.remove(); this.pins.delete(seq); }
+    const left = box.left - rootBox.left + centre, reach = PROMPT_PLATE_INSET + PROMPT_PLATE / 2;
+    this.thread.style.left = left + "px";
+    this.thread.style.top = box.top - rootBox.top + reach + "px";
+    this.thread.style.height = Math.max(0, height - 2 * reach) + "px";
+    this.up.style.left = this.down.style.left = left - PROMPT_PLATE / 2 + "px";
+    this.up.style.top = box.top - rootBox.top + PROMPT_PLATE_INSET + "px";
+    this.down.style.top = box.top - rootBox.top + height - PROMPT_PLATE_INSET - PROMPT_PLATE + "px";
+    // the pins' heights, measured once here so a scroll reads nothing per pin
+    for (const entry of this.layout) entry.height = entry.pin.offsetHeight;
+    this.follow();
+  }
+
+  /* On every scroll: the pins behind a plate faded, the prompt being read
+     lit, the plates' reach - the scroller read once, then only classes
+     written. */
+  follow() {
+    if (!this.active || !this.layout) return;
+    const scroll = this.view.scroll;
+    const top = scroll.scrollTop, height = scroll.clientHeight;
+    const most = Math.max(0, scroll.scrollHeight - height);
+    const above = top + PROMPT_PLATE_INSET + PROMPT_PLATE + 2;
+    const below = top + height - PROMPT_PLATE_INSET - PROMPT_PLATE - 2;
+    /* the prompt being read is the last at or above the reading line - or,
+       with the transcript at its end, where a prompt cannot rise to that
+       line, the last one in view */
+    const end = top >= most - 1;
+    const line = end ? top + height - 24 : top + PROMPT_LANDING + 20;
+    let lit = null;
+    for (const entry of this.layout) {
+      if (entry.top <= line) lit = entry;
+      const y = entry.top + 4;
+      entry.pin.classList.toggle("tucked", y < above || y + entry.height > below);
+    }
+    for (const entry of this.layout) entry.pin.classList.toggle("on", entry === lit);
+    this.up.disabled = !this.neighbour(-1, top, most);
+    this.down.disabled = !this.neighbour(1, top, most);
+  }
+
+  /* The prompt before or after the one a step would put under the top
+     plate: on the page, the nearest whose landing would move the transcript
+     that way (at either end the transcript cannot always scroll a prompt
+     under the plate, and a step that moves nothing is no step); beyond the
+     page, by its seq. */
+  neighbour(direction, at = this.view.scroll.scrollTop,
+    most = Math.max(0, this.view.scroll.scrollHeight - this.view.scroll.clientHeight)) {
+    const view = this.view;
+    const goal = top => Math.min(most, Math.max(0, top - PROMPT_LANDING));
+    const layout = this.layout || [];
+    const loaded = new Set(layout.map(entry => entry.seq));
+    let best = null;
+    for (const entry of layout) {
+      if (direction < 0 ? goal(entry.top) < at - 1 : goal(entry.top) > at + 1)
+        if (best === null || (direction < 0 ? entry.seq > best : entry.seq < best)) best = entry.seq;
+    }
+    if (best !== null) return best;
+    for (const seq of this.index.keys()) {
+      if (loaded.has(seq)) continue;
+      const beyond = direction < 0 ? view.oldestSeq !== null && seq < view.oldestSeq
+        : view.newestSeq !== null && seq > view.newestSeq;
+      if (beyond && (best === null || (direction < 0 ? seq > best : seq < best))) best = seq;
+    }
+    return best;
+  }
+
+  /* A step's landing: the prompt under the top plate, its bubble flashed. */
+  land(node) {
+    const scroll = this.view.scroll;
+    const top = node.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop;
+    const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    scroll.scrollTo({ top: Math.max(0, top - PROMPT_LANDING), behavior: reduce ? "auto" : "smooth" });
+    // one flash at a time: the step before this one's goes with it
+    this.view.inner.querySelectorAll(".search-flash").forEach(other => other.classList.remove("search-flash"));
+    void node.offsetWidth;
+    node.classList.add("search-flash");
+    setTimeout(() => { if (node.isConnected) node.classList.remove("search-flash"); }, 2400);
+  }
+}
+
 class SessionView {
   constructor(tab) {
     this.tab = tab;
@@ -18296,6 +18551,7 @@ class SessionView {
     this.tailButton.onclick = () => this.returnToTail();
     this.tailPill.appendChild(this.tailButton);
     this.scroll.appendChild(this.tailPill);
+    this.promptGutter = new PromptGutter(this);
     this.sendBtn = root.querySelector(".btn-send");
     this.steerBtn = root.querySelector(".btn-steer");
     this.askBtn = root.querySelector(".btn-ask");
@@ -18533,6 +18789,7 @@ class SessionView {
     this.reconnectTimer = null;
     window.removeEventListener("resize", this._onResize);
     if (this.ws) try { this.ws.close(); } catch (e) {}
+    this.promptGutter.destroy();
     this.clearLive();
     /* Closing a view is not deleting its shared draft: completed server
        uploads remain owned by the durable draft and can reopen on another
@@ -18924,6 +19181,7 @@ class SessionView {
     switch (d.type) {
       case "snapshot":
         this.session = d.session;
+        this.promptGutter.refreshIndex();
         if (d.draft_presence && d.draft_presence.version === 1) {
           if (!this.sharedDraft) this.sharedDraft = new SharedDraft(this);
           this.sharedDraft.count = Number.isInteger(d.draft_presence.count) ? Math.max(0, d.draft_presence.count) : 0;
@@ -19701,14 +19959,7 @@ class SessionView {
     const current = () => this._jumpSequence === sequence;
     this._jumping = true;
     try {
-      if (!this.inLoadedRange(seq)) {
-        const above = this.oldestSeq !== null && seq < this.oldestSeq;
-        if (above && this.oldestSeq - seq <= JUMP_PAGE_REACH * 200)
-          await this.pageBackTo(seq, JUMP_PAGE_REACH);
-        if (!current()) return;
-        if (!this.inLoadedRange(seq))
-          await this.loadWindowAround(seq, current);
-      }
+      await this.loadAround(seq, current);
       if (!current()) return;
       const target = this.findEventNode(seq);
       if (!target) {
@@ -19732,6 +19983,37 @@ class SessionView {
 
   inLoadedRange(seq) {
     return this.oldestSeq !== null && seq >= this.oldestSeq && seq <= this.newestSeq;
+  }
+
+  /* Bring seq into the transcript: paged back to when it is near enough
+     above, a window of history around it otherwise. */
+  async loadAround(seq, current = () => true) {
+    if (this.inLoadedRange(seq)) return;
+    const above = this.oldestSeq !== null && seq < this.oldestSeq;
+    if (above && this.oldestSeq - seq <= JUMP_PAGE_REACH * 200)
+      await this.pageBackTo(seq, JUMP_PAGE_REACH);
+    if (!current()) return;
+    if (!this.inLoadedRange(seq)) await this.loadWindowAround(seq, current);
+  }
+
+  /* A prompt gutter step: the prompt brought into the transcript when it is
+     not loaded (the paging or window a message jump uses), then set under
+     the gutter's top plate. It moves the reader as a scroll does, so it
+     records no navigation entry. */
+  async jumpToPrompt(seq) {
+    seq = Number(seq);
+    if (!Number.isSafeInteger(seq) || seq < 1 || !this.session) return;
+    this.cancelNavigationWindow();
+    const sequence = this._jumpSequence = (this._jumpSequence || 0) + 1;
+    const current = () => this._jumpSequence === sequence;
+    try {
+      await this.loadAround(seq, current);
+      if (!current()) return;
+      const target = this.findEventNode(seq);
+      if (target && Number(target.dataset.seq) === seq) this.promptGutter.land(target);
+    } catch (error) {
+      toast(error.message, "bad");
+    }
   }
 
   /* Older history through the ordinary Load older path, a page at a time. */
@@ -20013,6 +20295,10 @@ class SessionView {
     switch (ev.kind) {
       case "user": {
         const n = el("div", "msg msg-user");
+        /* the prompt gutter reads these: when it was sent, and whether it
+           was steered into a turn already running */
+        n.dataset.at = String(ev.ts || "");
+        if (d.steering) n.dataset.steering = "1";
         /* The marker lines are how the engine receives an attachment, not how
            the person who sent it should have to read it back. Show what the
            composer showed; the message text keeps the markers untouched. */
@@ -21165,6 +21451,7 @@ class SessionView {
     this.inner.querySelectorAll(".chat-filter-reveal").forEach(node => node.classList.remove("chat-filter-reveal"));
     this.paintChatLogMask();
     this.syncLiveStatus();
+    this.promptGutter.schedule();
     if (!this.scroll.clientHeight) return;
     if (bottom) this.scrollBottom(true);
     else {
