@@ -29624,50 +29624,119 @@ function openSessionHash() {
 }
 window.addEventListener("hashchange", openSessionHash);
 
-/* The request sheet's row is the Git sheet's: Close, then Refresh (a read,
-   not the dialog's purpose, so a plain button), with Stop remaining work
-   on its own side at the start like Revert - the destructive verb never
-   stands beside the buttons that only read. */
+/* The request sheet is the Git sheet's. The request's own facts stand on
+   the review sheet's column - its state in the shared tones, its kind, when
+   it was made and, while it can still run, its deadline - and under them
+   each session it went to on the review sheet's list surface: the
+   session's name, which opens it, with its own state at the row's end and
+   its answer or error under it; a workflow has one such list per step,
+   headed by the step's own request and state. Nothing is drawn before the
+   read answers, since the transcript card's copy of the request is as old
+   as the card. The row is Close, then Refresh (a read, not the dialog's
+   purpose, so a plain button), with Stop remaining work on its own side at
+   the start like Revert - the destructive verb never stands beside the
+   buttons that only read - and only while there is work left to stop. A
+   failed read keeps what the last one showed, with its reason inline. */
+const SESSION_REQUEST_STATES = {
+  pending: ["Pending", "busy"], submitting: ["Submitting", "busy"], waiting: ["Waiting", "busy"],
+  running: ["Running", "busy"], unconfirmed: ["Unconfirmed", "warn"], completed: ["Completed", "ok"],
+  failed: ["Failed", "bad"], cancelled: ["Cancelled", "warn"], expired: ["Expired", "warn"],
+  rejected: ["Rejected", "bad"], lost: ["Lost", "bad"],
+};
+const SESSION_REQUEST_DONE = new Set(["completed", "failed", "cancelled", "expired", "rejected", "lost"]);
+const SESSION_REQUEST_KINDS = { question: "Question", task: "Task", steer: "Steer", stop: "Stop" };
+const sessionRequestState = status =>
+  SESSION_REQUEST_STATES[status] || [String(status || "Unknown"), ""];
+
 async function modalSessionRequest(record) {
   const {m, close} = modal(`<h2>${record.workflow ? "Session workflow" : "Session request"}</h2>
-    <div class="session-request-detail"><p class="modal-copy">Loading…</p></div>
-    <div class="m-btns"><button type="button" class="btn btn-danger sr-cancel" disabled>Stop remaining work</button>
+    <div class="ws-facts session-request-facts"></div>
+    <div class="session-request-body"><p class="modal-copy">Loading…</p></div>
+    <p class="form-error hidden" role="alert"></p>
+    <div class="m-btns"><button type="button" class="btn btn-danger sr-cancel hidden">Stop remaining work</button>
     <button type="button" class="btn sr-close">Close</button>
     <button type="button" class="btn sr-refresh">Refresh</button></div>`, "session-request-modal", () => modalSessionRequest(record));
   m.querySelector(".sr-close").onclick = close;
   let targetBid = 0;
-  const detail = m.querySelector(".session-request-detail");
+  const facts = m.querySelector(".session-request-facts");
+  const body = m.querySelector(".session-request-body");
+  const error = m.querySelector(".form-error");
   const cancel = m.querySelector(".sr-cancel");
   const refresh = m.querySelector(".sr-refresh");
-  const terminal = new Set(["completed", "failed", "cancelled", "expired", "rejected", "lost"]);
   const names = new Map();
-  /* a request's state in words, with the tone every other status word uses */
-  const REQUEST_STATES = {
-    pending: ["Pending", "busy"], submitting: ["Submitting", "busy"], waiting: ["Waiting", "busy"],
-    running: ["Running", "busy"], unconfirmed: ["Unconfirmed", "warn"], completed: ["Completed", "ok"],
-    failed: ["Failed", "bad"], cancelled: ["Cancelled", "warn"], expired: ["Expired", "warn"],
-    rejected: ["Rejected", "bad"], lost: ["Lost", "bad"],
+  const failed = message => {
+    error.textContent = message;
+    error.classList.remove("hidden");
+    if (body.querySelector(".modal-copy")) body.replaceChildren();
   };
-  const requestState = status => REQUEST_STATES[status] || [String(status || "Unknown"), ""];
-  const field = (box, label, value, tone = "") => {
-    const wrap = el("div", "field-lbl", label);
-    if (typeof value === "string")
-      wrap.appendChild(el("div", "session-request-value" + (tone ? " state-word " + tone : ""), value));
-    else wrap.appendChild(value);
-    box.appendChild(wrap);
+
+  /* the review sheet's fact row: its label in the field voice */
+  const fact = (label, value, tone = "") => {
+    const row = el("div", "ws-fact");
+    row.appendChild(el("span", "field-lbl", label));
+    row.appendChild(el("span", "wsf-v" + (tone ? " " + tone : ""), value));
+    facts.appendChild(row);
   };
-  const statusField = (box, status) => field(box, "Status", ...requestState(status));
-  const renderResult = (box, result) => {
-    const row = el("div", "session-request-result");
-    const target = el("button", "btn btn-sm session-request-target");
-    target.type = "button";
-    target.appendChild(el("span", "", names.get(result.target) || "Open session"));
-    target.onclick = () => openSessionReference(result.target, Number(result.end_seq || result.start_seq || 0));
-    field(row, "Session", target);
-    statusField(row, result.status);
-    if (result.error) row.appendChild(el("p", "err-card", result.error));
-    if (result.answer) field(row, "Answer", result.answer);
-    box.appendChild(row);
+  /* one captioned list, the caption's count after a separator */
+  const section = (title, note) => {
+    const wrap = el("div", "session-git-section session-request-section");
+    const caption = el("div", "field-lbl", title + (note ? " · " : ""));
+    if (note) caption.appendChild(el("span", "field-optional", note));
+    wrap.appendChild(caption);
+    const list = el("div", "session-request-list");
+    const rows = list.appendChild(el("div", "srl-rows"));
+    wrap.appendChild(list);
+    body.appendChild(wrap);
+    return rows;
+  };
+  /* a row: what it is, its state at the end, what it said under it */
+  const row = (rows, head, status, text = "", tone = "") => {
+    const line = el("div", "srl-row");
+    line.appendChild(head);
+    const [word, wordTone] = sessionRequestState(status);
+    line.appendChild(el("span", "srl-state state-word" + (wordTone ? " " + wordTone : ""), word));
+    if (text) line.appendChild(el("div", "srl-text" + (tone ? " " + tone : ""), text));
+    rows.appendChild(line);
+  };
+  const target = (rows, result) => {
+    const name = names.get(result.target);
+    const open = el("button", "srl-name");
+    open.type = "button";
+    open.appendChild(el("span", "srl-title", name ? name.title : "Session"));
+    if (name && name.node) open.appendChild(el("span", "srl-node", " · " + name.node));
+    open.setAttribute("aria-label", `Open ${name ? name.title : "the session"}`);
+    open.onclick = () => {
+      close();
+      openSessionReference(result.target, Number(result.end_seq || result.start_seq || 0));
+    };
+    row(rows, open, result.status, result.error || result.answer || "", result.error ? "bad" : "");
+  };
+
+  const render = data => {
+    facts.replaceChildren();
+    body.replaceChildren();
+    if (data.title) fact("Name", data.title);
+    fact("State", ...sessionRequestState(data.status));
+    if (SESSION_REQUEST_KINDS[data.action]) fact("Kind", SESSION_REQUEST_KINDS[data.action]);
+    if (data.created_at) fact("Created", fmtStamp(data.created_at));
+    if (data.deadline && !SESSION_REQUEST_DONE.has(data.status)) fact("Deadline", fmtStamp(data.deadline));
+    if (record.workflow) {
+      for (const step of data.steps || []) {
+        const rows = section("Step " + step.spec.id);
+        row(rows, el("span", "srl-request", step.spec.text || ""), step.status,
+          step.error || "", "bad");
+        for (const result of step.results || []) target(rows, result);
+      }
+    } else {
+      const results = data.results || [];
+      const rows = section("Sessions", String(results.length));
+      for (const result of results) target(rows, result);
+      if (!results.length) rows.appendChild(el("div", "srl-empty", "Not sent to any session yet"));
+    }
+    for (const unavailable of data.unavailable || [])
+      body.appendChild(el("p", "hint session-request-note",
+        `${unavailable.node || "Session"}: ${unavailable.error}`));
+    cancel.classList.toggle("hidden", SESSION_REQUEST_DONE.has(data.status));
   };
   const load = async (stop = false) => {
     refresh.disabled = true; cancel.disabled = true;
@@ -29676,28 +29745,10 @@ async function modalSessionRequest(record) {
       const data = await api(targetBid, "session-links/action", {method: "POST", body: {
         source: record.source, method, params: record.workflow ? {id: record.id} : {id: record.id, wait_s: 0}}});
       if (!m.isConnected) return;
-      detail.replaceChildren();
-      if (data.title) field(detail, "Name", data.title);
-      const summary = el("div", "field-row");
-      statusField(summary, data.status);
-      field(summary, "Created", fmtStamp(data.created_at));
-      detail.appendChild(summary);
-      if (record.workflow) {
-        for (const step of data.steps || []) {
-          const section = el("section", "session-request-step");
-          field(section, "Step", `${step.spec.id} · ${requestState(step.status)[0]}`);
-          field(section, "Request", step.spec.text);
-          if (step.error) section.appendChild(el("p", "err-card", step.error));
-          for (const result of step.results || []) renderResult(section, result);
-          detail.appendChild(section);
-        }
-      } else for (const result of data.results || []) renderResult(detail, result);
-      for (const unavailable of data.unavailable || [])
-        detail.appendChild(el("p", "modal-copy", `${unavailable.node || "Session"}: ${unavailable.error}`));
-      cancel.classList.toggle("hidden", terminal.has(data.status));
-      cancel.disabled = false;
-    } catch (error) { detail.replaceChildren(el("p", "modal-copy", error.message)); }
-    finally { refresh.disabled = false; }
+      error.classList.add("hidden");
+      render(data);
+    } catch (reason) { if (m.isConnected) failed(reason.message); }
+    finally { refresh.disabled = false; cancel.disabled = false; }
   };
   refresh.onclick = () => load();
   cancel.onclick = async () => {
@@ -29707,12 +29758,12 @@ async function modalSessionRequest(record) {
   };
   try {
     const catalog = await api(0, "session-links/catalog");
-    for (const row of catalog.sessions) names.set(row.ref, `${row.title} · ${row.node_name}`);
+    for (const row of catalog.sessions) names.set(row.ref, { title: row.title, node: row.node_name });
     if (record.controller && catalog.controller !== record.controller) {
       const row = catalog.sessions.find(item => item.node === record.controller);
       if (!row) throw new Error("The console tracking this request is unavailable");
       targetBid = row.bid;
     }
     await load();
-  } catch (error) { detail.replaceChildren(el("p", "modal-copy", error.message)); }
+  } catch (reason) { if (m.isConnected) failed(reason.message); }
 }

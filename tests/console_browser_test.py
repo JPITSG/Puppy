@@ -1937,6 +1937,120 @@ async def tool_image_checks(instance):
           "named for the file read, the card never folded by it, its head never grown, focus home on Escape", flush=True)
 
 
+async def session_request_checks(instance):
+    """The session request sheet in real layout, on a desktop and a phone in
+    both themes: the facts on one column, the sessions on one list with no
+    sideways overflow - a long name cut short with its state still at the
+    row's end, answers under their names - Stop remaining work at the row's
+    start on a desktop and on a line of its own on a phone with Close and
+    Refresh sharing the next, and a real click on a name closing the sheet
+    and opening that session. The node's session-links reads are answered in
+    the page; opening the session uses the node's own route."""
+    page = instance.page_session
+    sid = await evaluate(instance, "demoView.tab.sid")
+    node = db.node_uuid()
+    ref = lambda value: "{}/{}".format(node, value)
+    long_name = "Quarterly release coordination for the harbor dashboard and its mobile companion"
+    await evaluate(instance, """(() => {
+        const ref = %s, node = %s, sid = %d, long = %s;
+        window.srCatalog = {controller: node, sessions: [
+            {ref: ref + sid, title: 'Harbor dashboard', node_name: 'Studio', node, bid: 0, id: sid},
+            {ref: ref + 9001, title: 'Release checklist', node_name: 'Studio', node, bid: 0, id: 9001},
+            {ref: ref + 9002, title: long, node_name: 'Workshop', node, bid: 0, id: 9002}]};
+        window.srRequest = {id: 'r1', source: ref + 9003, action: 'question', status: 'running',
+            created_at: Date.now() / 1000 - 600, deadline: Date.now() / 1000 + 3000, unavailable: [],
+            targets: [ref + sid, ref + 9001, ref + 9002], results: [
+                {id: 'a', target: ref + sid, status: 'completed', error: '', start_seq: 0, end_seq: 0,
+                 answer: 'Smoke tests passed on staging.\\nOnly the changelog entry is still open.'},
+                {id: 'b', target: ref + 9001, status: 'running', error: '', answer: ''},
+                {id: 'c', target: ref + 9002, status: 'failed', error: 'The session was stopped before it answered', answer: ''}]};
+        window.srSaved = api;
+        api = (bid, route, options = {}) => route === 'session-links/catalog' ? Promise.resolve(srCatalog)
+            : route === 'session-links/action' ? Promise.resolve(JSON.parse(JSON.stringify(srRequest)))
+            : srSaved(bid, route, options);
+        return true;
+    })()""" % (json.dumps(node + "/"), json.dumps(node), sid, json.dumps(long_name)))
+    measure = """(() => {
+        const m = document.querySelector('.session-request-modal');
+        const r = node => node.getBoundingClientRect();
+        const values = [...m.querySelectorAll('.session-request-facts .wsf-v')].map(n => r(n).left);
+        const labels = [...m.querySelectorAll('.session-request-facts .field-lbl')].map(n => r(n).left);
+        const list = m.querySelector('.session-request-list'), block = r(m.querySelector('.srl-rows'));
+        const rows = [...m.querySelectorAll('.srl-row')].map(row => {
+            const name = row.querySelector('.srl-name'), state = row.querySelector('.srl-state');
+            const text = row.querySelector('.srl-text');
+            return {nameLeft: r(name).left, nameRight: r(name).right, nameBottom: r(name).bottom,
+                    clipped: name.scrollWidth > name.clientWidth, stateLeft: r(state).left,
+                    stateRight: r(state).right, textTop: text ? r(text).top : null,
+                    textLeft: text ? r(text).left : null};
+        });
+        const buttons = [...m.querySelectorAll('.m-btns .btn:not(.hidden)')].map(b => {
+            const box = r(b); return {label: b.textContent, left: box.left, right: box.right, top: box.top,
+                                      width: box.width, clipped: b.scrollWidth > b.clientWidth + 1};
+        });
+        const row = r(m.querySelector('.m-btns'));
+        return {values, labels, rows, buttons, rowLeft: row.left, rowRight: row.right, rowWidth: row.width,
+                blockLeft: block.left, blockRight: block.right,
+                overflow: m.scrollWidth > m.clientWidth + 1 || list.scrollWidth > list.clientWidth + 1,
+                vw: innerWidth, modalRight: r(m).right, modalLeft: r(m).left};
+    })()"""
+    try:
+        for width, height, mobile in ((1440, 900, False), (390, 844, True)):
+            await instance.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
+                "deviceScaleFactor": 2 if mobile else 1, "mobile": mobile}, session=page)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); modalSessionRequest({id: 'r1', source: srRequest.source, "
+                                         "targets: srRequest.targets, status: 'pending', controller: %s}); true"
+                               % (json.dumps(theme), json.dumps(node)))
+                await until(instance, "document.querySelectorAll('.session-request-modal .srl-row').length === 3")
+                g = await evaluate(instance, measure)
+                label = (width, theme)
+                assert len(g["values"]) == 4 and max(g["values"]) - min(g["values"]) < 0.6, (label, g["values"])
+                assert max(g["labels"]) - min(g["labels"]) < 0.6, (label, g["labels"])
+                assert not g["overflow"] and g["modalLeft"] >= 0 and g["modalRight"] <= g["vw"] + 0.5, (label, g)
+                for row in g["rows"]:
+                    assert abs(row["nameLeft"] - g["blockLeft"]) < 0.6, (label, row)
+                    assert abs(row["stateRight"] - g["blockRight"]) < 0.6, ("the state at the row's end", label, row)
+                    assert row["nameRight"] <= row["stateLeft"] - 8, ("never under the name", label, row)
+                    if row["textTop"] is not None:
+                        assert row["textTop"] >= row["nameBottom"] - 0.5 and abs(row["textLeft"] - g["blockLeft"]) < 0.6, (label, row)
+                assert g["rows"][2]["clipped"], ("the long name is cut short", label, g["rows"][2])
+                assert [b["label"] for b in g["buttons"]] == ["Stop remaining work", "Close", "Refresh"], g["buttons"]
+                assert not any(b["clipped"] for b in g["buttons"]), (label, g["buttons"])
+                stop, close_button, refresh = g["buttons"]
+                assert abs(stop["left"] - g["rowLeft"]) < 0.6 and abs(refresh["right"] - g["rowRight"]) < 0.6, (label, g)
+                if mobile:
+                    assert abs(stop["width"] - g["rowWidth"]) < 1, ("Stop takes its own line", label, stop)
+                    assert close_button["top"] > stop["top"] and close_button["top"] == refresh["top"], (label, g["buttons"])
+                    assert abs(close_button["width"] - refresh["width"]) < 1, (label, g["buttons"])
+                else:
+                    assert stop["top"] == close_button["top"] == refresh["top"], (label, g["buttons"])
+                    assert close_button["left"] - stop["right"] > 40, ("Stop stands apart", label, g["buttons"])
+                await evaluate(instance, "document.querySelector('.session-request-modal .sr-close').click(); true")
+                await until(instance, "!document.querySelector('.session-request-modal')")
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=page)
+        await evaluate(instance, "applyTheme('dark'); activateTab('s:0:1'); true")
+        # a real click on a name closes the sheet and opens that session
+        await evaluate(instance, "modalSessionRequest({id: 'r1', source: srRequest.source, targets: srRequest.targets, "
+                                 "status: 'pending', controller: %s}); true" % json.dumps(node))
+        await until(instance, "document.querySelectorAll('.session-request-modal .srl-row').length === 3")
+        point = await evaluate(instance, """(() => { const b = document.querySelector('.session-request-modal .srl-name');
+            const r = b.getBoundingClientRect(); return {x: r.left + Math.min(40, r.width / 2), y: r.top + r.height / 2}; })()""")
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1), session=page)
+        await until(instance, "!document.querySelector('.session-request-modal') && state.active === 's:0:%d'" % sid)
+    finally:
+        await evaluate(instance, """(() => { if (window.srSaved) api = srSaved;
+            document.querySelectorAll('.session-request-modal').forEach(m => m.closest('.modal-backdrop').remove());
+            delete window.srSaved; delete window.srCatalog; delete window.srRequest; applyTheme('dark'); return true; })()""")
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=page)
+    print("PASS: the session request sheet's facts on one column and its sessions on one list without overflow - a long "
+          "name cut short, states at the row's end, answers under names - Stop apart on a desktop and on its own line on "
+          "a phone in both themes, and a real click on a name opening that session", flush=True)
+
+
 async def question_scroll_checks(instance, capture=False):
     """A real wheel scrolls the question first, then its history at either
     edge. The card fits the chat pane, including short windows and phones;
@@ -4992,6 +5106,7 @@ async def checks(a, b, hub, capture=False):
     await question_scroll_checks(a, capture)
     await status_color_checks(a, capture)
     await identity_pill_checks(a, capture)
+    await session_request_checks(a)
     await vnc_throughput_checks(a, capture)
     await vnc_connection_checks(a)
     await operation_cancellation_checks(a)
@@ -7451,6 +7566,9 @@ async def main(args):
             if args.question_scroll_only:
                 await question_scroll_checks(instances[0], args.screenshots)
                 return
+            if args.session_request_only:
+                await session_request_checks(instances[0])
+                return
             if args.image_viewer_only:
                 await image_viewer_checks(instances[0], args.screenshots)
                 await tool_image_checks(instances[0])
@@ -7507,6 +7625,7 @@ if __name__ == "__main__":
     parser.add_argument("--token-usage-only", action="store_true")
     parser.add_argument("--question-scroll-only", action="store_true")
     parser.add_argument("--image-viewer-only", action="store_true")
+    parser.add_argument("--session-request-only", action="store_true")
     parser.add_argument("--sidebar-width-only", action="store_true")
     parser.add_argument("--backup-schedule-only", action="store_true")
     parser.add_argument("--lazy-assets-only", action="store_true")

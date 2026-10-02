@@ -745,7 +745,11 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   to avoid ambiguous short IDs; older UUID mentions still work. Alias reservations are included in backups.
   The agent can then read their transcripts, search
   their histories with exact-message links, and, when you ask, send them a
-  question, a task, a steering instruction or a stop.
+  question, a task, a steering instruction or a stop. Each request leaves a
+  **View request** card in the transcript; its sheet shows the request's state,
+  kind, creation time and deadline, then every session it went to with that
+  session's state and its answer or error. A session's name opens it, and
+  **Stop remaining work** cancels whatever the request still has pending.
 - **Coordination.** Ask for a plan and the agent can build a finite workflow of
   up to 24 question or task steps with dependencies across sessions, watched
   from a **View workflow** card in the transcript. Workflows survive restarts
@@ -1152,6 +1156,7 @@ node tests/status_bar_ui_test.js     # the status bar: one session setting, foll
 node tests/tool_result_ui_test.js    # tool results folded into their call's card
 python3 tests/tool_images_test.py    # tool pictures: the reader, each driver, storage, both runtimes
 node tests/image_viewer_ui_test.js   # the image viewer, and the pictures on tool cards
+node tests/session_request_ui_test.js # the session request and workflow sheet
 node tests/toast_ui_test.js          # notice grammar, tones, lives, folded repeats and their reports
 node tests/notices_ui_test.js        # the notification box: its slide, rows, live arrivals, its clear
 python3 tests/engine_messages_test.py # native notices, safe fallbacks, both runtimes' session sockets

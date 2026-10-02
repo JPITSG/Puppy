@@ -142,7 +142,7 @@ body::after{
 textarea::-webkit-scrollbar-track,.md pre::-webkit-scrollbar-track,
 .approval pre::-webkit-scrollbar-track,.dirpick::-webkit-scrollbar-track,
 .task-review-files::-webkit-scrollbar-track,.task-review-diff::-webkit-scrollbar-track,
-.session-git-list::-webkit-scrollbar-track{
+.session-git-list::-webkit-scrollbar-track,.session-request-list::-webkit-scrollbar-track{
   margin:var(--r-sm);
 }
 .menu::-webkit-scrollbar-track,.choice-menu::-webkit-scrollbar-track,
@@ -171,7 +171,7 @@ textarea::-webkit-scrollbar-track,.md pre::-webkit-scrollbar-track,
    or shadow a textarea (CARET_MIRROR_STYLES, the autosize ghost) copy the
    trim so their lines land where its do. A browser without text-box keeps
    the leading and the old inset. */
-textarea,.md pre,.approval pre,.task-review-files,.task-review-diff,.session-git-list{
+textarea,.md pre,.approval pre,.task-review-files,.task-review-diff,.session-git-list,.session-request-list{
   text-box:trim-both cap alphabetic;
 }
 /* A scroll box counts its own line boxes as room to scroll, leading and
@@ -3136,7 +3136,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* linked-workspace sheet; the review and Git sheets set their facts on the
    same column with the same step between rows, their labels in the field
    voice rather than this sheet's kicker */
-.ws-link-modal .ws-facts,.task-review-facts,.session-git-facts{display:flex;flex-direction:column;gap:6px;margin:10px 0 4px}
+.ws-link-modal .ws-facts,.task-review-facts,.session-git-facts,.session-request-facts{display:flex;flex-direction:column;gap:6px;margin:10px 0 4px}
 .ws-link-modal .m-btns{flex-wrap:wrap}
 .ws-link-modal .m-btns .btn{
   max-width:100%;height:auto;min-height:var(--btn-h);padding:8px 15px;
@@ -3386,6 +3386,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .session-git-modal #session-git-revert{margin-right:0}
   .session-git-modal .m-btns .btn:first-child:nth-last-child(4),
   .session-git-modal .m-btns .btn:first-child:nth-last-child(4)~.btn{flex:1 1 calc(50% - 4px)}
+  /* the request sheet's Stop remaining work takes the first line to itself,
+     Close and Refresh share the one below */
+  .session-request-modal .m-btns{flex-wrap:wrap}
+  .session-request-modal .m-btns .sr-cancel{flex:1 1 100%;margin-right:0}
   /* the address keeps its own line; port and protocol share the one below */
   .bind-fields{grid-template-columns:minmax(0,1fr) auto}
   .bind-fields>:first-child{grid-column:1/-1}
@@ -3518,22 +3522,40 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .mention-token[role="link"] { cursor: pointer; }
 .session-request-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px 12px; margin: 8px 0; }
 .session-request-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.session-request-detail .field-row > * { min-width: 0; }
-.session-request-step,.session-request-result { padding-top: 10px; border-top: 1px solid var(--line); }
-/* read-only facts, in the workspace and review sheets' voice rather than in
-   input-shaped boxes; a long answer keeps its line breaks */
-.session-request-value {
-  margin-top: 3px; color: var(--txt); font-size: var(--fs-md); line-height: 1.5;
-  text-transform: none; letter-spacing: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+/* The request sheet is the Git sheet: its facts on the review sheet's column
+   and step, each list captioned in the field voice with its count after a
+   separator and set on the review sheet's list surface. A list holds the
+   sessions the request went to (a workflow's step heads its own list with
+   the step's request): the session's name at full strength with its backend
+   in the help colour - a press opens it, underlined under the pointer like
+   the quiet text actions - its state word at the row's end in the shared
+   tones, and its answer, or its error in the bad tone, under it. Rows stand
+   apart on a hairline. Names and answers are prose, so the list is set in
+   the body face; only the state words keep the facts' monospace. */
+.session-request-modal{--modal-w:var(--modal-w-editor)}
+.session-request-modal .form-error{margin-top:12px}
+.session-request-facts{margin:0}
+.session-request-section .field-lbl{margin-bottom:6px;overflow-wrap:anywhere}
+.session-request-modal .session-request-list{margin:0;max-height:40vh;font-family:var(--sans);font-size:var(--fs-sm);overflow-x:hidden}
+.srl-row{display:grid;grid-template-columns:minmax(0,1fr) max-content;gap:4px 12px;align-items:baseline}
+.srl-row+.srl-row{margin-top:10px;padding-top:10px;border-top:1px solid var(--line2)}
+.srl-name{
+  justify-self:start;max-width:100%;padding:0;border:0;border-radius:var(--btn-r);background:none;
+  font:inherit;line-height:inherit;text-align:left;color:var(--txt);cursor:pointer;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  text-decoration:underline;text-decoration-color:transparent;text-underline-offset:3px;
+  transition:text-decoration-color var(--t-base) var(--ease);
 }
-.session-request-value.state-word { font-size: var(--fs-sm); font-family: var(--mono); }
-.session-request-target {
-  margin-top: 3px; height: var(--btn-h-sm); padding: 0 11px; font-size: var(--fs-sm);
-  text-transform: none; letter-spacing: 0; max-width: 100%;
-}
-.session-request-target span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-request-modal .m-btns { flex-wrap: wrap; }
-.session-request-modal .m-btns .btn { min-width: max-content; }
+@media (hover:hover){.srl-name:hover{text-decoration-color:var(--line3)}}
+.srl-name:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.srl-title{font-weight:600}
+.srl-node{color:var(--txt3)}
+.srl-request{color:var(--txt);white-space:pre-wrap;overflow-wrap:anywhere}
+.srl-state{font-family:var(--mono);font-size:var(--fs-xs);white-space:nowrap}
+.srl-text{grid-column:1/-1;color:var(--txt2);line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.srl-text.bad{color:var(--err)}
+.srl-empty{color:var(--txt3)}
+.session-request-note{margin:8px 0 0}
 
 /* ---------- session tasks ---------- */
 /* Main and its task conversations share one workspace tab. The strip above
@@ -3642,12 +3664,12 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
    review is about) keeps the most; the modal's own scrollbar remains the
    fallback for a viewport the fixed rows alone cannot fit. */
 .task-review-modal{--modal-w:var(--modal-w-wide)}
-.task-review-modal,.session-git-modal{display:flex;flex-direction:column}
-.task-review-modal>*,.session-git-modal>*{flex:0 0 auto}
+.task-review-modal,.session-git-modal,.session-request-modal{display:flex;flex-direction:column}
+.task-review-modal>*,.session-git-modal>*,.session-request-modal>*{flex:0 0 auto}
 .task-review-modal .field-lbl{margin-bottom:5px}
-.task-review-facts .ws-fact,.session-git-facts .ws-fact{align-items:flex-start}
-.task-review-facts .field-lbl,.session-git-facts .field-lbl{flex:0 0 84px;margin-bottom:0}
-.task-review-files,.task-review-diff,.session-git-list{
+.task-review-facts .ws-fact,.session-git-facts .ws-fact,.session-request-facts .ws-fact{align-items:flex-start}
+.task-review-facts .field-lbl,.session-git-facts .field-lbl,.session-request-facts .field-lbl{flex:0 0 84px;margin-bottom:0}
+.task-review-files,.task-review-diff,.session-git-list,.session-request-list{
   flex:0 1 auto;margin:0 0 10px;padding:10px;background:var(--panel2);
   border:1px solid var(--line2);border-radius:var(--r-sm);
   font-family:var(--mono);font-size:var(--fs-sm);line-height:1.45;tab-size:4;
