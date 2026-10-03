@@ -147,6 +147,8 @@ textarea::-webkit-scrollbar-track,.md pre::-webkit-scrollbar-track,
 }
 .menu::-webkit-scrollbar-track,.choice-menu::-webkit-scrollbar-track,
 .mention-pop::-webkit-scrollbar-track,.approval.question::-webkit-scrollbar-track{margin:var(--r-md)}
+/* the prompt list's rows reach the float's rounded foot, not its head */
+.prompt-list-rows::-webkit-scrollbar-track{margin:0 0 var(--r-md)}
 .modal::-webkit-scrollbar-track{margin:var(--r-lg)}
 /* where a vertical and a horizontal bar meet: the browser's default there is
    an opaque square that ignores the theme */
@@ -1403,7 +1405,7 @@ select.choice-native{display:none!important}
 .prompt-pin.on .prompt-pin-time{color:var(--txt2)}
 .prompt-pin.tucked{opacity:0;pointer-events:none}
 .prompt-plates{position:absolute;inset:0;pointer-events:none;z-index:var(--z-float)}
-.prompt-plate{
+.prompt-plate,.prompt-list-button{
   position:absolute;width:32px;height:32px;padding:0;display:grid;place-items:center;pointer-events:auto;
   border:1px solid var(--line2);border-radius:50%;background:var(--panel);color:var(--txt2);cursor:pointer;
   box-shadow:0 0 0 3px var(--bg);
@@ -1411,13 +1413,53 @@ select.choice-native{display:none!important}
 }
 .prompt-plate.up svg{transform:rotate(-90deg)}
 .prompt-plate.down svg{transform:rotate(90deg)}
-@media (hover:hover){.prompt-plate:not(:disabled):hover{background:var(--acc);border-color:var(--acc);color:#fff}}
+@media (hover:hover){
+  .prompt-plate:not(:disabled):hover,.prompt-list-button:hover{background:var(--acc);border-color:var(--acc);color:#fff}
+}
+/* the list button: a smaller disc under the top plate, lit while its list is open */
+.prompt-list-button{width:26px;height:26px}
+.prompt-list-button[aria-expanded="true"]{background:var(--acc);border-color:var(--acc);color:#fff}
 /* a greyed plate keeps its solid disc - the thread ends under it - and
    fades only its arrow and rim */
 .prompt-plate:disabled{cursor:default;border-color:var(--line)}
 .prompt-plate:disabled svg{opacity:.35}
-.prompt-plate:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
-@media (prefers-reduced-motion:reduce){.prompt-pin,.prompt-pin-dot,.prompt-plate{transition:none}}
+.prompt-plate:focus-visible,.prompt-list-button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){.prompt-pin,.prompt-pin-dot,.prompt-plate,.prompt-list-button{transition:none}}
+/* The prompt list: one of the shared floats in its own shape - a head with
+   the count, the filter, and a window of one-line rows (number, first line,
+   time) that only draws what is in view; a steered prompt is indented on its
+   violet ring, the prompt being read is lit, the row the keys or the pointer
+   are on takes the menus' hover. */
+.choice-menu.prompt-list{
+  width:min(460px,calc(100vw - 16px));max-width:none;max-height:none;padding:0;
+  display:flex;flex-direction:column;overflow:hidden;
+}
+.prompt-list-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:10px 13px 8px}
+.prompt-list-title{font:600 var(--fs-xs) var(--sans);text-transform:uppercase;letter-spacing:.08em;color:var(--txt3)}
+.prompt-list-count{font:var(--fs-2xs) var(--mono);color:var(--txt3)}
+.prompt-list input.prompt-list-filter{flex:none;width:auto;height:var(--btn-h-sm);margin:0 8px 6px;font-size:var(--fs-md)}
+.prompt-list-rows{flex:1;min-height:0;overflow-y:auto;padding:0 5px 5px;overscroll-behavior:contain}
+.prompt-list-space{position:relative}
+.prompt-list-row{
+  position:absolute;left:0;right:0;height:32px;display:grid;grid-template-columns:22px minmax(0,1fr) auto;
+  align-items:center;gap:10px;padding:0 8px;border-radius:var(--r-sm);cursor:pointer;
+  font:var(--fs-sm) var(--sans);color:var(--txt);
+}
+.prompt-list-row.active{background:var(--float-menu-hover)}
+.prompt-list-row.current{background:var(--acc-dim)}
+.prompt-list-num{
+  width:22px;height:22px;border-radius:50%;display:grid;place-items:center;
+  font:600 var(--fs-2xs) var(--sans);color:var(--acc);border:1px solid var(--acc-line-soft);
+  background:linear-gradient(var(--acc-dim),var(--acc-dim)),var(--bg);
+}
+.prompt-list-row.current .prompt-list-num{background:var(--acc);color:var(--bg);border-color:var(--acc)}
+.prompt-list-row.steer{grid-template-columns:10px minmax(0,1fr) auto;padding-left:20px}
+.prompt-list-row.steer .prompt-list-num{width:10px;height:10px;background:var(--bg);border:2px solid var(--viz-7)}
+.prompt-list-row.steer.current .prompt-list-num{background:var(--viz-7);border-color:var(--viz-7)}
+.prompt-list-row.steer .prompt-list-text{color:var(--txt2)}
+.prompt-list-text{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.prompt-list-time{font:var(--fs-2xs) var(--mono);color:var(--txt3)}
+.prompt-list-empty{padding:4px 13px 12px;font-size:var(--fs-sm);color:var(--txt3)}
 /* Keep every event and live block mounted: pairing, history cursors, folded
    cards and incoming answers continue normally even while their type hides.
    A message explicitly opened from search/history gets a temporary exception.

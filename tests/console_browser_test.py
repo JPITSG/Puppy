@@ -1948,7 +1948,13 @@ async def prompt_gutter_checks(instance):
     page did not hold, until the first prompt greys it; the bottom plate steps
     back to the tail. A narrow pane makes the gutter's room with every column
     moving together; a phone and a transcript with Questions filtered out
-    show none. Both themes."""
+    show none. Both themes. Then the prompt list over a session of four
+    hundred prompts, only its newest page loaded, read from the node's
+    compact index: a real click opens it beside the gutter, drawing only the
+    rows in view with the prompt being read lit; a real wheel takes it to the
+    first prompt; typed text and a number filter it; Enter lands a prompt the
+    page did not hold under the list button, and a real click on a row lands
+    another."""
     page = instance.page_session
     sid = db.create_session("Prompt history", "claude", "/home/mira/projects/harbor", "", "", "", "default")
     steered = {7, 19, 28}
@@ -1986,7 +1992,9 @@ async def prompt_gutter_checks(instance):
         const probe = document.createElement('span');
         probe.style.color = 'var(--viz-7)'; document.body.appendChild(probe);
         const violet = getComputedStyle(probe).color; probe.remove();
+        const list = r(g.listButton);
         return {pins, up: centre(up), down: centre(down), thread: centre(thread),
+                list: centre(list), listTop: list.top, upBottom: up.bottom,
                 threadTop: thread.top, threadBottom: thread.bottom, upMiddle: middle(up), downMiddle: middle(down),
                 inner: inner.left, composer: composer.left, scrollTop: scroll.top,
                 upDisabled: g.up.disabled, downDisabled: g.down.disabled, violet,
@@ -2004,6 +2012,8 @@ async def prompt_gutter_checks(instance):
             assert abs(pin["gap"] - 4) < 0.6, ("level with its prompt", label, pin)
             assert pin["right"] <= g["inner"] - 4, ("clear of the column", label, pin, g["inner"])
         assert abs(g["up"] - g["thread"]) < 0.6 and abs(g["down"] - g["thread"]) < 0.6, (label, g)
+        assert abs(g["list"] - g["thread"]) < 0.6 and abs(g["listTop"] - g["upBottom"] - 10) < 0.6, \
+            ("the list button on the thread, under the top plate", label, g)
         assert abs(g["threadTop"] - g["upMiddle"]) < 0.6 and abs(g["threadBottom"] - g["downMiddle"]) < 0.6, \
             ("the thread ends under both plates", label, g)
         assert abs(g["inner"] - g["composer"]) < 0.6, ("the column still lines up with the composer", label, g)
@@ -2037,6 +2047,7 @@ async def prompt_gutter_checks(instance):
         await evaluate(instance, "applyTheme('dark'); true")
 
         # real clicks on the top plate, prompt by prompt, back into history not on the page
+        landing = await evaluate(instance, "PROMPT_LANDING")
         seen = []
         for _ in range(40):
             g = await evaluate(instance, measure)
@@ -2051,7 +2062,7 @@ async def prompt_gutter_checks(instance):
                         flashed: node.classList.contains('search-flash'), scrollTop: v.scroll.scrollTop}; })()""" % view)
             seen.append(landed["seq"])
             if landed["scrollTop"] > 0:
-                assert abs(landed["offset"] - 54) < 2, ("landed under the top plate", landed)
+                assert abs(landed["offset"] - landing) < 2, ("landed under the list button", landed)
             assert landed["flashed"], landed
         # from the tail, where the last prompt is already in view below the
         # reading line, every earlier prompt in turn: 32 of the 33
@@ -2088,6 +2099,8 @@ async def prompt_gutter_checks(instance):
         assert (await evaluate(instance, measure))["hidden"], "Questions filtered out: no gutter"
         await evaluate(instance, "%s.applyChatLogMask(7); %s.promptGutter.render(); true" % (view, view))
         assert not (await evaluate(instance, measure))["hidden"]
+        await evaluate(instance, "closeTab('s:0:%d'); true" % sid)
+        await prompt_list_checks(instance, landing)
     finally:
         await instance.call("Emulation.setEmulatedMedia", {"features": []}, session=page)
         await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
@@ -2100,8 +2113,158 @@ async def prompt_gutter_checks(instance):
     print("PASS: the prompt gutter's pins level with their prompts and numbered from the session's first, steers as violet "
           "rings, pins, thread and plates on one line with the thread ending under both plates and the column aligned "
           "with the composer, in both themes; real plate clicks stepping prompt by prompt into history not on the page "
-          "and back, each landing under the top plate; a narrow pane making room, a phone and a filtered transcript "
-          "showing none", flush=True)
+          "and back, each landing under the list button; a narrow pane making room, a phone and a filtered transcript "
+          "showing none; the prompt list over four hundred prompts read from the node's compact index, opened by a "
+          "real click beside the gutter, drawing only the rows in view, scrolled by a real wheel, filtered by text "
+          "and number, Enter and a real click landing prompts the page did not hold, in both themes", flush=True)
+
+
+async def prompt_list_checks(instance, landing):
+    page = instance.page_session
+    sid = db.create_session("Long project", "claude", "/home/mira/projects/harbor", "", "", "", "default")
+    topics = ["the checkout flow", "the coupon field", "a flaky test", "the release notes", "the German strings"]
+    for turn in range(1, 401):
+        db.add_event(sid, "user", {"text": "Prompt %d: look at %s again and tell me what changed"
+                                           % (turn, topics[turn % len(topics)])})
+        db.add_event(sid, "assistant", {"text": "Looked at it; answer %d." % turn})
+        db.add_event(sid, "result", {"ok": True, "duration_ms": 1000})
+    runner.broadcast_sessions()
+    view = "sessionViewFor(0,%d)" % sid
+    # a desktop's precise pointer, which headless Chromium does not report: the list's filter takes the keys
+    await evaluate(instance, """window.promptListMedia = window.matchMedia; window.matchMedia = q =>
+        q === '(hover:hover) and (pointer:fine)' ? {matches: true} : promptListMedia.call(window, q); true""")
+    try:
+        await until(instance, "!!findSessionMeta(0,%d)" % sid)
+        await evaluate(instance, "performance.clearResourceTimings(); openSessionTab(0,%d,findSessionMeta(0,%d)); true"
+                       % (sid, sid))
+        await until(instance, "!!%s && %s.draftReady && %s.promptGutter.index.size === 400 && "
+                              "%s.promptGutter.active" % (view, view, view, view))
+        reads = await evaluate(instance, """performance.getEntriesByType('resource').map(e => new URL(e.name))
+            .filter(u => u.pathname.includes('/sessions/%d/')).map(u => u.pathname.split('/').pop() + u.search)""" % sid)
+        assert "prompts?after_seq=0" in reads and not any(r.startswith("events?kind=user") for r in reads), \
+            ("the node's compact index, not every prompt in full", reads)
+        oldest = await evaluate(instance, "%s.oldestSeq" % view)
+        assert oldest > 300, ("only the newest page is on the page", oldest)
+        measure = """(() => {
+            const g = %s.promptGutter, panel = document.querySelector('.prompt-list');
+            if (!panel) return null;
+            const r = n => n.getBoundingClientRect(), box = r(panel), button = r(g.listButton);
+            const rows = panel.querySelector('.prompt-list-rows'), shown = r(rows);
+            const drawn = [...panel.querySelectorAll('.prompt-list-row')];
+            // a windowed list appends rows in the order it draws them: read them by place
+            const visible = drawn.filter(n => r(n).bottom > shown.top + 1 && r(n).top < shown.bottom - 1)
+                .sort((a, b) => r(a).top - r(b).top);
+            const current = panel.querySelector('.prompt-list-row.current');
+            const row = visible[0];
+            return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, buttonRight: button.right,
+                    buttonTop: button.top, vw: innerWidth, vh: innerHeight, drawn: drawn.length,
+                    visible: visible.map(n => n.querySelector('.prompt-list-num').textContent),
+                    first: visible.length ? visible[0].querySelector('.prompt-list-text').textContent : '',
+                    current: current ? {number: current.querySelector('.prompt-list-num').textContent,
+                        inView: r(current).top >= shown.top - 0.5 && r(current).bottom <= shown.bottom + 0.5} : null,
+                    count: panel.querySelector('.prompt-list-count').textContent,
+                    focus: document.activeElement === panel.querySelector('.prompt-list-filter'),
+                    overflow: rows.scrollWidth > rows.clientWidth + 1,
+                    clipped: row ? row.querySelector('.prompt-list-text').scrollWidth >
+                                   row.querySelector('.prompt-list-text').clientWidth : false,
+                    timeRight: row ? r(row.querySelector('.prompt-list-time')).right : 0,
+                    rowRight: row ? r(row).right : 0,
+                    expanded: g.listButton.getAttribute('aria-expanded')};
+        })()""" % view
+
+        async def click_at(point):
+            for kind in ("mousePressed", "mouseReleased"):
+                await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1),
+                                    session=page)
+
+        async def centre(script):
+            return await evaluate(instance, """(() => { const b = (%s).getBoundingClientRect();
+                return {x: b.left + b.width / 2, y: b.top + b.height / 2}; })()""" % script)
+
+        async def lands(number):
+            await until(instance, """(() => { const v = %s, g = v.promptGutter;
+                const lit = g.layout && g.layout.find(e => e.pin.classList.contains('on'));
+                return !!lit && lit.pin.querySelector('.prompt-pin-dot').textContent === %s; })()"""
+                        % (view, json.dumps(str(number))))
+            return await evaluate(instance, """(() => { const v = %s, g = v.promptGutter;
+                const lit = g.layout.find(e => e.pin.classList.contains('on'));
+                const node = g.bubbles().find(n => n.dataset.seq === String(lit.seq));
+                return {offset: node.getBoundingClientRect().top - v.scroll.getBoundingClientRect().top,
+                        flashed: node.classList.contains('search-flash')}; })()""" % view)
+
+        for theme in ("dark", "light"):
+            await evaluate(instance, "applyTheme(%s); %s.scrollBottom(true); true" % (json.dumps(theme), view))
+            await click_at(await centre("%s.promptGutter.listButton" % view))
+            await until(instance, "!!document.querySelector('.prompt-list')")
+            g = await evaluate(instance, measure)
+            assert g["expanded"] == "true" and g["focus"], (theme, g)
+            assert g["left"] >= g["buttonRight"] and abs(g["top"] - g["buttonTop"] + 6) < 1, ("beside the gutter", theme, g)
+            assert g["right"] <= g["vw"] and g["bottom"] <= g["vh"], ("inside the window", theme, g)
+            assert g["count"] == "400", g["count"]
+            assert g["drawn"] < 60, ("only the rows in view, not four hundred", g["drawn"])
+            assert g["current"] == {"number": "400", "inView": True}, ("the prompt being read, lit and in view", g)
+            assert not g["overflow"] and g["clipped"] and abs(g["timeRight"] - g["rowRight"] + 8) < 1, \
+                ("one line a row, its time at the end", theme, g)
+            # a real wheel takes the list to the first prompt
+            point = await centre("document.querySelector('.prompt-list-rows')")
+            for _ in range(40):
+                await instance.call("Input.dispatchMouseEvent", dict(point, type="mouseWheel", deltaX=0, deltaY=-2000),
+                                    session=page)
+                if (await evaluate(instance, "document.querySelector('.prompt-list-rows').scrollTop")) == 0:
+                    break
+            await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+            g = await evaluate(instance, measure)
+            assert g["visible"][0] == "1" and g["first"].startswith("Prompt 1:"), ("the first prompt", g["visible"][:3])
+            assert g["drawn"] < 60, g["drawn"]
+            # typed text filters it; Escape clears the filter, then closes the list
+            await instance.call("Input.insertText", {"text": "coupon"}, session=page)
+            g = await evaluate(instance, measure)
+            assert g["count"] == "80 found" and g["drawn"] < 60, g
+            await instance.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape",
+                                                           "windowsVirtualKeyCode": 27}, session=page)
+            await instance.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Escape", "code": "Escape",
+                                                           "windowsVirtualKeyCode": 27}, session=page)
+            g = await evaluate(instance, measure)
+            assert g["count"] == "400", g
+            await instance.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape",
+                                                           "windowsVirtualKeyCode": 27}, session=page)
+            await until(instance, "!document.querySelector('.prompt-list') && "
+                                  "document.activeElement === %s.promptGutter.listButton" % view)
+        await evaluate(instance, "applyTheme('dark'); true")
+
+        # a number and Enter land a prompt the page did not hold, under the list button
+        await click_at(await centre("%s.promptGutter.listButton" % view))
+        await until(instance, "!!document.querySelector('.prompt-list')")
+        await instance.call("Input.insertText", {"text": "#123"}, session=page)
+        g = await evaluate(instance, measure)
+        assert g["visible"] == ["123"], g["visible"]
+        for kind in ("keyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Enter", "code": "Enter",
+                                                           "windowsVirtualKeyCode": 13}, session=page)
+        landed = await lands(123)
+        assert abs(landed["offset"] - landing) < 2 and landed["flashed"], ("under the list button", landed)
+        assert await evaluate(instance, "!document.querySelector('.prompt-list') && %s.oldestSeq < %d"
+                              % (view, oldest)), "older history loaded for it"
+        # a real click on a row lands that prompt
+        await click_at(await centre("%s.promptGutter.listButton" % view))
+        await until(instance, "!!document.querySelector('.prompt-list')")
+        await instance.call("Input.insertText", {"text": "Prompt 7:"}, session=page)
+        await click_at(await centre("document.querySelector('.prompt-list-row')"))
+        landed = await lands(7)
+        assert abs(landed["offset"] - landing) < 2, landed
+        # the button closes its own open list
+        await click_at(await centre("%s.promptGutter.listButton" % view))
+        await until(instance, "!!document.querySelector('.prompt-list')")
+        await click_at(await centre("%s.promptGutter.listButton" % view))
+        await until(instance, "!document.querySelector('.prompt-list')")
+    finally:
+        await evaluate(instance, "document.querySelectorAll('.prompt-list').forEach(n => n.remove()); "
+                                 "if (window.promptListMedia) { window.matchMedia = promptListMedia; delete window.promptListMedia; } "
+                                 "applyTheme('dark'); if (%s) closeTab('s:0:%d'); true" % (view, sid))
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+        runner.broadcast_sessions()
+        await until(instance, "!findSessionMeta(0,%d)" % sid)
 
 
 async def session_request_checks(instance):

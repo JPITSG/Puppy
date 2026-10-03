@@ -141,6 +141,12 @@ SESSION_EVENT_WINDOW_CAPABILITY = "session-event-window"
 # GET /api/sessions/{sid}/events accepts kind=user, filtering before its limit
 # for cursor-paged composer recall across the session's entire stored history.
 SESSION_PROMPT_HISTORY_CAPABILITY = "session-prompt-history"
+# GET /api/sessions/{sid}/prompts answers the session's prompt index: one
+# [seq, ts, steered, excerpt] row per prompt (the first line, bounded), oldest
+# first, after an optional after_seq cursor, in pages with ``more`` and the
+# session's prompt ``total``. The console's prompt gutter numbers and lists
+# prompts from it; a node without it is read through kind=user event pages.
+SESSION_PROMPT_INDEX_CAPABILITY = "session-prompt-index"
 # POST /api/sessions/{sid}/tool runs one engine-native maintenance action:
 # "compact" summarizes the native context in place (queued behind pending work
 # as an additive runnable {kind:"tool"} row) and "undo" drops the last prompt
@@ -334,6 +340,7 @@ BASE_CAPABILITIES = (
     SEARCH_CAPABILITY,
     SESSION_EVENT_WINDOW_CAPABILITY,
     SESSION_PROMPT_HISTORY_CAPABILITY,
+    SESSION_PROMPT_INDEX_CAPABILITY,
     SESSION_TOOLS_CAPABILITY,
     SESSION_FAST_MODE_CAPABILITY,
     SESSION_AGENT_NOTES_CAPABILITY,

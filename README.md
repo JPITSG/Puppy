@@ -162,11 +162,18 @@ reading anywhere further up is never pulled away from it.
   the transcript's left gutter, level with it and showing its time; a prompt
   you steered into a running turn is a violet ring instead. The pins sit on a
   thread between two round buttons at the gutter's ends: **↑** goes to the
-  previous prompt and **↓** to the next, landing it just under the top button
-  with its pin lit, and a press on a pin goes to that prompt. Numbers count from
-  the session's first prompt, and the buttons reach prompts in older history
-  that is not loaded yet (on a backend without the prompt-history read, both
-  cover only the prompts on the page). The gutter uses the column's own margin and takes
+  previous prompt and **↓** to the next, landing it near the top of the
+  transcript with its pin lit, and a press on a pin goes to that prompt. The
+  list button under **↑** opens every prompt of the session, one line each -
+  its number, first line and when it was sent - with the one you are reading
+  lit; type in its filter to narrow hundreds of prompts by their words or
+  their number, then pick one with the arrow keys and Enter or a click.
+  Numbers count from the session's first prompt, and the buttons and the list
+  reach prompts in older history that is not loaded yet; a backend reads its
+  prompt list as one short line per prompt and sends only the prompts that
+  are new since the last read (one from before that falls back to reading
+  prompts in full, and one without the prompt-history read covers only the
+  prompts on the page). The gutter uses the column's own margin and takes
   room only from a narrow pane; it is not shown on a phone or while the chat
   log hides Questions. Stepping between prompts adds no browser history entry.
 - **Three workspaces to choose from.** Point a session at a project directory,
@@ -1168,7 +1175,8 @@ node tests/tool_result_ui_test.js    # tool results folded into their call's car
 python3 tests/tool_images_test.py    # tool pictures: the reader, each driver, storage, both runtimes
 node tests/image_viewer_ui_test.js   # the image viewer, and the pictures on tool cards
 node tests/session_request_ui_test.js # the session request and workflow sheet
-node tests/prompt_gutter_ui_test.js   # the prompt gutter: pins, numbers, plates and steps
+node tests/prompt_gutter_ui_test.js   # the prompt gutter: pins, numbers, plates, steps and the prompt list
+python3 tests/prompt_index_test.py   # the prompt index: one line per prompt, paged, on both runtimes
 node tests/toast_ui_test.js          # notice grammar, tones, lives, folded repeats and their reports
 node tests/notices_ui_test.js        # the notification box: its slide, rows, live arrivals, its clear
 python3 tests/engine_messages_test.py # native notices, safe fallbacks, both runtimes' session sockets

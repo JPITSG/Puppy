@@ -249,6 +249,19 @@ an unborn branch a `total` of 0 - read from the session's own directory. A
 console draws the History list only for nodes that advertise this. Nothing
 is persisted and the read is never counted as a mutation.
 
+The prompt gutter's index is additive `session-prompt-index`: both execution
+runtimes serve `GET /api/sessions/{sid}/prompts?after_seq=N&limit=M`, the
+session's prompts as `{prompts: [[seq, ts, steered, excerpt]], total, more}`,
+oldest first, after the optional cursor (0 or more), `limit` 1 to 2000 (the
+default), anything else `400`. The excerpt is the prompt's first line that is
+not an attachment marker, whitespace collapsed and cut to 120 characters, or
+the attached files' names; `steered` is 1 for a prompt steered into a running
+turn; `total` counts every prompt the session holds, which lets a console
+that reads only what follows its copy notice when that copy no longer adds
+up. A console without the capability on a node reads its kind=user event
+pages instead. Nothing is persisted and the read is never counted as a
+mutation.
+
 The sheet's actions are additive `session-git-actions`: both execution
 runtimes serve `POST /api/sessions/{sid}/git/push` (the checked-out branch's
 commits sent to its upstream, or to the one remote - `remote.pushDefault`

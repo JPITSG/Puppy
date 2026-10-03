@@ -1057,6 +1057,18 @@ recall store. The console fetches prompts on demand; older peers use unfiltered
 event pages until upgraded. Queued prompts enter recall when they start and
 become transcript rows; folded task archives are not prompts in Main.
 
+The prompt gutter's numbers and its prompt list read the additive
+`session-prompt-index` capability: `GET /api/sessions/{sid}/prompts` answers
+one `[seq, ts, steered, excerpt]` row per prompt, oldest first - the excerpt
+being the prompt's first line that is not an attachment marker, cut to 120
+characters, or its files' names - after an optional `after_seq` cursor, up to
+`limit` (1-2000, default 2000) rows with `more` and the session's prompt
+`total`. Only a bounded slice of each prompt is read, inside SQLite where its
+JSON functions exist, so a session of hundreds of long prompts answers a line
+per prompt. A console reads only what follows the last prompt it holds and
+reads the index whole again when `total` says its copy no longer adds up;
+older nodes are read through the kind=user event pages above.
+
 The additive `session-draft-presence` capability adds `draft_presence:
 {version:1,count:N}` to the socket's initial snapshot. Clients send
 `{type:"typing",active:true|false}` over that same authenticated session socket;

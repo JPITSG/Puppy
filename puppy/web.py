@@ -17,7 +17,7 @@ from aiohttp import WSMsgType, web
 from puppy import (__version__, agent_notes, auth, backends, backup_schedule, bind_verify, browser, compression,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
-                   project_move, spelling, token_usage,
+                   project_move, prompt_index, spelling, token_usage,
                    live_websockets, localization, protocol, runner, search, session_git, snapshots,
                    session_titles, spawn_exec,
                    state_stream, system_prompts, terminal, uploads, vnc,
@@ -1207,6 +1207,22 @@ async def h_session_events(request: web.Request):
     return web.json_response({"events": events})
 
 
+async def h_session_prompts(request: web.Request):
+    """The session's prompt index, one line per prompt (prompt_index)."""
+    s = _session_or_404(request)
+    try:
+        after_seq = int(request.query.get("after_seq", "0"))
+        limit = int(request.query.get("limit", str(prompt_index.PAGE_LIMIT)))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "prompt cursor and limit must be integers"}, status=400)
+    if after_seq < 0:
+        return web.json_response({"error": "prompt cursor cannot be negative"}, status=400)
+    if not 1 <= limit <= prompt_index.PAGE_LIMIT:
+        return web.json_response(
+            {"error": "prompt limit must be between 1 and {}".format(prompt_index.PAGE_LIMIT)}, status=400)
+    return web.json_response(prompt_index.read(s["id"], after_seq, limit))
+
+
 # ---- fs helpers (cwd picker) ----
 
 async def h_fs(request: web.Request):
@@ -2221,6 +2237,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_post("/api/sessions/{sid:\\d+}/switch", h_session_switch)
     r.add_post("/api/sessions/{sid:\\d+}/tool", h_session_tool)
     r.add_get("/api/sessions/{sid:\\d+}/events", h_session_events)
+    r.add_get("/api/sessions/{sid:\\d+}/prompts", h_session_prompts)
 
     r.add_get("/api/fs", h_fs)
     r.add_post("/api/fs/mkdir", h_fs_mkdir)

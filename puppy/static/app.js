@@ -18155,33 +18155,89 @@ class SharedDraft {
    of its own. A thread runs down the gutter between two plates that stay at
    its ends - the previous prompt at the top, the next at the bottom - and a
    pin sliding behind a plate fades. A step lands its prompt just under the
-   top plate with the pin lit and the bubble flashed, loading history that is
-   not on the page through the message jump's own paging. The index of
-   prompts is the node's (kind=user pages, behind session-prompt-history), so
-   numbers count from the session's first prompt and the plates reach history
-   not loaded yet; live prompts join it as they arrive, and a node without the
-   read numbers the prompts on the page. The gutter takes PROMPT_GUTTER from
-   the column only where the column's own margin is too narrow (--prompt-
-   gutter, which the composer, queue strip and approval card share so they
-   stay aligned), stays out of a transcript narrower than
-   PROMPT_GUTTER_MIN_WIDTH, and out of one whose Questions filter is off. */
+   list button with the pin lit and the bubble flashed, loading history that
+   is not on the page through the message jump's own paging. The list button
+   under the top plate opens every prompt of the session as one line each -
+   number, first line, stamp - windowed so only the rows in view exist, with a
+   filter for the hundreds a long project collects; a pick lands like a step.
+   The index of prompts is the node's: one compact row per prompt
+   (session-prompt-index, read after the last prompt it holds and whole again
+   when its count no longer adds up), or kind=user event pages from a node
+   with only session-prompt-history; numbers count from the session's first
+   prompt and the plates and the list reach history not loaded yet. Live
+   prompts join it as they arrive, and a node without either read numbers
+   the prompts on the page. The gutter takes PROMPT_GUTTER from the column
+   only where the column's own margin is too narrow (--prompt-gutter, which
+   the composer, queue strip and approval card share so they stay aligned),
+   stays out of a transcript narrower than PROMPT_GUTTER_MIN_WIDTH, and out of
+   one whose Questions filter is off. */
 const PROMPT_GUTTER = 44;
 const PROMPT_GUTTER_MIN_WIDTH = 520;
 const PROMPT_PIN_REACH = 52;     // from a pin's left edge to the column
 const PROMPT_PLATE = 32;
 const PROMPT_PLATE_INSET = 8;    // a plate's distance from the pane's edge
-const PROMPT_LANDING = 54;       // a step's prompt, just under the top plate
-const PROMPT_INDEX_PAGE = 500;
+const PROMPT_LIST_BUTTON = 26;   // the list button under the top plate
+const PROMPT_LIST_GAP = 10;      // between the top plate and the list button
+const PROMPT_LANDING = 84;       // a step's prompt, just under the list button
+const PROMPT_INDEX_PAGE = 500;   // kind=user events per page, for older nodes
+const PROMPT_EXCERPT = 120;      // characters of the line a prompt is listed by
+const PROMPT_LIST_ROW = 32;      // a list row's height until one is measured
+const PROMPT_LIST_OVERSCAN = 8;  // rows drawn beyond the list's edges
+const PROMPT_LIST_HEIGHT = 560;  // the most the list grows to, like any menu, before it scrolls
+
+/* The line a prompt is listed by: its first line that is not an attachment
+   marker, whitespace collapsed and bounded, or the names of the files a
+   prompt of attachments alone carries - prompt_index.excerpt on the node. */
+function promptExcerpt(text) {
+  const bounded = line => line.length <= PROMPT_EXCERPT ? line
+    : line.slice(0, PROMPT_EXCERPT - 1).trimEnd() + "…";
+  const names = [];
+  for (const line of String(text || "").slice(0, 4000).split("\n")) {
+    const marker = parseAttachmentMarker(line);
+    if (marker) { if (marker.name) names.push(marker.name); continue; }
+    const flat = line.replace(/\s+/g, " ").trim();
+    if (flat) return bounded(flat);
+  }
+  return bounded(names.join(", "));
+}
+
+function promptListIcon(size = 14) {
+  const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("viewBox", "0 0 14 14");
+  svg.setAttribute("aria-hidden", "true");
+  for (const y of [3.5, 7, 10.5]) {
+    const dot = document.createElementNS(ns, "circle");
+    dot.setAttribute("cx", "2.5");
+    dot.setAttribute("cy", y);
+    dot.setAttribute("r", "1.1");
+    dot.setAttribute("fill", "currentColor");
+    const bar = document.createElementNS(ns, "path");
+    bar.setAttribute("d", `M5.5 ${y}H12`);
+    bar.setAttribute("stroke", "currentColor");
+    bar.setAttribute("stroke-width", "1.3");
+    bar.setAttribute("stroke-linecap", "round");
+    svg.append(dot, bar);
+  }
+  return svg;
+}
+
+let promptListSerial = 0;
 
 class PromptGutter {
   constructor(view) {
     this.view = view;
-    this.index = new Map();        // seq -> {seq, at, steering}, the whole session's
+    this.index = new Map();        // seq -> {seq, at, steering, text}, the whole session's
+    this.indexSeq = 0;             // the newest prompt the node's compact index answered for
     this.indexGeneration = 0;
+    this.order = null;             // the index in order with its numbers, until it changes
     this.pins = new Map();         // seq -> pin, for the prompts on the page
     this.frame = 0;
     this.active = false;
     this.room = "";               // the --prompt-gutter last written
+    this.current = null;           // the seq of the prompt being read
+    this.list = null;              // the open prompt list
     this.layer = el("div", "prompt-pins hidden");
     this.layer.setAttribute("aria-hidden", "true");
     view.scroll.appendChild(this.layer);
@@ -18192,6 +18248,13 @@ class PromptGutter {
     this.plates = el("div", "prompt-plates hidden");
     this.up = this.plates.appendChild(this.plate("up", "Previous prompt"));
     this.down = this.plates.appendChild(this.plate("down", "Next prompt"));
+    this.listButton = this.plates.appendChild(el("button", "prompt-list-button"));
+    this.listButton.type = "button";
+    this.listButton.setAttribute("aria-label", "All prompts");
+    this.listButton.setAttribute("aria-haspopup", "listbox");
+    this.listButton.setAttribute("aria-expanded", "false");
+    this.listButton.appendChild(promptListIcon(14));
+    this.listButton.onclick = () => this.toggleList();
     view.root.appendChild(this.plates);
     this.mutations = new MutationObserver(() => this.schedule());
     this.mutations.observe(view.inner, { childList: true });
@@ -18220,6 +18283,7 @@ class PromptGutter {
     this.mutations.disconnect();
     this.sizes.disconnect();
     this.view.scroll.removeEventListener("scroll", this.onScroll);
+    this.closeList();
     this.thread.remove();
   }
 
@@ -18228,35 +18292,96 @@ class PromptGutter {
     this.frame = requestAnimationFrame(() => { this.frame = 0; this.render(); });
   }
 
-  /* The whole session's prompts, newest page first, as prompt recall reads
-     them; a failed or unsupported read leaves the prompts on the page. */
+  /* The index in seq order with each prompt's number - steers aside - kept
+     until the index changes, so a render or a scroll never sorts it. */
+  ordered() {
+    if (!this.order) {
+      const list = [...this.index.values()].sort((a, b) => a.seq - b.seq);
+      const numbers = new Map();
+      let count = 0;
+      for (const prompt of list) numbers.set(prompt.seq, prompt.steering ? 0 : ++count);
+      this.order = { list, numbers, count };
+    }
+    return this.order;
+  }
+
+  /* The whole session's prompts: the node's compact index where it serves
+     one, else the kind=user event pages prompt recall reads; a failed or
+     unsupported read leaves the prompts already known. */
   async refreshIndex() {
     const { bid, sid } = this.view.tab;
     const generation = ++this.indexGeneration;
-    if (bid && !backendHasCapability(state.backends.find(b => b.id === Number(bid)),
-      "session-prompt-history")) return;
+    const backend = bid ? state.backends.find(b => b.id === Number(bid)) : null;
+    try {
+      if (!bid || backendHasCapability(backend, "session-prompt-index"))
+        await this.readPromptIndex(bid, sid, generation);
+      else if (backendHasCapability(backend, "session-prompt-history"))
+        await this.readPromptEvents(bid, sid, generation);
+    } catch (_) { /* the prompts already known stay */ }
+  }
+
+  /* One compact row per prompt, after the newest prompt this gutter already
+     holds; the node's total says whether the copy still adds up, and when it
+     does not the index is read whole once more. */
+  async readPromptIndex(bid, sid, generation) {
+    for (let whole = this.indexSeq === 0; ; whole = true) {
+      let after = whole ? 0 : this.indexSeq;
+      const found = new Map();
+      let total = 0;
+      for (;;) {
+        const page = await api(bid, `sessions/${sid}/prompts?after_seq=${after}`, { cache: "no-store" });
+        if (generation !== this.indexGeneration) return;
+        const rows = page && Array.isArray(page.prompts) ? page.prompts : [];
+        let advanced = false;
+        for (const row of rows) {
+          if (!Array.isArray(row) || !Number.isSafeInteger(row[0]) || row[0] <= after) continue;
+          found.set(row[0], { seq: row[0], at: Number(row[1]) || 0, steering: !!row[2],
+            text: typeof row[3] === "string" ? row[3] : "" });
+          after = row[0];
+          advanced = true;
+        }
+        total = Number(page && page.total) || 0;
+        // the next page starts after this one; a page that moved nothing ends the read
+        if (!(page && page.more) || !advanced) break;
+      }
+      const index = new Map();
+      // a whole read keeps only the live prompts newer than what it read
+      for (const [seq, prompt] of this.index) if (!whole || seq > after) index.set(seq, prompt);
+      for (const [seq, prompt] of found) index.set(seq, prompt);
+      let covered = 0;
+      for (const seq of index.keys()) if (seq <= after) covered++;
+      if (covered !== total && !whole) continue;
+      this.index = index;
+      this.indexSeq = after;
+      this.order = null;
+      this.schedule();
+      return;
+    }
+  }
+
+  /* An older node's kind=user event pages, newest first, read whole. */
+  async readPromptEvents(bid, sid, generation) {
     const found = new Map();
     let before = null;
-    try {
-      for (;;) {
-        const cursor = before === null ? "" : `&before_seq=${before}`;
-        const page = await api(bid,
-          `sessions/${sid}/events?kind=user&limit=${PROMPT_INDEX_PAGE}${cursor}`, { cache: "no-store" });
-        if (generation !== this.indexGeneration) return;
-        const events = page && Array.isArray(page.events) ? page.events : [];
-        for (const ev of events) {
-          if (!ev || ev.kind !== "user" || !Number.isSafeInteger(ev.seq)) continue;
-          found.set(ev.seq, { seq: ev.seq, at: Number(ev.ts) || 0,
-            steering: !!(ev.data && ev.data.steering) });
-        }
-        if (events.length < PROMPT_INDEX_PAGE || !Number.isSafeInteger(events[0] && events[0].seq) ||
-            (before !== null && events[0].seq >= before)) break;
-        before = events[0].seq;
+    for (;;) {
+      const cursor = before === null ? "" : `&before_seq=${before}`;
+      const page = await api(bid,
+        `sessions/${sid}/events?kind=user&limit=${PROMPT_INDEX_PAGE}${cursor}`, { cache: "no-store" });
+      if (generation !== this.indexGeneration) return;
+      const events = page && Array.isArray(page.events) ? page.events : [];
+      for (const ev of events) {
+        if (!ev || ev.kind !== "user" || !Number.isSafeInteger(ev.seq)) continue;
+        found.set(ev.seq, { seq: ev.seq, at: Number(ev.ts) || 0,
+          steering: !!(ev.data && ev.data.steering), text: promptExcerpt(ev.data && ev.data.text) });
       }
-    } catch (_) { return; }
+      if (events.length < PROMPT_INDEX_PAGE || !Number.isSafeInteger(events[0] && events[0].seq) ||
+          (before !== null && events[0].seq >= before)) break;
+      before = events[0].seq;
+    }
     // a prompt that arrived while the pages were read is kept
     for (const [seq, prompt] of this.index) if (!found.has(seq)) found.set(seq, prompt);
     this.index = found;
+    this.order = null;
     this.schedule();
   }
 
@@ -18271,8 +18396,10 @@ class PromptGutter {
     const bubbles = this.bubbles();
     for (const node of bubbles) {
       const seq = Number(node.dataset.seq);
-      if (!this.index.has(seq))
-        this.index.set(seq, { seq, at: Number(node.dataset.at) || 0, steering: node.dataset.steering === "1" });
+      if (this.index.has(seq)) continue;
+      this.index.set(seq, { seq, at: Number(node.dataset.at) || 0, steering: node.dataset.steering === "1",
+        text: node.dataset.excerpt || "" });
+      this.order = null;
     }
     const width = scroll.clientWidth;
     const active = bubbles.length > 0 && scroll.clientHeight > 0 && width >= PROMPT_GUTTER_MIN_WIDTH &&
@@ -18281,17 +18408,14 @@ class PromptGutter {
     this.layer.classList.toggle("hidden", !active);
     this.thread.classList.toggle("hidden", !active);
     this.plates.classList.toggle("hidden", !active);
+    if (!active) this.closeList();
     /* the column's own margin when it is wide enough, the gutter's room when not */
     const column = Math.min(900, width - 32);
     const room = active && 16 + (width - 32 - column) / 2 < PROMPT_PIN_REACH + PROMPT_PLATE_INSET;
     const gutter = (room ? PROMPT_GUTTER : 0) + "px";
     if (this.room !== gutter) view.root.style.setProperty("--prompt-gutter", this.room = gutter);
     if (!active) { this.layout = null; return; }
-    // numbers count the session's prompts, steers aside
-    const numbers = new Map();
-    let count = 0;
-    for (const prompt of [...this.index.values()].sort((a, b) => a.seq - b.seq))
-      numbers.set(prompt.seq, prompt.steering ? 0 : ++count);
+    const { numbers } = this.ordered();
     // every place is read before anything is written
     const box = scroll.getBoundingClientRect(), rootBox = view.root.getBoundingClientRect();
     const height = scroll.clientHeight;
@@ -18326,26 +18450,30 @@ class PromptGutter {
     for (const [seq, pin] of this.pins)
       if (!seen.has(seq)) { pin.remove(); this.pins.delete(seq); }
     const left = box.left - rootBox.left + centre, reach = PROMPT_PLATE_INSET + PROMPT_PLATE / 2;
+    const top = box.top - rootBox.top;
     this.thread.style.left = left + "px";
-    this.thread.style.top = box.top - rootBox.top + reach + "px";
+    this.thread.style.top = top + reach + "px";
     this.thread.style.height = Math.max(0, height - 2 * reach) + "px";
     this.up.style.left = this.down.style.left = left - PROMPT_PLATE / 2 + "px";
-    this.up.style.top = box.top - rootBox.top + PROMPT_PLATE_INSET + "px";
-    this.down.style.top = box.top - rootBox.top + height - PROMPT_PLATE_INSET - PROMPT_PLATE + "px";
+    this.up.style.top = top + PROMPT_PLATE_INSET + "px";
+    this.down.style.top = top + height - PROMPT_PLATE_INSET - PROMPT_PLATE + "px";
+    this.listButton.style.left = left - PROMPT_LIST_BUTTON / 2 + "px";
+    this.listButton.style.top = top + PROMPT_PLATE_INSET + PROMPT_PLATE + PROMPT_LIST_GAP + "px";
     // the pins' heights, measured once here so a scroll reads nothing per pin
     for (const entry of this.layout) entry.height = entry.pin.offsetHeight;
+    if (this.liveList()) this.list.sync();
     this.follow();
   }
 
-  /* On every scroll: the pins behind a plate faded, the prompt being read
-     lit, the plates' reach - the scroller read once, then only classes
-     written. */
+  /* On every scroll: the pins behind a plate or the list button faded, the
+     prompt being read lit, the plates' reach - the scroller read once, then
+     only classes written. */
   follow() {
     if (!this.active || !this.layout) return;
     const scroll = this.view.scroll;
     const top = scroll.scrollTop, height = scroll.clientHeight;
     const most = Math.max(0, scroll.scrollHeight - height);
-    const above = top + PROMPT_PLATE_INSET + PROMPT_PLATE + 2;
+    const above = top + PROMPT_PLATE_INSET + PROMPT_PLATE + PROMPT_LIST_GAP + PROMPT_LIST_BUTTON + 2;
     const below = top + height - PROMPT_PLATE_INSET - PROMPT_PLATE - 2;
     /* the prompt being read is the last at or above the reading line - or,
        with the transcript at its end, where a prompt cannot rise to that
@@ -18361,13 +18489,42 @@ class PromptGutter {
     for (const entry of this.layout) entry.pin.classList.toggle("on", entry === lit);
     this.up.disabled = !this.neighbour(-1, top, most);
     this.down.disabled = !this.neighbour(1, top, most);
+    this.current = lit ? lit.seq : this.lastBefore(this.view.oldestSeq);
+    if (this.liveList()) this.list.markCurrent();
   }
 
-  /* The prompt before or after the one a step would put under the top
-     plate: on the page, the nearest whose landing would move the transcript
+  /* where seq falls in the ordered index: the place of the first prompt
+     after it - a binary search, so a scroll never walks the index */
+  placeAfter(seq) {
+    const list = this.ordered().list;
+    let low = 0, high = list.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (list[middle].seq <= seq) low = middle + 1; else high = middle;
+    }
+    return low;
+  }
+
+  /* the newest known prompt before seq - the one being read when its own
+     bubble is not on the page */
+  lastBefore(seq) {
+    if (seq === null || seq === undefined) return null;
+    const at = this.placeAfter(seq - 1) - 1;
+    return at >= 0 ? this.ordered().list[at].seq : null;
+  }
+
+  /* the oldest known prompt after seq */
+  firstAfter(seq) {
+    if (seq === null || seq === undefined) return null;
+    const prompt = this.ordered().list[this.placeAfter(seq)];
+    return prompt ? prompt.seq : null;
+  }
+
+  /* The prompt before or after the one a step would put under the list
+     button: on the page, the nearest whose landing would move the transcript
      that way (at either end the transcript cannot always scroll a prompt
-     under the plate, and a step that moves nothing is no step); beyond the
-     page, by its seq. */
+     there, and a step that moves nothing is no step); beyond the page, by
+     its seq. */
   neighbour(direction, at = this.view.scroll.scrollTop,
     most = Math.max(0, this.view.scroll.scrollHeight - this.view.scroll.clientHeight)) {
     const view = this.view;
@@ -18380,16 +18537,12 @@ class PromptGutter {
         if (best === null || (direction < 0 ? entry.seq > best : entry.seq < best)) best = entry.seq;
     }
     if (best !== null) return best;
-    for (const seq of this.index.keys()) {
-      if (loaded.has(seq)) continue;
-      const beyond = direction < 0 ? view.oldestSeq !== null && seq < view.oldestSeq
-        : view.newestSeq !== null && seq > view.newestSeq;
-      if (beyond && (best === null || (direction < 0 ? seq > best : seq < best))) best = seq;
-    }
-    return best;
+    // beyond the page: the index's nearest prompt past its oldest or newest event
+    const seq = direction < 0 ? this.lastBefore(view.oldestSeq) : this.firstAfter(view.newestSeq);
+    return seq !== null && !loaded.has(seq) ? seq : null;
   }
 
-  /* A step's landing: the prompt under the top plate, its bubble flashed. */
+  /* A step's landing: the prompt under the list button, its bubble flashed. */
   land(node) {
     const scroll = this.view.scroll;
     const top = node.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop;
@@ -18400,6 +18553,215 @@ class PromptGutter {
     void node.offsetWidth;
     node.classList.add("search-flash");
     setTimeout(() => { if (node.isConnected) node.classList.remove("search-flash"); }, 2400);
+  }
+
+  /* ---- the prompt list ---- */
+  /* the open list, if the shared floats have not taken it away (a press
+     outside, another menu, a resize remove it without asking) */
+  liveList() {
+    if (this.list && !this.list.panel.isConnected) {
+      this.list = null;
+      this.listButton.setAttribute("aria-expanded", "false");
+    }
+    return this.list;
+  }
+
+  toggleList() {
+    this.liveList();
+    // the shared floats' toggle: a press on the button of an open list closes it
+    if (closeAllMenus(this.listButton)) { this.closeList(); return; }
+    this.openList();
+  }
+
+  closeList(returnFocus = false) {
+    const list = this.list;
+    if (!list) return;
+    this.list = null;
+    list.panel.remove();
+    this.listButton.setAttribute("aria-expanded", "false");
+    if (returnFocus && this.listButton.isConnected) this.listButton.focus({ preventScroll: true });
+  }
+
+  /* One float on the shared menus' terms (closed by a press outside, another
+     menu, a resize, Escape or a pick, and by nothing else - a scroll of the
+     transcript moves no anchor), holding a filter and a listbox of every
+     prompt. Only the rows in view are drawn, on one measured row height, so
+     a list of hundreds costs what a list of twenty does. */
+  openList() {
+    const gutter = this;
+    const id = `prompt-list-${++promptListSerial}`;
+    const panel = el("div", "choice-menu prompt-list dyn");
+    panel._anchor = this.listButton;
+    panel.setAttribute("role", "group");
+    panel.setAttribute("aria-label", "Prompts");
+    const head = panel.appendChild(el("div", "prompt-list-head"));
+    head.appendChild(el("span", "prompt-list-title", "Prompts"));
+    const count = head.appendChild(el("span", "prompt-list-count"));
+    const filter = panel.appendChild(el("input", "prompt-list-filter"));
+    filter.type = "text";
+    filter.placeholder = "Filter prompts";
+    filter.spellcheck = false;
+    filter.autocomplete = "off";
+    filter.setAttribute("aria-label", "Filter prompts");
+    filter.setAttribute("role", "combobox");
+    filter.setAttribute("aria-expanded", "true");
+    filter.setAttribute("aria-controls", id);
+    const rows = panel.appendChild(el("div", "prompt-list-rows"));
+    rows.id = id;
+    rows.setAttribute("role", "listbox");
+    rows.setAttribute("aria-label", "Prompts");
+    const space = rows.appendChild(el("div", "prompt-list-space"));
+    const empty = panel.appendChild(el("div", "prompt-list-empty hidden", "No prompt matches"));
+    const list = {
+      panel, filter, rows, space, count, empty,
+      matches: [], activeAt: -1, row: PROMPT_LIST_ROW, drawn: new Map(), frame: 0, query: null,
+      /* the prompts the filter keeps: their text, or their number */
+      match() {
+        const { list: all, numbers, count: numbered } = gutter.ordered();
+        const query = filter.value.trim().toLowerCase();
+        if (query === this.query && this.source === all) return;
+        // a new index under the same filter keeps the row the keys are on
+        const kept = query === this.query && this.matches[this.activeAt] ? this.matches[this.activeAt].seq : null;
+        this.query = query;
+        this.source = all;
+        const wanted = query.replace(/^#/, "");
+        const number = /^\d+$/.test(wanted) ? Number(wanted) : null;
+        this.matches = !query ? all : all.filter(prompt =>
+          (number !== null && numbers.get(prompt.seq) === number) ||
+          (prompt.lower || (prompt.lower = prompt.text.toLowerCase())).includes(query));
+        count.textContent = query ? `${this.matches.length} found` : String(numbered);
+        empty.classList.toggle("hidden", this.matches.length > 0);
+        space.style.height = this.matches.length * this.row + "px";
+        const at = this.matches.findIndex(prompt => prompt.seq === (kept !== null ? kept : gutter.current));
+        this.activeAt = !this.matches.length ? -1 : at >= 0 && (!query || kept !== null) ? at
+          : query ? 0 : this.matches.length - 1;
+        for (const node of this.drawn.values()) node.remove();
+        this.drawn.clear();
+      },
+      /* the rows the list's scroll shows, and a few either side */
+      paint() {
+        const { numbers } = gutter.ordered();
+        const view = rows.clientHeight || this.row * 12;
+        const first = Math.max(0, Math.floor(rows.scrollTop / this.row) - PROMPT_LIST_OVERSCAN);
+        const last = Math.min(this.matches.length, Math.ceil((rows.scrollTop + view) / this.row) + PROMPT_LIST_OVERSCAN);
+        for (const [at, node] of this.drawn)
+          if (at < first || at >= last) { node.remove(); this.drawn.delete(at); }
+        let added = false;
+        for (let at = first; at < last; at++) {
+          const prompt = this.matches[at];
+          let node = this.drawn.get(at);
+          if (!node || node._seq !== prompt.seq) {
+            if (node) node.remove();
+            node = this.rowNode(prompt, numbers.get(prompt.seq) || 0);
+            node.style.top = at * this.row + "px";
+            node._at = at;
+            // a window of a longer list: say where in it each row stands
+            node.setAttribute("aria-setsize", String(this.matches.length));
+            node.setAttribute("aria-posinset", String(at + 1));
+            space.appendChild(node);
+            this.drawn.set(at, node);
+            added = true;
+          }
+          node.classList.toggle("active", at === this.activeAt);
+          node.classList.toggle("current", prompt.seq === gutter.current);
+          node.setAttribute("aria-selected", at === this.activeAt ? "true" : "false");
+        }
+        // rows drawn above the window join at its end: keep the list in reading order
+        if (added) for (const at of [...this.drawn.keys()].sort((a, b) => a - b)) space.appendChild(this.drawn.get(at));
+        const active = this.drawn.get(this.activeAt);
+        if (active) filter.setAttribute("aria-activedescendant", active.id);
+        else filter.removeAttribute("aria-activedescendant");
+      },
+      rowNode(prompt, number) {
+        const node = el("div", "prompt-list-row" + (prompt.steering ? " steer" : ""));
+        node.id = `${id}-${prompt.seq}`;
+        node.setAttribute("role", "option");
+        node._seq = prompt.seq;
+        node.appendChild(el("span", "prompt-list-num", prompt.steering ? "" : String(number)));
+        node.appendChild(el("span", "prompt-list-text", prompt.text || "(no text)"));
+        // a list that spans days says the day as well: the console's one stamp
+        node.appendChild(el("span", "prompt-list-time", prompt.at ? fmtStamp(prompt.at) : ""));
+        return node;
+      },
+      schedule() {
+        if (this.frame) return;
+        this.frame = requestAnimationFrame(() => { this.frame = 0; if (gutter.list === this) this.paint(); });
+      },
+      /* keep a row in view: the active one as the keys move it */
+      reveal(at, centre = false) {
+        if (at < 0) return;
+        const view = rows.clientHeight || this.row * 12, top = at * this.row;
+        if (centre) rows.scrollTop = Math.max(0, top - (view - this.row) / 2);
+        else if (top < rows.scrollTop) rows.scrollTop = top;
+        else if (top + this.row > rows.scrollTop + view) rows.scrollTop = top + this.row - view;
+      },
+      move(to) {
+        if (!this.matches.length) return;
+        this.activeAt = Math.max(0, Math.min(this.matches.length - 1, to));
+        this.reveal(this.activeAt);
+        this.paint();
+      },
+      pick(at) {
+        const prompt = this.matches[at];
+        if (!prompt) return;
+        gutter.closeList(true);
+        gutter.view.jumpToPrompt(prompt.seq);
+      },
+      /* a new index, or the transcript moving under an open list */
+      sync() { this.match(); this.paint(); },
+      markCurrent() {
+        for (const node of this.drawn.values()) node.classList.toggle("current", node._seq === gutter.current);
+      },
+    };
+    panel.sync = () => list.sync();
+    filter.addEventListener("input", () => { list.match(); rows.scrollTop = 0; list.paint(); });
+    filter.addEventListener("keydown", event => {
+      const page = Math.max(1, Math.floor((rows.clientHeight || list.row * 12) / list.row) - 1);
+      if (event.key === "ArrowDown") list.move(list.activeAt + 1);
+      else if (event.key === "ArrowUp") list.move(list.activeAt - 1);
+      else if (event.key === "PageDown") list.move(list.activeAt + page);
+      else if (event.key === "PageUp") list.move(list.activeAt - page);
+      else if (event.key === "Enter") list.pick(list.activeAt);
+      else if (event.key === "Escape") {
+        if (filter.value) { filter.value = ""; list.match(); list.reveal(list.activeAt, true); list.paint(); }
+        else this.closeList(true);
+      } else return;
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    rows.addEventListener("scroll", () => list.schedule(), { passive: true });
+    rows.addEventListener("pointermove", event => {
+      const node = event.target.closest && event.target.closest(".prompt-list-row");
+      if (node && node._at !== list.activeAt) { list.activeAt = node._at; list.paint(); }
+    });
+    rows.addEventListener("click", event => {
+      const node = event.target.closest && event.target.closest(".prompt-list-row");
+      if (node) list.pick(node._at);
+    });
+    this.list = list;
+    this.listButton.setAttribute("aria-expanded", "true");
+    document.body.appendChild(panel);
+    // one row's height, read from a row of the list's own font
+    const probe = space.appendChild(list.rowNode({ seq: 0, text: "Probe", at: 0, steering: false }, 0));
+    list.row = probe.offsetHeight || PROMPT_LIST_ROW;
+    probe.remove();
+    list.match();
+    this.placeList();
+    list.reveal(list.activeAt, true);
+    list.paint();
+    if (focusOnShow()) filter.focus({ preventScroll: true });
+  }
+
+  /* beside the gutter, from the list button down, inside the window */
+  placeList() {
+    const panel = this.list.panel, button = this.listButton.getBoundingClientRect();
+    const edge = 8;
+    const width = panel.offsetWidth;
+    const left = Math.max(edge, Math.min(button.right + 10, window.innerWidth - width - edge));
+    const top = Math.max(edge, button.top - 6);
+    panel.style.left = Math.round(left) + "px";
+    panel.style.top = Math.round(top) + "px";
+    panel.style.maxHeight = Math.max(180, Math.min(PROMPT_LIST_HEIGHT, window.innerHeight - top - 16)) + "px";
   }
 }
 
@@ -20295,9 +20657,10 @@ class SessionView {
     switch (ev.kind) {
       case "user": {
         const n = el("div", "msg msg-user");
-        /* the prompt gutter reads these: when it was sent, and whether it
-           was steered into a turn already running */
+        /* the prompt gutter reads these: when it was sent, the line it is
+           listed by, and whether it was steered into a turn already running */
         n.dataset.at = String(ev.ts || "");
+        n.dataset.excerpt = promptExcerpt(d.text);
         if (d.steering) n.dataset.steering = "1";
         /* The marker lines are how the engine receives an attachment, not how
            the person who sent it should have to read it back. Show what the
