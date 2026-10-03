@@ -1966,6 +1966,9 @@ async def prompt_gutter_checks(instance):
                 db.add_event(sid, "user", {"text": "Keep the old column for step %d" % turn, "steering": True,
                                            "request_id": "steer-%d" % turn, "turn_id": "turn-%d" % turn})
         db.add_event(sid, "result", {"ok": True, "duration_ms": 1000})
+    # a long closing answer, which a narrower column wraps onto more lines
+    db.add_event(sid, "assistant", {"text": " ".join(["The migration notes cover every table, its new column "
+                                                      "and the backfill that fills it."] * 14)})
     runner.broadcast_sessions()
     view = "sessionViewFor(0,%d)" % sid
     await until(instance, "!!findSessionMeta(0,%d)" % sid)
@@ -2087,6 +2090,19 @@ async def prompt_gutter_checks(instance):
         g = await evaluate(instance, measure)
         assert g["gutter"] == "44px", ("the gutter's room", g["gutter"])
         lined(g, "narrow")
+        # a tab switched away from at the foot and back lands on the foot: hidden, the
+        # transcript keeps the gutter's room, so nothing re-wraps under the landing
+        for _ in range(3):
+            await evaluate(instance, "%s.scrollBottom(true); activateTab('s:0:1'); true" % view)
+            await until(instance, "!%s.scroll.clientHeight" % view)
+            await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+            await evaluate(instance, "activateTab('s:0:%d'); true" % sid)
+            await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => "
+                                     "requestAnimationFrame(r))))")
+            back = await evaluate(instance, """(() => { const s = %s.scroll;
+                return {gap: s.scrollHeight - s.scrollTop - s.clientHeight,
+                        gutter: %s.root.style.getPropertyValue('--prompt-gutter')}; })()""" % (view, view))
+            assert back["gap"] < 1 and back["gutter"] == "44px", ("back at the foot after a tab switch", back)
         # a phone shows none, and neither does a transcript without its questions
         await instance.call("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844,
             "deviceScaleFactor": 2, "mobile": True}, session=page)

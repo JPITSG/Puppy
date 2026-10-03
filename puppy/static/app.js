@@ -18401,8 +18401,12 @@ class PromptGutter {
         text: node.dataset.excerpt || "" });
       this.order = null;
     }
+    /* A hidden transcript (a tab switched away from) measures nothing, which
+       is not a width: it keeps the gutter it had, so coming back on screen
+       changes no column under the place it lands on. */
+    if (!scroll.clientHeight) { this.closeList(); return; }
     const width = scroll.clientWidth;
-    const active = bubbles.length > 0 && scroll.clientHeight > 0 && width >= PROMPT_GUTTER_MIN_WIDTH &&
+    const active = bubbles.length > 0 && width >= PROMPT_GUTTER_MIN_WIDTH &&
       !!(view.chatLogMask & CHAT_LOG_TYPES[0].bit);
     this.active = active;
     this.layer.classList.toggle("hidden", !active);
@@ -18413,7 +18417,12 @@ class PromptGutter {
     const column = Math.min(900, width - 32);
     const room = active && 16 + (width - 32 - column) / 2 < PROMPT_PIN_REACH + PROMPT_PLATE_INSET;
     const gutter = (room ? PROMPT_GUTTER : 0) + "px";
-    if (this.room !== gutter) view.root.style.setProperty("--prompt-gutter", this.room = gutter);
+    if (this.room !== gutter) {
+      // a narrower column re-wraps the transcript: one read at its foot stays at its foot
+      const foot = !view.detached && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 1;
+      view.root.style.setProperty("--prompt-gutter", this.room = gutter);
+      if (foot) scroll.scrollTop = scroll.scrollHeight;
+    }
     if (!active) { this.layout = null; return; }
     const { numbers } = this.ordered();
     // every place is read before anything is written

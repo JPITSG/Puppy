@@ -282,8 +282,18 @@ const key = (node, name) => {
     // a narrow column: the gutter takes its room, and every column shares it
     layout.width = 800; layout.column = 16;
     view.scroll.clientWidth = 800;
+    view.scroll.scrollTop = 1400;   // the reader at the transcript's foot
     gutter.render();
     assert.equal(view.root.style["--prompt-gutter"], api.PROMPT_GUTTER + "px");
+    assert.equal(view.scroll.scrollTop, view.scroll.scrollHeight, "the narrower column keeps them at its foot");
+    // a hidden transcript measures nothing: it keeps its gutter, so showing it again moves nothing
+    view.scroll.clientHeight = 0; view.scroll.clientWidth = 0;
+    gutter.render();
+    assert.equal(view.root.style["--prompt-gutter"], api.PROMPT_GUTTER + "px", "hidden is not narrow");
+    assert.ok(!gutter.plates.classList.contains("hidden"));
+    view.scroll.clientHeight = layout.height; view.scroll.clientWidth = 800;
+    view.scroll.scrollTop = 0;
+    gutter.render();
     // too narrow for a gutter, a filtered transcript, no prompts: none at all
     layout.width = 500; view.scroll.clientWidth = 500;
     gutter.render();
