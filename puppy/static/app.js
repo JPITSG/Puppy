@@ -18270,7 +18270,13 @@ class PromptGutter {
     button.type = "button";
     button.setAttribute("aria-label", label);
     button.appendChild(chevronIcon(12));
-    button.onclick = () => {
+    button.onclick = (event) => {
+      /* the bottom plate steps to the next prompt, or - past the last one,
+         or on the second press of a double click - to the newest message */
+      if (direction === "down" && ((event && event.detail >= 2) || !this.neighbour(1))) {
+        this.view.goToNewest();
+        return;
+      }
       const seq = this.neighbour(direction === "up" ? -1 : 1);
       if (seq) this.view.jumpToPrompt(seq);
     };
@@ -18497,7 +18503,12 @@ class PromptGutter {
     }
     for (const entry of this.layout) entry.pin.classList.toggle("on", entry === lit);
     this.up.disabled = !this.neighbour(-1, top, most);
-    this.down.disabled = !this.neighbour(1, top, most);
+    /* the bottom plate greys only at the newest message itself: anywhere
+       short of it there is a next prompt or the newest message to go to */
+    const next = this.neighbour(1, top, most);
+    this.down.disabled = !next && !this.view.detached && top >= most - 1;
+    const label = next ? "Next prompt" : "Newest message";
+    if (this.down.getAttribute("aria-label") !== label) this.down.setAttribute("aria-label", label);
     this.current = lit ? lit.seq : this.lastBefore(this.view.oldestSeq);
     if (this.liveList()) this.list.markCurrent();
   }
@@ -20371,6 +20382,18 @@ class SessionView {
      not loaded (the paging or window a message jump uses), then set under
      the gutter's top plate. It moves the reader as a scroll does, so it
      records no navigation entry. */
+  /* The newest message, from the prompt gutter's bottom plate: the foot of
+     the transcript, or the tail read again when a window of older history is
+     on the page. A step still loading lands nowhere. Like a step, it moves
+     the reader as a scroll does and records no navigation entry. */
+  goToNewest() {
+    if (this.detached) return this.returnToTail(false);
+    this.cancelNavigationWindow();
+    this._jumpSequence = (this._jumpSequence || 0) + 1;
+    const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    this.scroll.scrollTo({ top: this.scroll.scrollHeight, behavior: reduce ? "auto" : "smooth" });
+  }
+
   async jumpToPrompt(seq) {
     seq = Number(seq);
     if (!Number.isSafeInteger(seq) || seq < 1 || !this.session) return;

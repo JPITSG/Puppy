@@ -1968,7 +1968,7 @@ async def prompt_gutter_checks(instance):
         db.add_event(sid, "result", {"ok": True, "duration_ms": 1000})
     # a long closing answer, which a narrower column wraps onto more lines
     db.add_event(sid, "assistant", {"text": " ".join(["The migration notes cover every table, its new column "
-                                                      "and the backfill that fills it."] * 14)})
+                                                      "and the backfill that fills it."] * 80)})
     runner.broadcast_sessions()
     view = "sessionViewFor(0,%d)" % sid
     await until(instance, "!!findSessionMeta(0,%d)" % sid)
@@ -2067,9 +2067,8 @@ async def prompt_gutter_checks(instance):
             if landed["scrollTop"] > 0:
                 assert abs(landed["offset"] - landing) < 2, ("landed under the list button", landed)
             assert landed["flashed"], landed
-        # from the tail, where the last prompt is already in view below the
-        # reading line, every earlier prompt in turn: 32 of the 33
-        assert len(seen) == 32 and seen == sorted(seen, reverse=True) and seen[-1] == 1, \
+        # from the tail, a long answer past the last prompt, every prompt in turn: all 33
+        assert len(seen) == 33 and seen == sorted(seen, reverse=True) and seen[-1] == 1, \
             ("every prompt, newest to oldest", seen)
         g = await evaluate(instance, measure)
         assert g["upDisabled"] and g["oldest"] == 1, ("the first prompt reached through older history", g)
@@ -2082,6 +2081,34 @@ async def prompt_gutter_checks(instance):
             await press("down")
         assert (await evaluate(instance, "%s.promptGutter.layout.at(-1).pin.classList.contains('on')" % view)), \
             "the last prompt reached"
+
+        foot = """(() => { const v = %s, s = v.scroll, g = v.promptGutter;
+            return {gap: s.scrollHeight - s.scrollTop - s.clientHeight, disabled: g.down.disabled,
+                    label: g.down.getAttribute('aria-label')}; })()""" % view
+        assert (await evaluate(instance, foot))["disabled"], "at the newest message the bottom plate greys"
+        # a real double click on the bottom plate, from prompts back: the newest message
+        for _ in range(4):
+            await press("up")
+        assert not (await evaluate(instance, foot))["disabled"]
+        point = await evaluate(instance, """(() => { const b = %s.promptGutter.down.getBoundingClientRect();
+            return {x: b.left + b.width / 2, y: b.top + b.height / 2}; })()""" % view)
+        for count in (1, 2):
+            for kind in ("mousePressed", "mouseReleased"):
+                await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=count),
+                                    session=page)
+        await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+        state = await evaluate(instance, foot)
+        assert state["gap"] < 1 and state["disabled"], ("a double click goes to the newest message", state)
+        # past the last prompt, short of the foot: one press goes to the newest message
+        await evaluate(instance, """(() => { const v = %s, s = v.scroll, last = v.promptGutter.layout.at(-1);
+            s.scrollTop = Math.min(last.top - PROMPT_LANDING + 40, s.scrollHeight - s.clientHeight - 40); })()"""
+                       % view)
+        await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+        state = await evaluate(instance, foot)
+        assert not state["disabled"] and state["label"] == "Newest message", ("live short of the foot", state)
+        await press("down")
+        state = await evaluate(instance, foot)
+        assert state["gap"] < 1 and state["disabled"], ("one press past the last prompt", state)
 
         # a narrow pane: the gutter takes its room and every column moves with it
         await instance.call("Emulation.setDeviceMetricsOverride", {"width": 920, "height": 800,
@@ -2129,7 +2156,8 @@ async def prompt_gutter_checks(instance):
     print("PASS: the prompt gutter's pins level with their prompts and numbered from the session's first, steers as violet "
           "rings, pins, thread and plates on one line with the thread ending under both plates and the column aligned "
           "with the composer, in both themes; real plate clicks stepping prompt by prompt into history not on the page "
-          "and back, each landing under the list button; a narrow pane making room, a phone and a filtered transcript "
+          "and back, each landing under the list button, a real double click and a press past the last prompt going "
+          "to the newest message; a narrow pane making room, a phone and a filtered transcript "
           "showing none; the prompt list over four hundred prompts read from the node's compact index, opened by a "
           "real click beside the gutter, drawing only the rows in view, scrolled by a real wheel, filtered by text "
           "and number, Enter and a real click landing prompts the page did not hold, in both themes", flush=True)

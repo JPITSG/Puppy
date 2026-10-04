@@ -163,7 +163,9 @@ reading anywhere further up is never pulled away from it.
   you steered into a running turn is a violet ring instead. The pins sit on a
   thread between two round buttons at the gutter's ends: **↑** goes to the
   previous prompt and **↓** to the next, landing it near the top of the
-  transcript with its pin lit, and a press on a pin goes to that prompt. The
+  transcript with its pin lit, and a press on a pin goes to that prompt. Past
+  the last prompt **↓** goes to the newest message, a double click on it goes
+  there from anywhere, and it greys only once you are there. The
   list button under **↑** opens every prompt of the session, one line each -
   its number, first line and when it was sent - with the one you are reading
   lit; type in its filter to narrow hundreds of prompts by their words or

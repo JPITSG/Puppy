@@ -112,7 +112,8 @@ function makeView(bid = 0, sid = 7) {
   const scroll = root.appendChild(api.el("div", "chat-scroll"));
   const inner = scroll.appendChild(api.el("div", "chat-inner"));
   const view = {root, scroll, inner, tab: {bid, sid}, chatLogMask: 7, oldestSeq: null, newestSeq: 0,
-    jumps: [], jumpToPrompt(seq) { this.jumps.push(seq); }};
+    jumps: [], jumpToPrompt(seq) { this.jumps.push(seq); }, detached: false,
+    newest: 0, goToNewest() { this.newest++; }};
   scroll.clientWidth = layout.width;
   scroll.clientHeight = layout.height;
   scroll.scrollHeight = 2000;
@@ -348,10 +349,35 @@ const key = (node, name) => {
     // one on the page, which cannot be scrolled any higher
     view.scroll.scrollTop = 0;
     assert.equal(gutter.neighbour(-1), 3, "a prompt not on the page");
-    // past the last prompt nothing follows; before the first nothing precedes
+    // past the last prompt no prompt follows, but the newest message does until the foot
+    const press = (plate, detail = 1) => plate.onclick({detail});
     view.scroll.scrollTop = 1400 - api.PROMPT_LANDING;
     gutter.follow();
-    assert.ok(gutter.down.disabled && !gutter.up.disabled);
+    assert.ok(!gutter.down.disabled && !gutter.up.disabled, "short of the foot the bottom plate stays live");
+    assert.equal(gutter.down.getAttribute("aria-label"), "Newest message");
+    press(gutter.down);
+    assert.deepEqual([view.newest, view.jumps.length], [1, 0], "a press past the last prompt goes to the newest message");
+    view.scroll.scrollTop = 1400;   // the foot: nothing further
+    gutter.follow();
+    assert.ok(gutter.down.disabled, "at the newest message the bottom plate greys");
+    view.detached = true;           // a window of older history: the newest is not on the page
+    gutter.follow();
+    assert.ok(!gutter.down.disabled, "a window of older history still has its newest to go to");
+    view.detached = false;
+    // short of a next prompt: one press steps to it, the second of a double click goes on to the newest
+    view.scroll.scrollTop = 0;
+    gutter.follow();
+    assert.equal(gutter.down.getAttribute("aria-label"), "Next prompt");
+    press(gutter.down);
+    assert.deepEqual([view.jumps, view.newest], [[60], 1]);
+    press(gutter.down, 2);
+    assert.deepEqual([view.jumps, view.newest], [[60], 2], "the double click's second press: the newest");
+    press(gutter.up, 2);
+    assert.equal(view.newest, 2, "the top plate's double click is two steps, never the newest");
+    view.jumps.length = 0;
+    view.newest = 0;
+    view.scroll.scrollTop = 1400 - api.PROMPT_LANDING;
+    gutter.follow();
     // a window of older history: below lies the index's prompt after the page, not loaded yet
     gutter.index.set(120, {seq: 120, at: 1, steering: false, text: "newer"});
     gutter.order = null;
