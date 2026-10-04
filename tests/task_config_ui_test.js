@@ -386,5 +386,28 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   assert.equal(requests.at(-1).body.effort, "max");
   remote[1] = settled;
 
-  console.log("PASS: task modal engine defaults, engine/model dependencies, catalog refresh and delayed initialization, provisional catalogs, custom/retired choices, local/remote nodes, retry lifecycle, and its shared prompt box (Enter, attachments, discard on cancel)");
+  /* Apply to Main when done: offered only by a node that runs it, off until
+     chosen, and sent exactly as chosen */
+  requests = [];
+  n = await open();
+  assert.equal(n["#nt-auto-wrap"].classList.contains("hidden"), true, "a node without it offers nothing");
+  n["#nt-prompt"].value = "Plain task";
+  await n["#nt-start"].onclick();
+  assert.equal("auto_apply" in requests.at(-1).body, false, "nor is it ever sent one");
+  capabilities.push("session-task-auto-apply");
+  for (const chosen of [false, true]) {
+    n = await open();
+    const box = n["#nt-auto"];
+    assert.equal(n["#nt-auto-wrap"].classList.contains("hidden"), false);
+    assert.equal(box.checked, false, "off until chosen");
+    assert.equal(box.getAttribute("aria-describedby"), "nt-auto-note");
+    assert.ok(n["#nt-auto-note"].textContent.includes("folds its conversation into Main and closes it"));
+    box.checked = chosen;
+    n["#nt-prompt"].value = chosen ? "Merge when done" : "Keep for review";
+    await n["#nt-start"].onclick();
+    assert.equal(requests.at(-1).body.auto_apply, chosen);
+  }
+  capabilities.pop();
+
+  console.log("PASS: task modal engine defaults, engine/model dependencies, catalog refresh and delayed initialization, provisional catalogs, custom/retired choices, local/remote nodes, retry lifecycle, its shared prompt box (Enter, attachments, discard on cancel), and Apply to Main when done offered only where the node runs it");
 })().catch(error => { console.error(error); process.exitCode = 1; });

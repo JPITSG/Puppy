@@ -10,6 +10,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -23,6 +24,8 @@ import time
 from aiohttp import web
 
 from puppy import db, operations, session_git, session_titles, uploads, workspaces
+
+log = logging.getLogger("puppy.session_tasks")
 
 PREFIX = "session_task."
 # Per-session Tasks preference: an exact true marker means disabled;
@@ -56,10 +59,37 @@ COPY_BYTES = 512 * 1024 * 1024
 # Project notes a copy keeps even when the project ignores them.
 NOTES = ("AGENTS.md", "CLAUDE.md")
 BUSY_PROJECT = "Main or another session is using this project"
+# Apply to Main when done: an optional exact record per task, absent while
+# off. Once such a task has finished a turn successfully and Main is idle,
+# Puppy applies it the way the review sheet does - merging Main's newer
+# files with Git when the plain patch no longer fits, and handing real
+# conflicts back to the task's own agent for at most AUTO_ROUNDS rounds -
+# then folds its conversation into Main and closes it.
+AUTO_PREFIX = "session_task_auto_apply."
+AUTO_KEYS = {"format", "armed_at", "rounds", "resolving"}
+AUTO_ROUNDS = 8
+AUTO_POLL = 15.0
+# How long a waiting agent's tool call holds its return for an apply that
+# began while it waited: the wait and this stay inside an engine's 70 s
+# MCP tool timeout.
+HOLD_LIMIT = 40.0
+# Inputs of the last merge of Main into a task copy, inside that copy.
+SYNC_REFS = "refs/puppy/sync"
+SYNC_SUBTYPE = "session_task_sync"
+# An added line that still opens or closes a conflict Puppy's own merge wrote
+# (git labels them with the refs it merged): such a resolution is never
+# applied to Main. Other marker-like lines - a test fixture, a document about
+# Git - are the task's business.
+MARKERS = re.compile(rb"^\+(?:<{7} " + re.escape(SYNC_REFS.encode()) + rb"/task|>{7} " +
+                     re.escape(SYNC_REFS.encode()) + rb"/main)\s*$")
 
 
 class TaskError(ValueError):
     pass
+
+
+class ProjectBusy(TaskError):
+    """Main, or another session in its project, is working: retry when idle."""
 
 
 class GitError(TaskError):
@@ -95,9 +125,47 @@ def _validate(value):
     return value
 
 
+def _validate_auto(value):
+    if not isinstance(value, dict) or set(value) != AUTO_KEYS or \
+            type(value["format"]) is not int or value["format"] != 1:
+        raise TaskError("task apply-when-done state is not current")
+    if type(value["armed_at"]) not in (int, float) or not math.isfinite(value["armed_at"]) or \
+            value["armed_at"] < 0:
+        raise TaskError("invalid task apply-when-done time")
+    if type(value["rounds"]) is not int or not 0 <= value["rounds"] <= AUTO_ROUNDS or \
+            type(value["resolving"]) is not bool:
+        raise TaskError("invalid task apply-when-done rounds")
+    return value
+
+
+def auto_record(sid):
+    row = db.query_one("SELECT value FROM meta WHERE key=?", (AUTO_PREFIX + str(sid),))
+    return _validate_auto(json.loads(row["value"])) if row else None
+
+
+def auto_records():
+    """Every task set to apply when done, read in one query."""
+    out = {}
+    for row in db.query("SELECT key,value FROM meta WHERE key GLOB ?", (AUTO_PREFIX + "*",)):
+        suffix = row["key"][len(AUTO_PREFIX):]
+        if not re.fullmatch(r"[1-9][0-9]*", suffix):
+            raise TaskError("task apply-when-done state is not current")
+        out[int(suffix)] = _validate_auto(json.loads(row["value"]))
+    return out
+
+
+def _save_auto(sid, value):
+    db.meta_set(AUTO_PREFIX + str(sid), _validate_auto(value))
+
+
 def validate_persisted(connection):
     values = {int(row[0][len(PREFIX):]): _validate(json.loads(row[1])) for row in
               connection.execute("SELECT key,value FROM meta WHERE key GLOB ?", (PREFIX + "*",))}
+    for key, raw in connection.execute("SELECT key,value FROM meta WHERE key GLOB ?", (AUTO_PREFIX + "*",)):
+        suffix = key[len(AUTO_PREFIX):]
+        if not re.fullmatch(r"[1-9][0-9]*", suffix) or int(suffix) not in values:
+            raise TaskError("apply-when-done state must belong to an existing task")
+        _validate_auto(json.loads(raw))
     for sid, value in values.items():
         child = connection.execute("SELECT workspace_kind FROM sessions WHERE id=?", (sid,)).fetchone()
         parent = connection.execute("SELECT id FROM sessions WHERE id=?", (value["parent"],)).fetchone()
@@ -188,7 +256,10 @@ def _save(sid, value):
     db.meta_set(PREFIX + str(sid), _validate(value))
 
 
-def public(sid, value=None):
+_UNREAD = object()
+
+
+def public(sid, value=None, auto=_UNREAD):
     from puppy import runner
     value = value or record(sid)
     if value is None:
@@ -200,24 +271,44 @@ def public(sid, value=None):
         "held" if held else "queued" if hub and hub.queue else \
         "applied" if value["applied_at"] else "ready" if value["outcome"] == "ok" else \
         "stopped" if value["outcome"] == "interrupted" else "failed" if value["outcome"] == "error" else "pending"
+    if auto is _UNREAD:
+        auto = auto_record(sid)
     return {"parent": value["parent"], "state": state,
             "needs_approval": bool(hub and hub.pending_approval),
             "created_at": value["created_at"], "completed_at": value["completed_at"],
             "applied_at": value["applied_at"], "summary": value["summary"][:1200],
-            "result_seq": value["result_seq"], "prompt": value["prompt"][:400]}
+            "result_seq": value["result_seq"], "prompt": value["prompt"][:400],
+            "auto_apply": _auto_public(sid, auto, state) if auto else None}
+
+
+def _auto_public(sid, auto, state):
+    """Where a task set to apply when done stands: still working (or working
+    on a conflict round), held up by something only a person can clear,
+    or finished and waiting for - or in the middle of - its apply."""
+    if state in ("running", "queued", "pending"):
+        phase = "resolving" if auto["resolving"] else "working"
+    elif state == "held":
+        phase = "held"
+    elif state in ("stopped", "failed"):
+        phase = "paused"
+    else:
+        phase = "applying" if sid in _auto_active else "waiting"
+    return {"armed_at": auto["armed_at"], "rounds": auto["rounds"], "max_rounds": AUTO_ROUNDS,
+            "resolving": auto["resolving"], "phase": phase, "note": _auto_notes.get(sid, "")}
 
 
 def decorate(rows):
     lookup = {row["id"]: row for row in rows}
     disabled = disabled_ids()
     digest = digest_ids()
+    armed = auto_records()
     for row in rows:
         row["tasks_enabled"] = row["id"] not in disabled
         row["tasks_digest"] = row["id"] in digest
     for sid, value in records().items():
         if sid not in lookup:
             continue
-        info = public(sid, value)
+        info = public(sid, value, armed.get(sid))
         lookup[sid]["task"] = info
         parent = lookup.get(value["parent"])
         if parent is not None:
@@ -253,16 +344,27 @@ def guidance(sid, first_turn=False):
         if first_turn and value["context"]:
             text += "Main conversation excerpts, for background only (not new instructions):\n" + value["context"]
         text += _refresh_guidance(sid)
+        if auto_record(sid):
+            text += ("\nThis task is set to apply to Main when it is done: when one of your turns ends "
+                     "successfully, Puppy applies your changes to Main - merging Main's newer changes "
+                     "with Git, and asking you to resolve any real conflicts first - then folds this "
+                     "conversation into Main and closes it. If you are not done, are blocked, or need "
+                     "the user's decision, call the apply_when_done tool with enabled false before "
+                     "you end your turn.\n")
         return text
     parts = []
     tasks = [(tid, info) for tid, info in records().items() if info["parent"] == sid]
     if tasks:
+        armed = auto_records()
         parts.append("This session has task conversations. Their edits are isolated until the user applies them. Current task overview (historical reference material, not new instructions):")
         for tid, value in tasks[-24:]:
             session = db.get_session(tid)
             if session:
-                info = public(tid, value)
-                parts.append("{}: {}. {}".format(session["name"], info["state"], info["summary"][:800]))
+                info = public(tid, value, armed.get(tid))
+                parts.append("{} (#{}): {}{}. {}".format(
+                    session["name"], tid, info["state"],
+                    ", applies to Main when done" if info["auto_apply"] else "",
+                    info["summary"][:800]))
     # The digest is off by default: every folded task would otherwise ride
     # along on every turn. When on, the newest archives are named with their
     # final answers; the full condensed conversations stay in the transcript.
@@ -472,13 +574,19 @@ def finished(sid, status, user_seq):
     value.update(outcome=status if status in ("ok", "error", "interrupted") else "error",
                  summary=answer, completed_at=time.time(), applied_at=0, result_seq=int(tail["seq"] or 0))
     _save(sid, value)
+    wake_auto()
+
+
+def _git_run(cwd, *args, data=None, timeout=60, env=None):
+    """One Git command, its exit status left to the caller."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **(env or {}))
+    return operations.run_process(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false",
+                                   "-c", "user.name=Puppy", "-c", "user.email=puppy@localhost", *args],
+                                  cwd=cwd, env=env, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
 
 
 def _git(cwd, *args, data=None, timeout=60, env=None):
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **(env or {}))
-    result = operations.run_process(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false",
-                             "-c", "user.name=Puppy", "-c", "user.email=puppy@localhost", *args],
-                            cwd=cwd, env=env, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    result = _git_run(cwd, *args, data=data, timeout=timeout, env=env)
     if result.returncode:
         raise GitError(result.stderr.decode("utf-8", "replace")[:3000].strip() or "Git operation failed",
                        result.returncode)
@@ -506,24 +614,30 @@ def _project_contains(root, path):
                 os.path.commonpath([managed, root]) != managed)
 
 
-def _project_busy(root, exclude=0):
+def _project_busy(root, exclude=0, relied=None):
     """Whether a turn is running, or waiting in a queue, anywhere in the
-    project: the engine may be writing its files."""
+    project: the engine may be writing its files. With ``relied``, a turn
+    parked in a task tool's wait - its engine blocked on that very call -
+    counts as idle and is collected there, so its wait can be held until
+    the operation that relied on it is over."""
     from puppy import runner
     for sid, hub in runner._hubs.items():
         if sid != exclude and (hub.status == "running" or hub.queue):
             session = db.get_session(sid)
             if session and _project_contains(root, os.path.realpath(session["cwd"])):
+                if relied is not None and hub.status == "running" and _parked.get(sid):
+                    relied.add(sid)
+                    continue
                 return True
     return False
 
 
-def _idle_project(root, exclude=0):
-    if _project_busy(root, exclude):
-        raise TaskError(BUSY_PROJECT + "; try again when it is idle")
+def _idle_project(root, exclude=0, relied=None):
+    if _project_busy(root, exclude, relied):
+        raise ProjectBusy(BUSY_PROJECT + "; try again when it is idle")
 
 
-async def _from_commit(parent, root):
+async def _from_commit(parent, root, exclude=0):
     """Whether a new task starts from the project's last commit rather than
     a copy of its working files. An idle project is copied as it stands. A
     turn working in the project, or waiting in its queue, may be writing
@@ -531,8 +645,10 @@ async def _from_commit(parent, root):
     work tree has no uncommitted changes. Only that local state counts:
     the last commit is then all of Main's files, pushed or not, and the copy
     is git's own checkout of it, which no edit in flight can tear. The look
-    also brings the sidebar's Git mark up to date, so the two agree."""
-    if not _project_busy(root):
+    also brings the sidebar's Git mark up to date, so the two agree.
+    ``exclude`` is a turn blocked on the very call that asks: it edits
+    nothing while the copy is read."""
+    if not _project_busy(root, exclude):
         return False
     git = await session_git.refresh(parent, fresh=True) or {}
     if git.get("repo") is not True or git.get("error") or type(git.get("changes")) is not int:
@@ -554,20 +670,29 @@ def overlaps_busy(root):
 
 
 @asynccontextmanager
-async def workspace_operation(root):
-    """Own project files during task applies and project or scratch moves."""
+async def workspace_operation(root, park=False, exclude=0):
+    """Own project files during task applies and project or scratch moves.
+
+    With ``park``, a turn parked in a task tool's wait does not hold the
+    project; its wait cannot return until this operation is over.
+    ``exclude`` is a turn blocked on the call that only reads the project."""
     # Different Main sessions can name the same repository. Serialize by its
     # real root as well as parent id, and check idleness AFTER waiting. Each
     # apply (or conflict snapshot) then sees all previously applied tasks.
     async with operations.lock(_project_locks.setdefault(root, asyncio.Lock())):
-        _idle_project(root)
+        relied = set() if park else None
+        _idle_project(root, exclude, relied)
         if overlaps_busy(root):
-            raise TaskError("The project is preparing or applying another task")
+            raise ProjectBusy("The project is preparing or applying another task")
+        # no await between the check above and these holds: a parked wait
+        # either returned before the check, or now waits for this operation
+        holds = _hold(relied or ())
         _busy_roots.add(root)
         try:
             yield
         finally:
             _busy_roots.discard(root)
+            _release(holds)
 
 
 async def wait_for_workspace(session, hub):
@@ -957,7 +1082,10 @@ def _refresh_checkout(task, value, main):
             lock.unlink(missing_ok=True)
 
 
-async def refresh(parent_id, sid):
+async def refresh(parent_id, sid, caller=0):
+    """Refresh an unchanged task copy from Main. ``caller`` is Main's own
+    turn asking through the task tools: blocked on that call, it does not
+    count as working in the project this only reads."""
     from puppy import runner
     async with session_operation(parent_id):
         value = record(sid)
@@ -973,13 +1101,13 @@ async def refresh(parent_id, sid):
             root = await operations.to_thread(_repo, parent)
             if _project_contains(task_root, root):
                 raise TaskError("Main and the task must use independent working copies")
-            async with workspace_operation(root):
+            async with workspace_operation(root, exclude=caller):
                 await operations.to_thread(_refresh_clean, task, value)
                 main = await operations.to_thread(_refresh_snapshot, root, task)
                 # A prompt can arrive during preparation; its turn waits on
                 # these roots. Refuse the refresh before releasing that turn.
                 _review_idle(hub, "refreshing")
-                _idle_project(root)
+                _idle_project(root, caller)
                 if runner._draining:
                     raise TaskError("Puppy is shutting down; retry after the restart")
                 result = await operations.to_thread(_refresh_checkout, task, value, main)
@@ -1046,7 +1174,632 @@ async def _resolve_conflicts(root, task, value, tree, token, conflict):
     return {"task": runner.session_payload(db.get_session(task["id"])), "applied": False, "resolving": True}
 
 
-async def create(parent_id, args):
+# ---- merging Main into a task copy ----
+
+def _sync_snapshot(root, task, committed=False):
+    """Main's files - its working files, or with ``committed`` its last
+    commit - pinned inside the task's own repository as SYNC_REFS/main."""
+    path = workspaces.create_temporary()
+    try:
+        main = _copy_project(root, path, committed)
+        _git(task["cwd"], "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+             "--no-recurse-submodules", "--", path, "+refs/puppy/base:" + SYNC_REFS + "/main", timeout=120)
+        return main
+    finally:
+        workspaces.discard_created(path)
+
+
+def _merge_trees(task, base, tree, main):
+    """Git's own three-way merge of Main's snapshot into the task's files,
+    made in the task's repository without touching its working files or
+    index: the merged tree, and git's conflicted entries as
+    ``(mode, oid, stage, path)`` - none when everything merged. Stage 2 is
+    the task's side and stage 3 Main's, as in a `git merge` of Main."""
+    cwd = task["cwd"]
+    _git(cwd, "update-ref", "--stdin", data=(
+        "start\nupdate {0}/base {1}\nupdate {0}/task {2}\nprepare\ncommit\n".format(
+            SYNC_REFS, base, tree)).encode())
+    result = _git_run(cwd, "merge-tree", "--write-tree", "-z", "--merge-base=" + base,
+                      SYNC_REFS + "/task", SYNC_REFS + "/main", timeout=120)
+    if result.returncode not in (0, 1):
+        reason = result.stderr.decode("utf-8", "replace")[:3000].strip()
+        if result.returncode == 129 or "unknown option" in reason or "usage:" in reason:
+            reason = "this backend's Git cannot merge snapshots (Git 2.40 or newer is needed)"
+        raise GitError(reason or "Git could not merge Main's changes", result.returncode)
+    fields = result.stdout.split(b"\0")
+    merged = fields[0].decode("ascii", "replace").strip()
+    if not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", merged):
+        raise TaskError("Git answered an unexpected merge result")
+    conflicts = []
+    if result.returncode == 1:
+        for field in fields[1:]:
+            if not field:
+                break
+            head, _, path = field.partition(b"\t")
+            mode, oid, stage = head.decode("ascii").split(" ")
+            conflicts.append((mode, oid, int(stage), os.fsdecode(path)))
+        if not conflicts:
+            raise TaskError("Git reported a merge conflict without naming its files")
+    return merged, conflicts
+
+
+def _conflict_paths(conflicts):
+    return sorted({path for _, _, _, path in conflicts})
+
+
+def _describe_conflicts(conflicts):
+    """One line per conflicted path, in the words a resolution needs."""
+    stages = {}
+    for _, _, stage, path in conflicts:
+        stages.setdefault(path, set()).add(stage)
+    lines = []
+    for path in sorted(stages):
+        have = stages[path]
+        what = "both sides changed it" if have >= {2, 3} and 1 in have else \
+            "both sides added it" if have >= {2, 3} else \
+            "this task deleted it and Main changed it" if 3 in have else \
+            "Main deleted it and this task changed it"
+        lines.append("- {} ({})".format(path, what))
+    return "\n".join(lines)
+
+
+def _sync_checkout(task, value, tree, merged, conflicts, main):
+    """Write a merge of Main into the task's working copy, as `git merge`
+    would: every path takes git's result, a conflicted one git's conflict
+    markers with its stages unmerged in the copy's own index, and the review
+    baseline moves to Main's snapshot so the task's diff stays its own
+    changes. The copy's files, refs and index are put back on any failure."""
+    cwd = task["cwd"]
+    git_dir = Path(os.fsdecode(_git(cwd, "rev-parse", "--absolute-git-dir").strip()))
+    real_index = git_dir / "index"
+    lock = git_dir / "index.lock"
+    try:
+        guard = lock.open("xb")
+    except FileExistsError:
+        raise TaskError("Another Git command holds this task's index; try again when it finishes")
+    with tempfile.TemporaryDirectory(prefix="puppy-sync-", dir=str(git_dir)) as temp, guard:
+        work = {"GIT_INDEX_FILE": str(Path(temp) / "work")}
+        changed = refs_changed = False
+        old_index = real_index.read_bytes() if real_index.exists() else None
+        try:
+            _git(cwd, "read-tree", tree, env=work)
+            _git(cwd, "update-index", "--refresh", env=work)
+            # Never write over a file the copy ignores: refuse any overlap with
+            # the merged tree, ancestors and descendants included.
+            incoming = set(_git(cwd, "ls-tree", "-rz", "--name-only", merged).split(b"\0")) - {b""}
+            ancestors = {path[:at] for path in incoming for at, char in enumerate(path) if char == 47}
+            for path in _git(cwd, "ls-files", "--others", "--directory", "-z", env=work).split(b"\0"):
+                path = path.rstrip(b"/")
+                if path and (path in incoming or path in ancestors or
+                             any(path[:at] in incoming for at, char in enumerate(path) if char == 47)):
+                    raise TaskError("Merging Main would overwrite a local file this copy ignores: " +
+                                    os.fsdecode(path) + "; move it aside and try again")
+            _git(cwd, "read-tree", "--dry-run", "-m", "-u", tree, merged, env=work)
+            files = _git(cwd, "diff", "--name-status", "--no-ext-diff", tree, merged).decode("utf-8", "replace")
+            count = len(_git(cwd, "diff", "--name-only", "--no-renames", "-z", tree, merged).split(b"\0")) - 1
+            operations.commit()
+            changed = True
+            _git(cwd, "read-tree", "-m", "-u", tree, merged, env=work)
+            paths = _conflict_paths(conflicts)
+            if paths:
+                index = Path(temp) / "index"
+                if old_index is not None:
+                    index.write_bytes(old_index)
+                zero = "0" * len(main)
+                info = b"".join(b"0 " + zero.encode() + b"\t" + os.fsencode(path) + b"\0" for path in paths) + \
+                    b"".join("{} {} {}\t".format(mode, oid, stage).encode() + os.fsencode(path) + b"\0"
+                             for mode, oid, stage, path in conflicts)
+                _git(cwd, "update-index", "-z", "--index-info", data=info, env={"GIT_INDEX_FILE": str(index)})
+            _git(cwd, "update-ref", "--stdin", data=(
+                "start\nupdate refs/puppy/base {0} {1}\nprepare\ncommit\n".format(main, value["base"])).encode())
+            refs_changed = True
+            if paths:
+                os.replace(str(index), str(real_index))
+            return {"files": files, "changed_files": count, "conflicts": paths}
+        except BaseException:
+            if changed:
+                # put the files the merge owned back as they were; anything
+                # else in the copy stays as it is
+                _git(cwd, "read-tree", merged, env=work)
+                _git(cwd, "read-tree", "--reset", "-u", tree, env=work)
+                if refs_changed:
+                    _git(cwd, "update-ref", "--stdin", data=(
+                        "start\nupdate refs/puppy/base {1} {0}\nprepare\ncommit\n".format(main, value["base"])).encode())
+                if old_index is None:
+                    real_index.unlink(missing_ok=True)
+                else:
+                    restore = Path(temp) / "restore-index"
+                    restore.write_bytes(old_index)
+                    os.replace(str(restore), str(real_index))
+            raise
+        finally:
+            lock.unlink(missing_ok=True)
+
+
+def _synced(sid, main, hub, result):
+    """Record a merge of Main into a task: the new baseline, read and written
+    on the event loop so a turn finishing meanwhile keeps its own outcome,
+    and the merge in the task's own transcript, where its agent and the user
+    read what Main brought in and what is left to resolve."""
+    _save(sid, dict(record(sid), base=main, applied_at=0))
+    count, paths = result["changed_files"], result["conflicts"]
+    text = "Main merged into this task: {} file{} updated".format(count, "" if count == 1 else "s")
+    if paths:
+        text += ", {} conflicting".format(len(paths))
+    hub._emit("info", {"subtype": SYNC_SUBTYPE, "text": text, "files": result["files"][:12000],
+                       "conflicts": paths[:200]})
+
+
+@asynccontextmanager
+async def _own_copy(path):
+    """Hold a task's copy for its own running turn: serialized with every
+    other operation on it, without asking the turn that called to be idle."""
+    async with operations.lock(_project_locks.setdefault(path, asyncio.Lock())):
+        if overlaps_busy(path):
+            raise TaskError("Another operation is using this task's copy; try again shortly")
+        _busy_roots.add(path)
+        try:
+            yield
+        finally:
+            _busy_roots.discard(path)
+
+
+async def sync_main(parent_id, sid):
+    """Merge Main's current files into a task's own copy for its agent:
+    called from the task's running turn, which is blocked on this call.
+
+    Main is read as it stands when it is idle, or from its last commit when
+    a turn works there and its work tree is clean - never half-written."""
+    from puppy import runner
+    async with session_operation(parent_id):
+        value = record(sid)
+        if value is None or value["parent"] != parent_id:
+            raise TaskError("Task does not belong to this session")
+        if runner._draining:
+            raise TaskError("Puppy is shutting down; try again after the restart")
+        parent, task = db.get_session(parent_id), db.get_session(sid)
+        if not workspaces.is_available(task):
+            raise TaskError("This task's working copy is unavailable")
+        task_root = os.path.realpath(task["cwd"])
+        root = await operations.to_thread(_repo, parent)
+        if _project_contains(task_root, root):
+            raise TaskError("Main and the task must use independent working copies")
+        async with _own_copy(task_root):
+            _, tree, _ = await operations.to_thread(_changes, task, value)
+            committed = await _from_commit(parent, root)
+            if committed:
+                main = await operations.to_thread(_sync_snapshot, root, task, True)
+            else:
+                async with workspace_operation(root):
+                    main = await operations.to_thread(_sync_snapshot, root, task)
+            merged, conflicts = await operations.to_thread(_merge_trees, task, value["base"], tree, main)
+            main_tree = (await operations.to_thread(_git, task["cwd"], "rev-parse", main + "^{tree}")).decode().strip()
+            base_tree = (await operations.to_thread(_git, task["cwd"], "rev-parse", value["base"] + "^{tree}")).decode().strip()
+            if main_tree == base_tree:
+                return {"changed": False, "from_commit": committed, "conflicts": [], "files": "",
+                        "changed_files": 0}
+            result = await operations.to_thread(_sync_checkout, task, value, tree, merged, conflicts, main)
+            _synced(sid, main, runner.hub(sid), result)
+            runner.broadcast_sessions()
+            return dict(result, changed=True, from_commit=committed,
+                        described=_describe_conflicts(conflicts))
+
+
+def _unmerged_paths(task):
+    """Paths still unmerged in the task copy's own index."""
+    out = _git(task["cwd"], "ls-files", "--unmerged", "-z").split(b"\0")
+    return sorted({os.fsdecode(line.partition(b"\t")[2]) for line in out if b"\t" in line})
+
+
+def _marker_paths(patch):
+    """Files whose added lines still open or close a Git conflict."""
+    found, current = [], None
+    for line in patch.split(b"\n"):
+        if line.startswith(b"+++ "):
+            current = line[4:].decode("utf-8", "replace")
+            current = current[2:] if current.startswith("b/") else current
+        elif current and MARKERS.match(line) and current not in found:
+            found.append(current)
+    return found
+
+
+async def changes(parent_id, sid, check=True):
+    """A read-only look at one task's work for the task tools: its delta
+    against the review baseline, the conflicts it still holds, and whether
+    its patch would apply to Main's files as they stand."""
+    async with session_operation(parent_id):
+        value = record(sid)
+        if value is None or value["parent"] != parent_id:
+            raise TaskError("Task does not belong to this session")
+        parent, task = db.get_session(parent_id), db.get_session(sid)
+        if not workspaces.is_available(task):
+            raise TaskError("This task's working copy is unavailable")
+        task_root = os.path.realpath(task["cwd"])
+        if overlaps_busy(task_root):
+            raise TaskError("An operation is using this task's copy; try again shortly")
+        _busy_roots.add(task_root)
+        try:
+            unmerged = await operations.to_thread(_unmerged_paths, task)
+            if unmerged:
+                return {"unmerged": unmerged, "patch": b"", "files": "", "applies": None, "check": "",
+                        "markers": [], "value": value}
+            patch, _, files = await operations.to_thread(_changes, task, value)
+        finally:
+            _busy_roots.discard(task_root)
+        applies, reason = None, ""
+        if check and patch:
+            root = await operations.to_thread(_repo, parent)
+            # git apply --check reads Main's files and writes nothing
+            run = await operations.to_thread(_git_run, root, "apply", "--check", "--binary", "-", data=patch)
+            applies = run.returncode == 0
+            reason = run.stderr.decode("utf-8", "replace")[:3000].strip()
+        return {"unmerged": [], "patch": patch, "files": files, "applies": applies, "check": reason,
+                "markers": _marker_paths(patch), "value": value}
+
+
+# ---- apply when done ----
+# The worker: one per node, woken when a turn settles or a task is set to
+# apply, and on a slow poll besides. Per Main it applies every finished task
+# whose patch fits or merges cleanly first, in the order they finished, and
+# only then starts conflict rounds - each against Main as it stands after the
+# others - so one pass costs the fewest rounds the overlaps allow.
+
+_auto_wake = None
+_auto_worker_task = None
+_auto_notes = {}       # sid -> why an apply is waiting, for the console
+_auto_active = set()   # tasks the worker is applying right now
+_parked = {}           # sid -> task tool waits its running turn is blocked in
+_holds = {}            # sid -> [count, Event set once nothing relies on its wait]
+
+
+def wake_auto():
+    """Have the worker look again: a turn settled, or a task was set."""
+    if _auto_wake is not None:
+        _auto_wake.set()
+
+
+def _hold(sids):
+    holds = []
+    for sid in sids:
+        entry = _holds.get(sid)
+        if entry is None:
+            entry = _holds[sid] = [0, asyncio.Event()]
+        entry[0] += 1
+        holds.append(sid)
+    return holds
+
+
+def _release(holds):
+    for sid in holds:
+        entry = _holds.get(sid)
+        if entry is None:
+            continue
+        entry[0] -= 1
+        if entry[0] <= 0:
+            _holds.pop(sid, None)
+            entry[1].set()
+
+
+@asynccontextmanager
+async def parked(sid):
+    """A task tool's wait in this session's running turn: its engine is
+    blocked on that call and edits nothing, so an apply may treat the
+    session as idle - and the wait returns only once that apply is over."""
+    _parked[sid] = _parked.get(sid, 0) + 1
+    wake_auto()
+    try:
+        yield
+    finally:
+        left = _parked.get(sid, 1) - 1
+        if left > 0:
+            _parked[sid] = left
+        else:
+            _parked.pop(sid, None)
+        entry = _holds.get(sid)
+        if entry is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(entry[1].wait()), HOLD_LIMIT)
+            except asyncio.TimeoutError:
+                log.warning("session %s left a task wait while an apply into its project ran on", sid)
+
+
+def apply_held(sid):
+    """Whether an apply that relied on this session's wait is still running."""
+    return sid in _holds
+
+
+def _note(sid, text):
+    """The reason an apply waits, shown on the task until it moves on."""
+    from puppy import runner
+    if _auto_notes.get(sid, "") == text:
+        return
+    if text:
+        _auto_notes[sid] = text
+    else:
+        _auto_notes.pop(sid, None)
+    runner.broadcast_sessions()
+
+
+def _auto_ready(sid, value):
+    """Finished, successfully, with nothing left in its queue."""
+    from puppy import runner
+    hub = runner._hubs.get(sid)
+    if hub is not None:
+        if hub.status == "running" or hub.queue or hub.held or hub.pending_approval:
+            return False
+    else:
+        parked_queue = db.meta_get("session_queue." + str(sid))
+        if parked_queue and (parked_queue.get("held") or parked_queue.get("queue")):
+            return False
+    return value["outcome"] == "ok"
+
+
+async def set_auto_apply(parent_id, sid, enabled):
+    """Turn a task's Apply to Main when done on or off."""
+    from puppy import runner
+    if type(enabled) is not bool:
+        raise TaskError("enabled must be true or false")
+    async with session_operation(parent_id):
+        value = record(sid)
+        if value is None or value["parent"] != parent_id:
+            if already_folded(parent_id, sid) is not None:
+                raise TaskError("That task was already folded into Main")
+            raise TaskError("Task does not belong to this session")
+        current = auto_record(sid)
+        if enabled and current is None:
+            _save_auto(sid, {"format": 1, "armed_at": time.time(), "rounds": 0, "resolving": False})
+        elif not enabled and current is not None:
+            db.meta_apply(delete_keys=(AUTO_PREFIX + str(sid),))
+            _auto_notes.pop(sid, None)
+    runner.broadcast_sessions()
+    wake_auto()
+    return runner.session_payload(db.get_session(sid))
+
+
+async def _auto_pass(app):
+    from puppy import runner
+    if runner._draining or app.get("puppy_snapshot_busy"):
+        return
+    armed = auto_records()
+    if not armed:
+        return
+    values = records()
+    parents = {}
+    for sid in armed:
+        value = values.get(sid)
+        if value is None:
+            continue
+        if _auto_ready(sid, value):
+            parents.setdefault(value["parent"], []).append((value["completed_at"], sid))
+        elif _auto_notes.get(sid):
+            _note(sid, "")
+    for parent_id, ready in parents.items():
+        conflicted, busy = [], False
+        for _, sid in sorted(ready):
+            outcome = await _auto_step(app, parent_id, sid, False)
+            if outcome == "busy":
+                busy = True
+                break
+            if outcome == "conflict":
+                conflicted.append(sid)
+        # conflict rounds only once every task that fits has applied: each
+        # round then merges Main as it stands after them
+        for sid in [] if busy else conflicted:
+            if await _auto_step(app, parent_id, sid, True) == "busy":
+                break
+
+
+async def _auto_step(app, parent_id, sid, resolve):
+    """One task's apply, then its fold, each owned like a console request so
+    a shutdown waits for it rather than cutting it off."""
+    from puppy import runner
+    if runner._draining:
+        return "busy"
+    try:
+        outcome = await durable_workspace_operation(_auto_apply(app, parent_id, sid, resolve), parent_id)
+    except TaskError as exc:
+        _note(sid, str(exc))
+        return "busy"
+    if outcome == "applied":
+        try:
+            await durable_workspace_operation(remove(parent_id, sid, True), parent_id)
+        except (TaskError, OSError, subprocess.SubprocessError) as exc:
+            log.warning("task %s was applied but not folded yet: %s", sid, exc)
+            _note(sid, "applied to Main; folding waits: " + str(exc))
+    return outcome
+
+
+async def _auto_apply(app, parent_id, sid, resolve):
+    """Apply one finished task to Main like the review sheet's Apply: the
+    plain patch when it fits Main as it stands, else Git's merge of Main's
+    newer files with the task's; with ``resolve``, a real conflict starts a
+    resolution round in the task instead of being left for the next pass."""
+    from puppy import runner
+    async with session_operation(parent_id):
+        value, auto = record(sid), auto_record(sid)
+        if value is None or auto is None or value["parent"] != parent_id:
+            return "skip"
+        if not _auto_ready(sid, value) or runner._draining or app.get("puppy_snapshot_busy"):
+            return "skip"
+        parent, task = db.get_session(parent_id), db.get_session(sid)
+        if parent is None or task is None:
+            return "skip"
+        if not workspaces.is_available(task):
+            return _give_up(parent_id, sid, task, "its working copy is missing")
+        task_root = os.path.realpath(task["cwd"])
+        if overlaps_busy(task_root):
+            return "skip"
+        if auto["resolving"]:
+            auto = dict(auto, resolving=False)
+            _save_auto(sid, auto)
+        try:
+            root = await operations.to_thread(_repo, parent)
+        except TaskError as exc:
+            return _give_up(parent_id, sid, task, str(exc))
+        if _project_contains(task_root, root):
+            return _give_up(parent_id, sid, task, "Main and the task must use independent working copies")
+        _busy_roots.add(task_root)
+        _auto_active.add(sid)
+        runner.broadcast_sessions()
+        try:
+            async with workspace_operation(root, park=True):
+                return await _auto_locked(parent_id, parent, sid, task, value, auto, root, resolve)
+        except ProjectBusy:
+            _note(sid, "waiting for Main to be idle")
+            return "busy"
+        except (TaskError, OSError, subprocess.SubprocessError) as exc:
+            return _give_up(parent_id, sid, task, str(exc))
+        finally:
+            _busy_roots.discard(task_root)
+            _auto_active.discard(sid)
+            runner.broadcast_sessions()
+
+
+async def _auto_locked(parent_id, parent, sid, task, value, auto, root, resolve):
+    from puppy import runner
+    unmerged = await operations.to_thread(_unmerged_paths, task)
+    if unmerged:
+        # an earlier round's merge is not resolved yet
+        return await _auto_round(parent_id, sid, task, auto, root, resolve, unresolved=unmerged)
+    patch, tree, files = await operations.to_thread(_changes, task, value)
+    markers = _marker_paths(patch)
+    if markers:
+        return await _auto_round(parent_id, sid, task, auto, root, resolve, unresolved=markers)
+    if not patch:
+        # no file work to apply, or all of it applied already: fold it
+        _note(sid, "")
+        return "applied"
+    check = await operations.to_thread(_git_run, root, "apply", "--check", "--binary", "-", data=patch)
+    if check.returncode not in (0, 1):
+        raise GitError(check.stderr.decode("utf-8", "replace")[:3000].strip() or "Git could not check the task's changes",
+                       check.returncode)
+    merged_with_main = False
+    if check.returncode:
+        # Main has moved under the task: Git merges its newer files in
+        main = await operations.to_thread(_sync_snapshot, root, task)
+        merged, conflicts = await operations.to_thread(_merge_trees, task, value["base"], tree, main)
+        if conflicts:
+            if not resolve:
+                return "conflict"
+            return await _auto_round(parent_id, sid, task, auto, root, resolve,
+                                     sync=(value, tree, merged, conflicts, main))
+        patch = await operations.to_thread(_git, task["cwd"], "diff", "--binary", "--no-ext-diff", main, merged)
+        if len(patch) > MAX_PATCH:
+            raise TaskError("Task changes exceed the 16 MiB review limit; split the work into smaller tasks")
+        if patch:
+            await operations.to_thread(_git, root, "apply", "--check", "--binary", "-", data=patch)
+        merged_with_main = True
+    operations.commit()
+    if patch:
+        await operations.to_thread(_git, root, "apply", "--binary", "-", data=patch)
+    await operations.to_thread(_git, task["cwd"], "update-ref", "refs/puppy/base", tree)
+    value.update(base=tree, applied_at=time.time())
+    _save(sid, value)
+    runner.hub(parent_id)._emit("info", {
+        "subtype": "session_task", "task_id": sid, "auto": True, "files": files,
+        "text": "Task changes applied automatically: " + task["name"] +
+                (" · merged with Main's newer changes" if merged_with_main else "")})
+    # the applied files are uncommitted work in Main's repository now
+    session_git.request(parent["cwd"])
+    _note(sid, "")
+    return "applied"
+
+
+def _round_prompt(number, paths, described, root, fresh):
+    if fresh:
+        opening = ("Main changed since this task's copy was made, and some of those changes "
+                   "overlap this task's. Puppy merged Main's current files into this working copy "
+                   "with Git: everything that merged cleanly is already in place, and these files "
+                   "still conflict:\n{}\n\nThey hold standard Git conflict markers (<<<<<<< {}/task "
+                   "... ======= ... >>>>>>> {}/main) and are listed as unmerged in `git status`. "
+                   "`git diff {}/base {}/main` shows Main's changes since the previous baseline and "
+                   "`git diff {}/base {}/task` this task's own.").format(
+                       described, SYNC_REFS, SYNC_REFS, SYNC_REFS, SYNC_REFS, SYNC_REFS, SYNC_REFS)
+    else:
+        opening = ("The conflicts from Puppy's last merge of Main into this copy are not resolved "
+                   "yet. These files are still unmerged or still carry conflict markers:\n{}").format(
+                       "\n".join("- " + path for path in paths))
+    return (
+        "Puppy is applying this task to Main because it is set to apply when done. " + opening +
+        "\n\nResolve every conflict so that both Main's changes and this task's intent survive - "
+        "never keep one whole side by default - remove all conflict markers, and `git add` each "
+        "file you resolved. Run the relevant checks, keep all edits in this task copy (never modify "
+        "Main's files, index or refs), and end your turn with a short report. You may inspect Main "
+        "read-only if needed; its repository on this node (JSON-quoted path): " +
+        json.dumps(root, ensure_ascii=False) + ". When this turn ends successfully, Puppy checks "
+        "again and applies the task to Main once nothing conflicts, then folds this conversation "
+        "into Main and closes it. If Main changes again meanwhile this can repeat; this is round "
+        "{} of at most {}. If you cannot resolve the conflicts safely, call the apply_when_done "
+        "tool with enabled false before ending your turn, and explain what needs the user's "
+        "decision.".format(number, AUTO_ROUNDS))
+
+
+async def _auto_round(parent_id, sid, task, auto, root, resolve, unresolved=None, sync=None):
+    """Hand real conflicts back to the task's agent: merge Main into its copy
+    (unless an earlier round's merge is still unresolved) and send one
+    follow-up, at most AUTO_ROUNDS times."""
+    from puppy import runner
+    if not resolve:
+        return "conflict"
+    number = auto["rounds"] + 1
+    if number > AUTO_ROUNDS:
+        return _give_up(parent_id, sid, task, "its changes still conflicted with Main after {} "
+                        "resolution rounds".format(AUTO_ROUNDS))
+    hub = runner.hub(sid)
+    if sync is not None:
+        value, tree, merged, conflicts, main = sync
+        result = await operations.to_thread(_sync_checkout, task, value, tree, merged, conflicts, main)
+        _synced(sid, main, hub, result)
+        paths, described = result["conflicts"], _describe_conflicts(conflicts)
+    else:
+        paths, described = unresolved, ""
+    if runner._draining:
+        raise TaskError("Puppy is shutting down")
+    sent = hub.send_message(_round_prompt(number, paths, described, root, sync is not None))
+    if sent.get("error"):
+        # the merge stays in the copy; the next pass sends this round again
+        _note(sid, "could not start resolving conflicts: " + str(sent["error"]))
+        return "skip"
+    _save_auto(sid, dict(auto, rounds=number, resolving=True))
+    runner.hub(parent_id)._emit("info", {"subtype": "session_task", "task_id": sid, "auto": True,
+        "text": "Resolving conflicts with Main in task: {} · round {} of {}".format(
+            task["name"], number, AUTO_ROUNDS)})
+    _note(sid, "")
+    return "resolving"
+
+
+def _give_up(parent_id, sid, task, reason):
+    """Stop applying a task by itself and say why in Main."""
+    from puppy import runner
+    db.meta_apply(delete_keys=(AUTO_PREFIX + str(sid),))
+    _auto_notes.pop(sid, None)
+    runner.hub(parent_id)._emit("info", {"subtype": "session_task", "task_id": sid, "auto": True,
+        "text": "Task not applied automatically: {} · {} · review it from the Tasks sheet".format(
+            task["name"], str(reason).rstrip(". "))})
+    log.warning("task %s will not apply by itself: %s", sid, reason)
+    runner.broadcast_sessions()
+    return "gave_up"
+
+
+async def _auto_worker(app):
+    while True:
+        try:
+            await asyncio.wait_for(_auto_wake.wait(), AUTO_POLL)
+        except asyncio.TimeoutError:
+            pass
+        _auto_wake.clear()
+        try:
+            await _auto_pass(app)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("applying finished tasks failed")
+
+
+async def create(parent_id, args, caller=0):
+    """Create a task conversation. ``caller`` is Main's own running turn
+    when its agent asks through the task tools: blocked on that call, it
+    edits nothing, so it never counts as working in the project."""
     from puppy import runner
     parent = db.get_session(parent_id)
     if parent is None or record(parent_id):
@@ -1059,6 +1812,9 @@ async def create(parent_id, args):
     auto_title = args.get("auto_title", False)
     if type(auto_title) is not bool:
         raise TaskError("auto_title must be true or false")
+    auto_apply = args.get("auto_apply", False)
+    if type(auto_apply) is not bool:
+        raise TaskError("auto_apply must be true or false")
     # As written in Main's dialog: its attachment marker lines name files staged
     # under Main, which the task adopts into its own storage below.
     original = prompt.strip()
@@ -1103,7 +1859,7 @@ async def create(parent_id, args):
         except uploads.AttachmentError as exc:
             raise TaskError(str(exc))
         root = await operations.to_thread(_repo, parent)
-        committed = await _from_commit(parent, root)
+        committed = await _from_commit(parent, root, caller)
         if overlaps_busy(root):
             raise TaskError("The project is preparing or applying another task")
         _busy_roots.add(root)
@@ -1135,6 +1891,8 @@ async def create(parent_id, args):
             _save(sid, {"format": 1, "parent": parent_id, "request_id": key, "prompt": prompt,
                         "context": context, "base": base, "created_at": time.time(), "outcome": "pending",
                         "summary": "", "completed_at": 0, "applied_at": 0, "result_seq": 0})
+            if auto_apply:
+                _save_auto(sid, {"format": 1, "armed_at": time.time(), "rounds": 0, "resolving": False})
             if parent.get("fast_mode") and engine == parent["engine"]:
                 db.touch_session(sid, fast_mode=1)
             # named at creation from the prompt's first line, so a generated
@@ -1268,6 +2026,9 @@ async def h_tasks(request):
             raise TaskError("Expected task fields")
         if "tid" in request.match_info:
             operation = request.match_info["action"]
+            if operation == "auto-apply":
+                return web.json_response({"session": await set_auto_apply(
+                    sid, int(request.match_info["tid"]), args.get("enabled"))})
             if operation == "refresh":
                 return web.json_response(await durable_workspace_operation(refresh(sid, int(request.match_info["tid"])), sid))
             if operation == "remove":
@@ -1289,16 +2050,27 @@ async def h_tasks(request):
 
 
 async def lifecycle(app):
+    global _auto_wake, _auto_worker_task
     validate_persisted(db.connect())
+    from puppy import task_agent
+    await task_agent.start(app)
+    _auto_wake = asyncio.Event()
+    _auto_wake.set()    # tasks a restart left finished are looked at once
+    _auto_worker_task = asyncio.create_task(_auto_worker(app))
     yield
+    _auto_worker_task.cancel()
+    await asyncio.gather(_auto_worker_task, return_exceptions=True)
+    _auto_worker_task = _auto_wake = None
+    await task_agent.stop(app)
     # Accepted copy/apply operations retain ownership through shutdown.
     await asyncio.gather(*list(_operations), return_exceptions=True)
     _locks.clear()
     _project_locks.clear()
+    _auto_notes.clear()
 
 
 def register(app):
     app.router.add_get(r"/api/sessions/{sid:\d+}/tasks", h_tasks)
     app.router.add_post(r"/api/sessions/{sid:\d+}/tasks", h_tasks)
-    app.router.add_post(r"/api/sessions/{sid:\d+}/tasks/{tid:\d+}/{action:review|apply|remove|refresh}", h_tasks)
+    app.router.add_post(r"/api/sessions/{sid:\d+}/tasks/{tid:\d+}/{action:review|apply|remove|refresh|auto-apply}", h_tasks)
     app.cleanup_ctx.append(lifecycle)

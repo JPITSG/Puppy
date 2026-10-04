@@ -37,7 +37,9 @@ There is no build step, no npm, no daemon besides Puppy itself: Python 3.9+,
   question it answers without derailing its work, queue the next prompts, approve
   or deny tool calls and answer the questions it asks you, all from the same box.
 - **Tasks in parallel.** Spin off tasks that work in isolated Git clones of your
-  project, review their diffs, and apply the winners to your working tree.
+  project, review their diffs, and apply the winners to your working tree - or
+  let a finished task apply itself, resolving its conflicts with Main first,
+  and fold its chat into Main.
 - **A fleet, not a box.** Pair other machines as backends, run sessions there,
   attach shared terminals and managed browsers on any of them, and let agents
   delegate one-shot jobs or talk to other sessions across the fleet.
@@ -616,15 +618,35 @@ does not reopen its tab. Once started, use the task's **Stop** control.
 - **Resolve conflicts** (on by default) lets a conflicting apply send one
   follow-up to the task's own agent with snapshots of the baseline, the task
   and Main, so the agent reconciles both sides in its copy for you to review
-  again. Nothing is ever applied unseen.
-- Task starts, applied changes and conflict-resolution starts appear as labeled,
-  left-aligned cards in Main’s transcript, matching background-task updates.
+  again. Without **Apply to Main when done**, nothing is ever applied unseen.
+- **Apply to Main when done** - a switch in the New task dialog and in each
+  task's menu, off by default - has Puppy finish the task for you: once a turn
+  of the task ends successfully and Main is idle, Puppy applies its changes the
+  way the review sheet does, folds its conversation into Main and closes it.
+  When Main has moved under the task, Git merges Main's newer changes with the
+  task's; where both changed the same lines, Puppy merges Main into the task's
+  copy with standard conflict markers and sends its agent one follow-up to
+  resolve them, then tries again - at most eight rounds, so tasks applying into
+  the same files one after another settle in turn. Tasks that apply cleanly go
+  first, in the order they finished. A resolution that still holds unmerged
+  files or Puppy's conflict markers is never applied, and nothing is written
+  into Main while any turn works in its project. The tab carries a merge mark
+  and reads **Resolving** during a conflict round, **Applying** once the task
+  has finished, or **Waiting** while Main is busy; the Tasks sheet says where
+  it stands. A task whose turn fails or is stopped waits
+  for a successful one; switching it off leaves the task for review, and after
+  eight rounds Puppy stops and says so in Main. Requires a backend advertising
+  `session-task-auto-apply`.
+- Task starts, applied changes (by hand or automatically), conflict-resolution
+  rounds and merges of Main into a task appear as labeled, left-aligned cards
+  in Main’s or the task's transcript, matching background-task updates.
 - **Fold into Main** keeps a condensed, searchable copy of the task's
   conversation as a collapsible card in Main's transcript when the task is
   removed, with the files it applied. Optionally let Main's model see the
   newest folded tasks at the start of its turns.
 
-Tasks need a Git repository. Limits: 64 tasks per session, 50,000 files or
+Tasks need a Git repository; merging Main's newer changes into a task needs Git
+2.40 or newer on that backend. Limits: 64 tasks per session, 50,000 files or
 512 MiB per source snapshot, 16 MiB per review. Details and the exact
 persistence contract are in [docs/session-tasks.md](docs/session-tasks.md).
 The session menu's **Enable tasks** switch hides or restores the task strip;
@@ -779,12 +801,30 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   and never create new sessions on their own. One request can address up to
   512 sessions; requests default to a one-hour deadline and workflows to two
   hours, never more than two hours from creation.
+- **Task tools.** In a session with Tasks, Main's agent can list its tasks
+  with each one's phase - working, resolving conflicts with Main, finished,
+  applied - read their conversations and changes, and, when you ask, start a
+  task, message or stop tasks, refresh them from Main, remove them, or have
+  them apply to Main when done. It can also wait until tasks are finished,
+  applied, or folded into Main and closed, then carry on: "wait until the
+  login task is resolved and folded, then run the tests". While Main's agent
+  waits, Puppy may apply finished tasks into Main; the wait returns only after
+  any apply it allowed is over. Type `@` in Main's chat for its tasks
+  (`@Task-Fix-login-12` - the name is only a label, the number is the task's),
+  **All tasks**, and **New task**, whose wizard inserts `@New task` or
+  `@New task using codex <model> at high effort` for the agent to start one.
+  Inside a task, the agent sees its own changes and whether they would apply
+  to Main, can merge Main's current files into its copy with Git and resolve
+  the conflicts, can wait for its sibling tasks, and can ask Puppy to apply it
+  to Main when done; **Apply when done** in a task's `@` menu inserts that
+  request, so "add this feature, then @Apply when done" merges, folds and
+  closes the task on its own.
 
 All of this reaches the model through turn-bound MCP bridges Puppy starts for
 each turn, on every engine. Their policy texts live in Settings → System prompt.
 The API-only headless package provides the same bridges without running a web
-UI, including the backend's configured browser, terminal, remote screen, and
-spawn policies.
+UI, including the backend's configured browser, terminal, remote screen,
+spawn and task policies.
 
 ### Find anything, on any backend
 
@@ -1077,7 +1117,7 @@ backend name stays readable; long button labels wrap within the button.
   control, and Reset to defaults restores the selected backend's six defaults.
 - **System prompt** – a custom text added to every turn on that backend, and the
   conditional guidance for remote workspaces, browsers, terminals, remote
-  screens and spawned agents, each with a reset to Puppy's default.
+  screens, spawned agents and tasks, each with a reset to Puppy's default.
 - **Backends** – add, edit, test, upgrade and auto-upgrade paired machines.
 - **Security** – change your password.
 - **Backup & restore** – export and import the full-instance archive.
@@ -1172,6 +1212,8 @@ python3 tests/session_loop_test.py  # loop batches, queue controls, bounds and b
 node tests/composer_ui_test.js       # the shared prompt box and its "@" list
 node tests/backend_settings_ui_test.js # backend forms, removal errors and retry
 node tests/task_config_ui_test.js    # the New task dialog
+python3 tests/task_agent_test.py     # apply when done, Git's merges into tasks, the task tools, both runtimes
+node tests/task_auto_apply_ui_test.js # apply when done in the console and Settings' Task guidance
 node tests/operation_ui_test.js      # cancellation, commit races and cleanup feedback
 python3 tests/operations_test.py     # cancellation/rollback on both runtimes
 node tests/task_fold_ui_test.js      # task removal and the folded archive card

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -12,6 +14,12 @@ from types import SimpleNamespace
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
+from tests.scratch import private_root  # noqa: E402
+
+# the catalogs read this node's timers: from a private config, never the
+# running instance's (a run inside Puppy inherits its PUPPY_DATA)
+ROOT = private_root("model-catalog-")
+os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from puppy.drivers import base  # noqa: E402
 from puppy.drivers.base import Driver, ModelCatalogResult  # noqa: E402
@@ -606,5 +614,8 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    check_loop_affinity()
-    asyncio.run(main())
+    try:
+        check_loop_affinity()
+        asyncio.run(main())
+    finally:
+        shutil.rmtree(ROOT, ignore_errors=True)

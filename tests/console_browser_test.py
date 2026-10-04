@@ -3434,6 +3434,173 @@ async def task_strip_verbs_checks(instance):
     print("PASS: the task strip's Review and bin stand between Tasks and + for the selected task only, both greyed while it works with the bin keeping its place and taking no tone, glyphs centred on the strip's box, the bin red under the pointer, real clicks opening the review sheet and the named Remove task confirm, Cancel keeping everything", flush=True)
 
 
+async def task_tools_checks(instance, capture=False):
+    """Apply to Main when done in real layout, on a desktop and a phone in
+    both themes: a task set to apply carries its drawn mark between its name
+    and its state, level with the tab and in the accent; its state words
+    follow the record (Resolving during a conflict round); the Tasks sheet
+    names where it stands in the help voice; the task's menu offers the
+    switch right under Refresh from Main, checked, and a real click turns it
+    off over the node's own route, the mark leaving the tab; the New task
+    dialog offers the choice off, inside the dialog without overflow; Main's
+    "@" list names the tasks, All tasks and New task; and Settings' System
+    prompt card carries Task guidance with Puppy's default policy. The
+    worker is held still so the demo copies are never touched."""
+    workspace = "state.views['s:0:1']"
+    tid = next(s["id"] for s in db.list_sessions() if s["name"] == "Card spacing")
+    other = next(s["id"] for s in db.list_sessions() if s["name"] == "Phone navigation")
+    armed = {"format": 1, "armed_at": time.time(), "rounds": 0, "resolving": False}
+
+    async def click(x, y):
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {"type": kind, "x": x, "y": y,
+                                "button": "left", "clickCount": 1}, session=instance.page_session)
+
+    async def shoot(name):
+        if capture:
+            shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                       session=instance.page_session)
+            (BASE / "data" / ("task-tools-" + name + ".png")).write_bytes(base64.b64decode(shot["data"]))
+
+    with patch.object(session_tasks, "_auto_pass", AsyncMock()):
+        try:
+            for width, height, mobile, scale in ((1440, 900, False, 1), (390, 844, True, 2)):
+                await instance.call("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile},
+                    session=instance.page_session)
+                for theme in ("dark", "light"):
+                    where = "{} {}".format(width, theme)
+                    session_tasks._save_auto(tid, dict(armed, rounds=0, resolving=False))
+                    runner.broadcast_sessions()
+                    await evaluate(instance, "applyTheme(%s); closeDrawer && closeDrawer(); activateTab('s:0:1'); "
+                                   "%s.openTask(%d); %s.openTask(%d); %s.select(%d); true"
+                                   % (json.dumps(theme), workspace, other, workspace, tid, workspace, tid))
+                    await until(instance, "!!document.querySelector('.task-tab[data-sid=\"%d\"] .t-auto')" % tid)
+                    tab = await evaluate(instance, """(() => {
+                        const tab = document.querySelector('.task-tab[data-sid="%d"]');
+                        const mark = tab.querySelector('.t-auto'), box = mark.getBoundingClientRect();
+                        const title = tab.querySelector('.t-title').getBoundingClientRect();
+                        const stateBox = tab.querySelector('.t-state').getBoundingClientRect();
+                        const tabBox = tab.getBoundingClientRect();
+                        const probe = document.createElement('span'); document.body.appendChild(probe);
+                        probe.style.color = 'var(--acc)'; const acc = getComputedStyle(probe).color; probe.remove();
+                        return {size: [box.width, box.height], svg: !!mark.querySelector('svg path'),
+                                order: title.right <= box.left + .5 && box.right <= stateBox.left + .5,
+                                level: Math.abs((box.top + box.bottom) / 2 - (tabBox.top + tabBox.bottom) / 2),
+                                colour: getComputedStyle(mark).color === acc,
+                                label: mark.getAttribute('aria-label'),
+                                other: !!document.querySelector('.task-tab[data-sid="%d"] .t-auto'),
+                                within: box.right <= tabBox.right && box.left >= tabBox.left}; })()""" % (tid, other))
+                    assert tab["size"] == [12, 12] and tab["svg"] and tab["order"] and tab["colour"], (where, tab)
+                    assert tab["level"] <= 1 and tab["within"] and not tab["other"], (where, tab)
+                    assert tab["label"] == "Applies to Main when done", (where, tab)
+                    # a conflict round: the tab says so, and so does the sheet
+                    session_tasks._save_auto(tid, dict(armed, rounds=1, resolving=True))
+                    runner.broadcast_sessions()
+                    await until(instance, "document.querySelector('.task-tab[data-sid=\"%d\"] .t-state')"
+                                          ".textContent.startsWith('Resolving')" % tid)
+                    await evaluate(instance, "%s.openTaskOverview(); true" % workspace)
+                    await until(instance, "!!document.querySelector('.task-overview-modal .task-card-auto')")
+                    sheet = await evaluate(instance, """(() => {
+                        const line = document.querySelector('.task-overview-modal .task-card-auto');
+                        const card = line.closest('.session-task-card').getBoundingClientRect();
+                        const box = line.getBoundingClientRect();
+                        const probe = document.createElement('p'); probe.className = 'help';
+                        document.body.appendChild(probe); const help = getComputedStyle(probe);
+                        const voice = [help.fontSize, help.color]; probe.remove();
+                        const own = getComputedStyle(line);
+                        return {text: line.textContent, voice: own.fontSize === voice[0] && own.color === voice[1],
+                                inside: box.left >= card.left && box.right <= card.right}; })()""")
+                    assert sheet["text"] == "Applies to Main when done · resolving conflicts with Main, round 1 of 8", \
+                        (where, sheet)
+                    assert sheet["voice"] and sheet["inside"], (where, sheet)
+                    await shoot("sheet-{}-{}".format(width, theme))
+                    await evaluate(instance, "%s.closeTaskOverview(); true" % workspace)
+                    # the sheet hands the focus back to its button as it goes
+                    # and again once its closing motion ends; a menu opened
+                    # before that would close on the move
+                    await until(instance, "!document.querySelector('.task-overview-modal') && "
+                                          "document.activeElement === %s.overviewButton" % workspace)
+                    await evaluate(instance, "Promise.all(document.getAnimations().filter(a => a.effect && "
+                                             "isFinite(a.effect.getComputedTiming().endTime))"
+                                             ".map(a => a.finished.catch(() => {})))"
+                                             ".then(() => new Promise(r => setTimeout(r, 400)))")
+                    # the switch: under Refresh from Main, checked, off by a real
+                    # click - the menu opened by a real press on the task's ⋮
+                    dots = await evaluate(instance, """(() => {
+                        const box = %s.taskViews.get(%d).root.querySelector('.menu-btn').getBoundingClientRect();
+                        return [box.left + box.width / 2, box.top + box.height / 2]; })()""" % (workspace, tid))
+                    await click(*dots)
+                    await until(instance, "!!document.querySelector('.menu.dyn')")
+                    row = await evaluate(instance, """(() => {
+                        const menu = document.querySelector('.menu.dyn');
+                        const rows = [...menu.children];
+                        const row = rows.find(node => node.textContent === 'Apply to Main when done');
+                        const refresh = rows.find(node => node.textContent === 'Refresh from Main');
+                        const box = row.getBoundingClientRect(), outer = menu.getBoundingClientRect();
+                        return {checked: row.getAttribute('aria-checked'),
+                                after: rows.indexOf(row) === rows.indexOf(refresh) + 1,
+                                inside: box.left >= outer.left && box.right <= outer.right,
+                                at: [box.left + box.width / 2, box.top + box.height / 2]}; })()""")
+                    assert row["checked"] == "true" and row["after"] and row["inside"], (where, row)
+                    await shoot("menu-{}-{}".format(width, theme))
+                    await click(*row["at"])
+                    await until(instance, "!document.querySelector('.task-tab[data-sid=\"%d\"] .t-auto')" % tid)
+                    assert session_tasks.auto_record(tid) is None, where
+                    # the New task dialog's choice, off, inside the dialog
+                    await evaluate(instance, "modalNewTask(%s); true" % workspace)
+                    await until(instance, "!!document.querySelector('.new-task-modal #nt-auto-wrap:not(.hidden)')")
+                    dialog = await evaluate(instance, """(() => {
+                        const m = document.querySelector('.new-task-modal');
+                        const wrap = m.querySelector('#nt-auto-wrap'), box = wrap.getBoundingClientRect();
+                        const frame = m.getBoundingClientRect();
+                        const perms = m.querySelector('#nt-perm').closest('.field-row').getBoundingClientRect();
+                        return {checked: m.querySelector('#nt-auto').checked,
+                                inside: box.left >= frame.left && box.right <= frame.right,
+                                below: box.top >= perms.bottom,
+                                overflow: m.scrollWidth > m.clientWidth + 1,
+                                note: m.querySelector('#nt-auto-note').textContent}; })()""")
+                    assert dialog["checked"] is False and dialog["inside"] and dialog["below"], (where, dialog)
+                    assert not dialog["overflow"] and "closes it" in dialog["note"], (where, dialog)
+                    await shoot("new-task-{}-{}".format(width, theme))
+                    await evaluate(instance, "document.querySelector('#nt-cancel').click(); true")
+                    await until(instance, "!document.querySelector('.new-task-modal')")
+            # Main's "@" list: its tasks, all of them, and a new one
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+                session=instance.page_session)
+            await evaluate(instance, "applyTheme('dark'); %s.select(1); true" % workspace)
+            await evaluate(instance, "demoView.composer.ta.value = ''; demoView.composer.ta.focus(); true")
+            await type_text(instance, "Wait for @")
+            await until(instance, "!!demoView.composer.mention")
+            labels = await evaluate(instance, "demoView.composer.mention.items.map(item => item.label)")
+            for label in ("Task Card spacing", "Task Phone navigation", "All tasks", "New task"):
+                assert label in labels, labels
+            await shoot("mentions-1440-dark")
+            await evaluate(instance, "demoView.composer.hideMention(); demoView.composer.set(''); true")
+            # Settings: Task guidance with Puppy's default policy
+            await evaluate(instance, "openSettingsTab(); true")
+            await until(instance, "!!document.querySelector('.system-prompt-tasks:not(.hidden) textarea')")
+            policy = await evaluate(instance, """(() => {
+                const section = document.querySelector('.system-prompt-tasks');
+                return {head: section.querySelector('h3').textContent,
+                        text: section.querySelector('textarea').value}; })()""")
+            assert policy["head"] == "Task guidance" and policy["text"] == config.DEFAULT_TASKS_SYSTEM_PROMPT, policy
+            await evaluate(instance, "document.querySelector('.system-prompt-tasks').scrollIntoView(); true")
+            await shoot("settings-1440-dark")
+            await evaluate(instance, "closeTab('settings'); true")
+        finally:
+            db.meta_apply(delete_keys=(session_tasks.AUTO_PREFIX + str(tid),))
+            runner.broadcast_sessions()
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+                session=instance.page_session)
+            await evaluate(instance, "applyTheme('dark'); activateTab('s:0:1'); %s.select(1); true" % workspace)
+    print("PASS: Apply to Main when done in real layout on a desktop and a phone in both themes: the tab's mark, "
+          "its Resolving state and the sheet's line, the menu's switch turned off by a real click, the New task "
+          "dialog's choice, Main's task mentions and Settings' Task guidance", flush=True)
+
+
 async def task_refresh_checks(instance):
     """The task menu refreshes a real copy, without replaying the command on
     Back/Forward, and reports a refused edit on desktop and narrow screens."""
@@ -7953,6 +8120,9 @@ async def main(args):
             if args.task_refresh_only:
                 await task_refresh_checks(instances[0])
                 return
+            if args.task_tools_only:
+                await task_tools_checks(instances[0], args.screenshots)
+                return
             if args.token_usage_only:
                 await token_usage_checks(instances[0], args.screenshots)
                 return
@@ -7988,6 +8158,7 @@ async def main(args):
             await loop_checks(instances[0], args.screenshots)
             await image_viewer_checks(instances[0], args.screenshots)
             await tool_image_checks(instances[0])
+            await task_tools_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])
@@ -8018,6 +8189,7 @@ if __name__ == "__main__":
     parser.add_argument("--loop-only", action="store_true")
     parser.add_argument("--tool-clock-only", action="store_true")
     parser.add_argument("--task-refresh-only", action="store_true")
+    parser.add_argument("--task-tools-only", action="store_true")
     parser.add_argument("--token-usage-only", action="store_true")
     parser.add_argument("--question-scroll-only", action="store_true")
     parser.add_argument("--image-viewer-only", action="store_true")

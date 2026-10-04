@@ -134,7 +134,8 @@ Main read-only when needed. Main is untouched by this
 resolution attempt. Review the updated diff and apply again when the agent
 finishes; the switch never approves unseen changes or starts an automatic
 retry loop. Stop and approvals work as they do for other task turns. An engine
-failure or an unresolved conflict may still need your input.
+failure or an unresolved conflict may still need your input. Only a task set
+to **Apply to Main when done** (below) is applied without that second review.
 
 Applies to the same repository run one at a time, including when separate Main
 sessions point to it. A later apply checks the files left by earlier applies;
@@ -196,6 +197,110 @@ or a repository Git could not read keep the refusal, which names the cause. An
 idle project is still copied from its working files, uncommitted changes
 included, and no look is taken for it.
 
+## Apply to Main when done
+
+**Apply to Main when done** hands a task's last step to Puppy: once one of the
+task's turns ends successfully, with nothing left in its queue, and Main is
+idle, Puppy applies the task to Main the way the review sheet's **Apply to
+Main** with **Fold into Main after applying** would, folds its conversation
+into Main and closes it. It is off by default; turn it on in the **New task**
+dialog, in the task's own menu (right under **Refresh from Main**), through
+Main's agent (`apply_when_done`), or from inside the task, where the agent sets
+it for itself when you ask it to merge into Main once it is done (**Apply when
+done** in the task's `@` menu inserts `@Apply when done` for that). Backends
+advertise it as `session-task-auto-apply`.
+
+How an apply goes:
+
+1. The task's delta since its review baseline is computed as for a review. An
+   empty delta - the task changed nothing, or its changes were applied
+   already - is folded straight away, without an apply row.
+2. When that patch still applies to Main's files as they stand, it is applied
+   (`git apply`, never touching Main's index), the next baseline is the
+   task's tree, and Main's transcript gets **Task changes applied
+   automatically** with the file list the fold keeps.
+3. When Main has moved under the task, Puppy snapshots Main's working files
+   into the task's repository and lets Git make a real three-way merge
+   (`git merge-tree --write-tree`, Git 2.40 or newer) of Main's newer changes
+   with the task's, in that repository alone. A clean merge is applied as the
+   difference between the snapshot and the merged tree - Main's own changes
+   can never be undone by it - and the row says it was merged with Main's
+   newer changes.
+4. Where both sides changed the same lines, Puppy writes the merge into the
+   task's copy as `git merge` would: merged files in place, conflicted files
+   with standard markers labelled `refs/puppy/sync/task` and
+   `refs/puppy/sync/main`, and their stages unmerged in the copy's own index.
+   The review baseline moves to Main's snapshot, so the task's diff stays its
+   own changes. Puppy then sends the task's agent one follow-up naming the
+   conflicted files and how each conflicts, and asks it to resolve them, `git
+   add` them, run its checks, and to switch Apply to Main when done off if it
+   cannot resolve them safely. Main's transcript shows **Resolving conflicts
+   with Main in task** with the round, and the task's transcript the merge.
+5. When that turn ends successfully, the task is tried again from step 1. A
+   copy that still has unmerged files, or added lines still carrying Puppy's
+   own markers, is never applied: the next round asks for them again without
+   merging again. Each round is one follow-up; after eight rounds Puppy turns
+   the switch off and says so in Main (**Task not applied automatically**), as
+   it does for a missing copy, a refused patch or a failed merge.
+
+Several tasks set to apply when done settle one at a time per repository. Each
+pass of the worker takes Main's finished tasks in the order they finished,
+applies every one that fits or merges cleanly first, and only then starts
+conflict rounds, each against Main as the others left it - so tasks touching
+the same files cost the fewest rounds their overlaps allow, and a task whose
+resolution meets newer changes from another simply gets another round.
+
+Main is never written while any turn works in its project, and new turns there
+wait while an apply runs. The one exception is Main's own agent waiting for a
+task through the task tools' `wait`: its engine is blocked on that very call,
+so Puppy may apply then, and the wait cannot return until the apply is over.
+A task whose turn fails or is stopped waits for a successful one; held
+messages wait for you. A task with the switch on shows a merge mark on its tab
+and reads **Resolving** during a conflict round, **Applying** once finished,
+or **Waiting** while Main is busy; the Tasks sheet carries the same line.
+Switching it off leaves the task as it is for an ordinary review.
+
+## Task tools for agents
+
+Every prompt turn of a session with Tasks on gets the task MCP bridge
+(`puppy_tasks`, advertised as `session-task-agent`), and so does every task's
+turn, with a different set of tools. Its editable policy is Settings → System
+prompt → **Task guidance** (`system_prompt.tasks`).
+
+In Main, the agent can list the session's tasks with each one's phase -
+working, resolving conflicts with Main (round n of 8), waiting for an
+approval, queued, held, finished with changes not yet applied, applied,
+stopped or failed - and whether it applies to Main when done; read a task's
+conversation a page at a time; see its changed files, its diff and whether
+the changes would apply to Main as it stands; and, at the user's request,
+create a task (`new_task`, engine, model and effort refused with the valid
+values rather than replaced), send a task a message, stop it, refresh it from
+Main, set it to apply when done, or remove it (folded by default; a task with
+changes not applied to Main is refused unless the user wants them discarded).
+`wait` blocks for at most 20 seconds per call until the named tasks are
+finished, applied, or folded into Main and closed, and returns early for a
+task that needs someone - an approval, held messages, a stopped turn, or a
+task that will never fold because it is not set to apply when done. A task is
+named by its number (`#12`), its exact name, or a mention; `all` names every
+task. Main's own turn reads Main's files for `new_task` and `refresh` while it
+waits on them.
+
+In a task, the agent sees its own changes, whether they would apply to Main
+and any conflicts still unresolved (`status`), merges Main's current files
+into its copy as described in step 4 above (`sync_main` - from Main's last
+commit when a turn works in Main and its work tree is clean), sets or clears
+Apply to Main when done for itself, and lists, reads and waits for its
+sibling tasks.
+
+The console's `@` menu offers the matching mentions: in Main's chat, each
+task as `@Task-NAME-12` (the name is only a label; the number is the task's
+session id), **All tasks** (`@All tasks`), and **New task**, whose wizard -
+the spawn wizard from its engine step on - inserts `@New task` (Main's engine
+and saved defaults) or `@New task using <engine> [<model>] [at <effort>
+effort]`; in a task's chat, **Apply when done** (`@Apply when done`).
+
+## Storage
+
 Task conversations, grouping and Git working copies are covered by the existing
 full backup/restore. Copies live at `<data-dir>/workspaces/session-<random>/`
 and survive service restarts and reboots. If a copy is missing, Puppy keeps the
@@ -215,6 +320,16 @@ means on, and no entry means off. Startup and snapshot restore reject malformed
 entries. A folded task is an ordinary `info` row of Main's transcript (subtype
 `session_task_archive`). These records, preferences and transcript rows are
 included in full backups.
+
+**Apply to Main when done** is the optional `session_task_auto_apply.<sid>`
+record, absent while off: exactly `{format: 1, armed_at, rounds, resolving}`
+with a finite non-negative `armed_at`, `rounds` the conflict rounds already
+started (0 to 8) and `resolving` true from a round's follow-up until the next
+attempt. It must belong to an existing task; startup and snapshot restore
+reject anything else rather than repairing it, and it is deleted with its
+task. No earlier record exists, so nothing needs preparing. Why an apply is
+waiting is held in memory only and published on the task payload's additive
+`auto_apply` (`{armed_at, rounds, max_rounds, resolving, phase, note}`).
 
 Tab order, selection and last-read result positions keep their exact
 `puppy.sessionTasks.<backend-id>.<parent-id>` browser record. Explicitly hidden
@@ -241,3 +356,8 @@ review uses the supplied Main snapshot as its baseline; preparation leaves the
 task's working files and index intact for its agent to reconcile. These refs and
 their independent Git objects are included in full backups. The switch is a
 per-request choice and is not persisted.
+A merge of Main into a task (a conflict round, or the task's own `sync_main`)
+keeps its inputs at `refs/puppy/sync/{base,task,main}` inside that copy, moves
+`refs/puppy/base` and the record's `base` to the Main snapshot, and appends an
+`info` row of subtype `session_task_sync` (its text, Git name-status `files`
+and the `conflicts` it left) to the task's transcript.

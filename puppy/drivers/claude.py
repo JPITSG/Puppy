@@ -710,7 +710,7 @@ class ClaudeDriver(Driver):
 
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                   system_prompt="", terminal_mcp=None, vnc_mcp=None,
-                  spawn_mcp=None, session_mcp=None, tool=None):
+                  spawn_mcp=None, session_mcp=None, task_mcp=None, tool=None):
         tool_kind = driver_base.tool_name(tool)
         argv = [self.binary, "-p",
                 "--output-format", "stream-json",
@@ -724,7 +724,7 @@ class ClaudeDriver(Driver):
         # no agent bridges, no guidance, and never a fresh session
         mcps = [] if tool_kind else \
             [item for item in (browser_mcp, terminal_mcp, vnc_mcp, spawn_mcp,
-                               session_mcp) if item]
+                               session_mcp, task_mcp) if item]
         if mcps:
             mcp_config = {"mcpServers": {item["name"]: {
                 "type": "stdio", "command": item["command"],
@@ -763,7 +763,7 @@ class ClaudeDriver(Driver):
 
     def build_env(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                   system_prompt="", terminal_mcp=None, vnc_mcp=None,
-                  spawn_mcp=None, session_mcp=None, tool=None):
+                  spawn_mcp=None, session_mcp=None, task_mcp=None, tool=None):
         # Claude normally refuses bypassPermissions when its effective user is
         # root. The vendor's sandbox marker is deliberately turn-scoped: the
         # runner starts every turn with clean_env(), then calls this method for
@@ -784,7 +784,7 @@ class ClaudeDriver(Driver):
 
     def turn_context(self, session, first_turn, prompt, pinned_id,
                      browser_mcp=None, system_prompt="", terminal_mcp=None,
-                     vnc_mcp=None, spawn_mcp=None, session_mcp=None, tool=None):
+                     vnc_mcp=None, spawn_mcp=None, session_mcp=None, task_mcp=None, tool=None):
         # --replay-user-messages gives a protocol-level acknowledgement for
         # each text message accepted from stdin. Do not expose steering until
         # the original prompt itself has been replayed, and retain the exact

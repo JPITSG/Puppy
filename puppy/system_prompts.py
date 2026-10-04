@@ -57,6 +57,15 @@ def spawn_prompt() -> str:
         return config.DEFAULT_SPAWN_SYSTEM_PROMPT
 
 
+def tasks_prompt() -> str:
+    """Return the editable task-tool policy with a safe fallback."""
+    value = config.get("system_prompt.tasks", config.DEFAULT_TASKS_SYSTEM_PROMPT)
+    try:
+        return config.normalize_system_prompt(value, "task system prompt")
+    except ValueError:
+        return config.DEFAULT_TASKS_SYSTEM_PROMPT
+
+
 def remote_workspace_prompt() -> str:
     """Return remote-workspace guidance, falling back to Puppy's default."""
     value = config.get(
@@ -90,6 +99,8 @@ def payload() -> dict:
         "vnc_default": config.DEFAULT_VNC_SYSTEM_PROMPT,
         "spawn": spawn_prompt(),
         "spawn_default": config.DEFAULT_SPAWN_SYSTEM_PROMPT,
+        "tasks": tasks_prompt(),
+        "tasks_default": config.DEFAULT_TASKS_SYSTEM_PROMPT,
         "max_chars": config.MAX_SYSTEM_PROMPT_CHARS,
     }
 
@@ -108,7 +119,7 @@ async def h_patch(request: web.Request):
     if not isinstance(body, dict):
         return web.json_response({"error": "system prompt request must be an object"}, status=400)
     unknown = set(body) - {"custom", "remote_workspace", "browser", "terminal",
-                           "vnc", "spawn"}
+                           "vnc", "spawn", "tasks"}
     if unknown:
         return web.json_response(
             {"error": "unknown system prompt field: {}".format(sorted(unknown)[0])},
@@ -123,8 +134,11 @@ async def h_patch(request: web.Request):
         terminal = body.get("terminal", terminal_prompt())
         vnc = body.get("vnc", vnc_prompt())
         spawn = body.get("spawn", spawn_prompt())
+        tasks = body.get("tasks", tasks_prompt())
+        if not isinstance(tasks, str):
+            raise ValueError("task system prompt must be text")
         config.set_system_prompts(custom, remote_workspace, browser, terminal,
-                                  vnc, spawn)
+                                  vnc, spawn, tasks)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     return web.json_response({"ok": True, "system_prompt": payload()})

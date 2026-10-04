@@ -94,6 +94,26 @@ carry their `files` list. The same nodes accept a standalone boolean
 default false) controlling whether Main's turns are told about its folded tasks.
 Refusals are 409; the snapshot guard answers 503.
 
+Nodes advertising `session-task-auto-apply` accept
+`POST /api/sessions/{sid}/tasks/{tid}/auto-apply` with `{"enabled": true|false}`
+and an optional boolean `auto_apply` on `POST /api/sessions/{sid}/tasks`, and
+carry the task payload's additive `auto_apply` (`null`, or `armed_at`, `rounds`,
+`max_rounds`, `resolving`, `phase` - `working`, `resolving`, `waiting`,
+`applying`, `paused` or `held` - and a `note` saying why an apply waits). The
+reply to the switch is `{"session": ...}`. Once such a task has finished a turn
+successfully with nothing queued and its Main session's project is idle, the
+node's own worker applies it, then folds it into Main and removes it: the
+plain patch when it fits, else Git's three-way merge of Main's newer files
+(`git merge-tree --write-tree`, Git 2.40 or newer); real conflicts are merged
+into the task copy with markers and unmerged stages and handed to the task's
+agent as one follow-up per round, at most eight rounds. Main receives
+`info`/`session_task` rows (`auto: true`) for each apply, round and refusal,
+and the task an `info`/`session_task_sync` row per merge. The worker skips
+everything while a snapshot is in progress or the node is shutting down; its
+steps are owned like task operations, so backups wait for them. The record is
+the exact optional `session_task_auto_apply.<sid>` meta entry, validated at
+startup and restore and deleted with its task.
+
 Nodes advertising `session-task-config` accept optional `engine`, `model`,
 `effort` and `permission_mode` fields on `POST /api/sessions/{sid}/tasks`.
 Omitting the engine selects Main's engine. Omitted model, effort and permissions
@@ -576,7 +596,7 @@ the engines' native credential stores.
 ## System prompts
 
 Each node stores its own custom prompt plus conditional remote-workspace,
-Browser, Terminal, remote-screen, and spawned-agent guidance. The custom layer
+Browser, Terminal, remote-screen, spawned-agent and task guidance. The custom layer
 is added to every new model turn the node starts. The Browser layer is added
 only when Browser is enabled and the turn receives managed-browser tools. The
 Terminal layer is added only when the node offers shared-terminal tools, and its
@@ -586,12 +606,19 @@ remote-screen layer accompanies the VNC MCP bridge every execution node offers
 and keeps the tools to screens the user actually named. The
 spawned-agent layer accompanies the always-offered spawn MCP bridge and keeps
 delegation explicitly user-requested because spawned runs spend real
-subscription quota. Active turns keep the prompt with which they started.
+subscription quota. The task layer accompanies the task MCP bridge (`puppy_tasks`,
+`session-task-agent`) that every turn of a session with Tasks on, and of each
+task, receives, and keeps creating, messaging, stopping, applying and removing
+tasks user-requested. Active turns keep the prompt with which they started.
+`GET /api/system-prompt` carries `tasks` and `tasks_default` on nodes advertising
+`session-task-agent`, and `PATCH` accepts `tasks`; a request leaving it out keeps it.
 
 `config.system_prompt` holds exactly `custom`, `remote_workspace`, `browser`,
-`terminal`, `vnc`, and `spawn`. A `config.json` written before the remote-screen
-policy must have `system_prompt.vnc` added by hand before that node starts;
-startup and backup validation reject the earlier shape rather than filling it in.
+`terminal`, `vnc`, `spawn`, and `tasks`. A `config.json` written before the
+remote-screen policy must have `system_prompt.vnc` added by hand, and one
+written before the task tools `system_prompt.tasks` (any string, or Puppy's
+`DEFAULT_TASKS_SYSTEM_PROMPT`), before that node starts; startup and backup
+validation reject the earlier shape rather than filling it in.
 
 ## Timeout settings
 
@@ -632,7 +659,7 @@ value is read from `/proc`; a process's CPU share is the delta between two
 scans, so the first read of a fresh process reports `null` rather than a guess.
 
 The tree is trimmed, not dumped: identical childless siblings become one row
-carrying `count` (the five per-turn MCP bridges, a browser's renderers),
+carrying `count` (the per-turn MCP bridges, a browser's renderers),
 children are capped per parent, depth and total nodes are bounded, and every
 omission is counted in that branch's `more` and the reply's `hidden`. Nothing
 is persisted or published on the state stream by a headless node, so a restart
@@ -680,7 +707,7 @@ explanation, and cross-node spawns exist only on the controller, which relays
 them over its already-authenticated channels - nodes still never contact each
 other, so a session hosted on a backend can spawn only onto its own node.
 
-The spawn, browser, terminal, VNC, and session MCP descriptors explicitly pass
+The spawn, browser, terminal, VNC, session and task MCP descriptors explicitly pass
 the node's absolute `PUPPY_DATA` path alongside the package path. This keeps their
 configuration tied to the backend even when an engine filters inherited
 environment variables or runs a bridge in a different working directory.

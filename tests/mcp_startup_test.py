@@ -22,7 +22,7 @@ from pathlib import Path
 import subprocess
 
 from puppy import (config, browser_agent, terminal_agent, vnc_agent,
-                   spawn_agent, session_agent)
+                   spawn_agent, session_agent, task_agent)
 from puppy.drivers.claude import ClaudeDriver
 from puppy.drivers.codex import CodexDriver
 from puppy.drivers.opencode import OpenCodeDriver
@@ -35,11 +35,15 @@ config.set_value("browser.enabled", True)
 bridges = {
     "spawn": spawn_agent, "browser": browser_agent,
     "terminal": terminal_agent, "vnc": vnc_agent, "session": session_agent,
+    "task": task_agent,
 }
+# each bridge's editable policy; the session bridge has none
+policies = {"spawn": "spawn", "browser": "browser", "terminal": "terminal",
+            "vnc": "vnc", "task": "tasks"}
 descriptors = {}
 for kind, module in bridges.items():
-    if kind != "session":
-        config.set_value("system_prompt." + kind, "Node policy for " + kind)
+    if kind in policies:
+        config.set_value("system_prompt." + policies[kind], "Node policy for " + kind)
     assert module.turn_mcp(1, "startup-test") is None
     # Socket/turn ownership is exercised by the bridge suites. This test only
     # opens their descriptor gate: initialization must not require a live turn.
@@ -92,14 +96,16 @@ for engine, servers in (("codex", codex_servers), ("claude", claude_servers),
         assert replies[0]["result"]["protocolVersion"] == "2025-06-18"
         instructions = replies[0]["result"]["instructions"]
         assert instructions == module.instructions(), (engine, kind)
-        if kind != "session":
+        if kind in policies:
             assert "Node policy for " + kind in instructions, (engine, kind)
+        # the task bridge serves Main's tools by default; a task's are its own
+        tools = module.TOOLS["main"] if isinstance(module.TOOLS, dict) else module.TOOLS
         assert {tool["name"] for tool in replies[1]["result"]["tools"]} == {
-            tool["name"] for tool in module.TOOLS}
+            tool["name"] for tool in tools}
         assert server["env"]["PUPPY_DATA"] == str(node_data)
         assert (node_data / "config.json").read_bytes() == config_bytes
         assert list(child_cwd.iterdir()) == [], (engine, kind)
-print("MCP startup: five bridges through all three drivers passed")
+print("MCP startup: six bridges through all three drivers passed")
 '''
 
 

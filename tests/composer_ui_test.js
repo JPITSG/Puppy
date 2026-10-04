@@ -115,6 +115,7 @@ const context = vm.createContext({
   },
   backendHasCapability: (backend, capability) => !!backend && backend.capabilities.includes(capability),
   spawnExecFor: () => false,
+  sessionsFor: () => [], tasksIcon: icon, applyWhenDoneIcon: icon, sessionWorkspace: () => null,
   linkifyInto: (node, text) => { node.appendChild(document.createTextNode(text)); return node; },
   findSessionMeta: (bid, sid) => ({ name: "Session " + sid, engine: 'first', model: 'precise', effort: 'high' }),
   backendName: bid => bid ? "node " + bid : "this node",
@@ -140,6 +141,7 @@ vm.runInContext([
   between("const LOOP_MAX_ITERATIONS", "/* The review sheet:"),
   between("function engineStatusText(", "const headWord ="),
   between("function effectiveQueuedConfig(", "/* One workspace tab"),
+  between("const TASK_STATES", "/* The one line the Tasks sheet gives"),
 ].join("\n"), context);
 const { Composer, composerBoxHtml, SessionView, SharedDraft } = vm.runInContext(
   "({ Composer, composerBoxHtml, SessionView, SharedDraft })", context);
@@ -682,6 +684,93 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   for (const text of ["@Session-P", "@Session-Project-ABCDE"]) {
     context.mentionSample = text;
     assert.equal(vm.runInContext("MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)", context), null);
+  }
+
+  /* The task tools' rows: a Main chat names its tasks - the session
+     mention's shape, the task's number at the end - every task at once, and
+     a New task directive built by the spawn wizard from the engine on; a
+     task's chat asks to be applied when done. The wording is exactly what
+     task_agent's instructions define and the token regex renders whole. */
+  {
+    const taskRows = [
+      { id: 21, name: "Fix login button", task: { parent: 10, state: "running", created_at: 1,
+        auto_apply: { phase: "working", rounds: 0, max_rounds: 8, note: "" } } },
+      { id: 22, name: "Docs: ąć / 東京", task: { parent: 10, state: "ready", created_at: 2, auto_apply: null } },
+      { id: 23, name: "Another Main's", task: { parent: 99, state: "ready", created_at: 3 } }];
+    const metas = { 10: { name: "Main", tasks_enabled: true }, 21: { name: "Fix login button", task: taskRows[0].task } };
+    const savedMeta = context.findSessionMeta;
+    context.sessionsFor = () => taskRows;
+    context.findSessionMeta = (bid, sid) => metas[sid] || savedMeta(bid, sid);
+    const mainBox = makeBox({ tasks: true });
+    let rows = mainBox.composer.mentionCandidates();
+    const taskItems = rows.filter(row => row.kind === "task");
+    assert.deepEqual(Array.from(taskItems, row => [row.label, row.hint, row.insert]), [
+      ["Task Fix login button", "Running · applies when done", "@Task-Fix-login-button-21"],
+      ["Task Docs: ąć / 東京", "Review", "@Task-Docs-ąć-東京-22"]]);
+    assert.ok(rows.some(row => row.kind === "all-tasks" && row.insert === "@All tasks"));
+    assert.ok(rows.some(row => row.kind === "new-task" && row.label === "New task"));
+    assert.ok(!rows.some(row => row.kind === "apply-when-done"), "Main has no apply of its own");
+    for (const row of rows.filter(row => row.insert && /^@(Task|All tasks)/.test(row.insert))) {
+      context.mentionSample = "Wait for " + row.insert + ", then merge.";
+      assert.equal(vm.runInContext("MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)[2]",
+        context), row.insert);
+    }
+    type(mainBox.ta, "@task");
+    assert.deepEqual(Array.from(mainBox.composer.mention.items.map(item => item.kind)),
+      ["task", "task", "all-tasks", "new-task"]);
+    type(mainBox.ta, "");
+    // New task: the spawn wizard from the engine step, Main's engine first
+    state.engines = [Object.assign(loopEngine("first"), { installed: true }),
+                     Object.assign(loopEngine("second"), { installed: true })];
+    type(mainBox.ta, "Please @new t");
+    mainBox.composer.applyMention(mainBox.composer.mention.items.find(item => item.kind === "new-task"));
+    assert.equal(mainBox.composer.mentionSpawn.step, "engine");
+    assert.equal(mainBox.box.querySelector(".mention-step-trail").textContent, "New task");
+    assert.deepEqual(Array.from(mainBox.composer.mention.items.map(item => item.label)),
+      ["Same as Main", "first", "second", "Back"]);
+    mainBox.composer.applyMention(mainBox.composer.mention.items[0]);
+    assert.equal(mainBox.ta.value, "Please @New task ");
+    type(mainBox.ta, "Please @new t");
+    mainBox.composer.applyMention(mainBox.composer.mention.items.find(item => item.kind === "new-task"));
+    mainBox.composer.applyMention(mainBox.composer.mention.items.find(item => item.label === "first"));
+    assert.equal(mainBox.composer.mentionSpawn.step, "model");
+    mainBox.composer.applyMention(mainBox.composer.mention.items.find(item => item.label === "Precise"));
+    assert.equal(mainBox.composer.mentionSpawn.step, "effort");
+    assert.equal(mainBox.box.querySelector(".mention-step-trail").textContent, "New task · first · precise");
+    mainBox.composer.applyMention(mainBox.composer.mention.items.find(item => item.label === "high"));
+    assert.equal(mainBox.ta.value, "Please @New task using first precise at high effort ");
+    context.mentionSample = "Do it: @New task using first precise at high effort to fix the docs.";
+    assert.equal(vm.runInContext("MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)[2]",
+      context), "@New task using first precise at high effort");
+    // Back from the engine step leaves the wizard, keeping the "@" list
+    type(mainBox.ta, "@new t");
+    mainBox.composer.applyMention(mainBox.composer.mention.items.find(item => item.kind === "new-task"));
+    mainBox.composer.applyMention(mainBox.composer.mention.items.find(item => item.kind === "spawn-back"));
+    assert.equal(mainBox.composer.mentionSpawn, null);
+    mainBox.composer.destroy();
+    // a task's own chat: Apply when done, and no tasks of its own
+    const taskBox = makeBox({ sid: 21, tasks: true });
+    rows = taskBox.composer.mentionCandidates();
+    assert.ok(rows.some(row => row.kind === "apply-when-done" && row.insert === "@Apply when done"));
+    assert.ok(!rows.some(row => ["task", "all-tasks", "new-task"].includes(row.kind)));
+    context.mentionSample = "When you are done, @Apply when done.";
+    assert.equal(vm.runInContext("MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)[2]",
+      context), "@Apply when done");
+    taskBox.composer.destroy();
+    // no rows: a host that is not a chat, Tasks off, or a node without the tools
+    const quiet = [makeBox(), makeBox({ tasks: true, bid: 88 })];
+    state.backends.push({ id: 88, capabilities: [] });
+    for (const box of quiet)
+      assert.ok(!box.composer.mentionCandidates().some(row =>
+        ["task", "all-tasks", "new-task", "apply-when-done"].includes(row.kind)));
+    state.backends.pop();
+    metas[10].tasks_enabled = false;
+    const off = makeBox({ tasks: true });
+    assert.ok(!off.composer.mentionCandidates().some(row => row.kind === "new-task"));
+    for (const box of quiet.concat(off)) box.composer.destroy();
+    context.sessionsFor = () => [];
+    context.findSessionMeta = savedMeta;
+    state.engines = [];
   }
 
   /* Session typing opens the same picker in both composer hosts. A name

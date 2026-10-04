@@ -257,6 +257,11 @@ SESSION_REFERENCES_CAPABILITY = "session-references"
 # that consumes requests never asks a node without this marker.
 SESSION_TITLES_CAPABILITY = "session-titles"
 
+# A task set to apply to Main when it is done (see BASE_CAPABILITIES).
+SESSION_TASK_AUTO_APPLY_CAPABILITY = "session-task-auto-apply"
+# The task MCP bridge and its editable system-prompt policy.
+SESSION_TASK_AGENT_CAPABILITY = "session-task-agent"
+
 BASE_CAPABILITIES = (
     "operation-cancel-v1",
     "side-question-cancel",
@@ -279,6 +284,17 @@ BASE_CAPABILITIES = (
     # applied rows carry their file list, and the per-session tasks_digest
     # PATCH controls whether Main's turns are told about folded tasks.
     "session-task-fold",
+    # Apply to Main when done: POST .../tasks/{tid}/auto-apply {enabled},
+    # task creation's auto_apply, and the task payload's additive auto_apply
+    # ({armed_at, rounds, max_rounds, resolving, phase, note} or null). The
+    # node applies such a task itself once it finished and Main is idle,
+    # merging Main's newer files with Git and handing real conflicts back to
+    # the task for bounded rounds, then folds it into Main.
+    SESSION_TASK_AUTO_APPLY_CAPABILITY,
+    # Every prompt turn of a session with Tasks, and of each task, receives
+    # the task MCP bridge (puppy_tasks), and GET/PATCH /api/system-prompt
+    # carry its editable ``tasks`` policy with ``tasks_default``.
+    SESSION_TASK_AGENT_CAPABILITY,
     SESSION_REFERENCES_CAPABILITY,
     "session-short-references",
     "session-communication",

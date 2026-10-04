@@ -3510,6 +3510,13 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
     assert 'body.terminal = record.terminalDraft' in ui_source
     assert 'body.vnc = record.vncDraft' in ui_source
     assert 'body.spawn = record.spawnDraft' in ui_source
+    # Task guidance: drawn and sent only for a backend whose payload has it
+    assert '"Task guidance"' in ui_source
+    task_copy = ("Sent with every model turn in a session that has Tasks, and in each task; "
+                 "it governs how the agent works with the session's tasks and applies them to Main.")
+    assert task_copy in ui_source.replace('" +\n      "', "")
+    assert 'if (record.hasTasks) body.tasks = record.tasksDraft;' in ui_source
+    assert 'tasksText.className = "system-prompt-textarea config-textarea";' in ui_source
     runner_source = (BASE / "puppy" / "runner.py").read_text()
     assert 'system_prompt_text = "" if tool else system_prompts.turn_prompt(' \
         in runner_source
@@ -3625,7 +3632,9 @@ const vncSection=card.children[5],vnc=vncSection.children[1];
 const vncReset=vncSection.children[0].children[1];
 const spawnSection=card.children[6],spawn=spawnSection.children[1];
 const spawnReset=spawnSection.children[0].children[1];
-const actions=card.children[7],save=actions.children[0],status=actions.children[1];
+// Task guidance: a section of its own, hidden for a payload without the field
+const tasksSection=card.children[7];
+const actions=card.children[8],save=actions.children[0],status=actions.children[1];
 const before={custom:custom.value,remoteWorkspace:remoteWorkspace.value,
   browser:browser.value,terminal:terminal.value,vnc:vnc.value,spawn:spawn.value,
   status:status.textContent,
@@ -3665,7 +3674,8 @@ await save.onclick();
 select.value="3";document.activeElement=select;select.onchange();
 const unsupported={disabled:custom.disabled&&remoteWorkspace.disabled&&browser.disabled&&terminal.disabled&&vnc.disabled&&spawn.disabled&&save.disabled,
   status:status.textContent};
-console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,invalid,unsupported,calls}));
+const tasksHidden=tasksSection.classList.contains("hidden")&&tasksSection.className.includes("system-prompt-tasks");
+console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,invalid,unsupported,calls,tasksHidden}));
 """.replace("__METHOD__", method).replace("__BACKEND_NOTE__", ui_source[
         ui_source.index("function backendStateNote("):
         ui_source.index("function engineStatusText(")])
@@ -3673,6 +3683,9 @@ console.log(JSON.stringify({before,dirty,resetState,saved,remote,offline,invalid
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:1000]
     result = json.loads(proc.stdout)
+    assert result["tasksHidden"] is True, "a backend without the task field draws no Task guidance"
+    assert all("tasks" not in (call["body"] or {}) for call in result["calls"]), \
+        "a backend without the task field is never sent one"
     assert result["before"] == {
         "custom": "LOCAL", "remoteWorkspace": "REMOTE DEFAULT", "browser": "DEFAULT",
         "terminal": "TERMINAL DEFAULT", "vnc": "VNC DEFAULT",
@@ -5324,7 +5337,10 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
         in ui_source
     assert "if (this.mentionSpawn) { this.spawnStepBack(); return true; }" in ui_source
     assert 'this.mentionSpawn && e.key === "Backspace" && !m.query' in ui_source
-    assert "this.applyMention({ insert: spawnMentionInsert(wizard) });" in ui_source
+    # one wizard finishes both directives: a spawn, or (kind "task") a new task
+    assert 'this.applyMention({ insert: wizard.kind === "task" ? newTaskMentionInsert(wizard) :\n' \
+           '      spawnMentionInsert(wizard) });' in ui_source
+    assert 'if (item.kind === "new-task") { this.taskMentionBegin(); return; }' in ui_source
     wizard_hide = ui_source.index("  hideMention() {")
     assert ui_source.index("this.mentionSpawn = null;", wizard_hide) < \
         ui_source.index("if (!this.mention) return;", wizard_hide)

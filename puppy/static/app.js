@@ -3227,12 +3227,13 @@ function linkifyInto(node, text) {
 
 /* A sent chat-box mention - inserted by the composer's @ shortcut, or typed by
    hand in the same shape - renders as a token, confirming which Puppy browser,
-   terminal, or spawn target the message pointed the agent at. A spawn token
-   covers its settings without requiring any task separator. Common prose
-   connectors are not model ids; punctuation and newlines end settings.
+   terminal, task, or spawn target the message pointed the agent at. A spawn
+   or new-task token covers its settings without requiring any task
+   separator. Common prose connectors are not model ids; punctuation and
+   newlines end settings.
    Surrounding prose keeps its ordinary rendering and linkification. */
 const MENTION_TOKEN_RE =
-  /(^|[\s([{'"])(@(?:Session-[\w\p{L}\p{N}-]+-[A-Z0-9]{4}|Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|VNC (?:[A-Z0-9]{4}|[\w.\[\]:-]{1,255}(?: (?:"[^"\n]{1,255}"|(?!(?:to|and|then|so|for|with|please|at|but|or)\b)\S{1,255}))?)|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using (?!(?:to|and|at)\b)[\w-]+(?: (?!(?:to|and|at|then|for|with)\b)[\w](?:[\w./:+-]*[\w/+-])?)?(?: at [\w-]+ effort)?))(?=$|[\s.,;:!?)\]}'"])/gu;
+  /(^|[\s([{'"])(@(?:Session-[\w\p{L}\p{N}-]+-[A-Z0-9]{4}|Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|New task(?: using (?!(?:to|and|at)\b)[\w-]+(?: (?!(?:to|and|at|then|for|with)\b)[\w](?:[\w./:+-]*[\w/+-])?)?(?: at [\w-]+ effort)?)?|All tasks|Apply when done|Task-[\w\p{L}\p{N}-]+-[1-9][0-9]{0,9}|VNC (?:[A-Z0-9]{4}|[\w.\[\]:-]{1,255}(?: (?:"[^"\n]{1,255}"|(?!(?:to|and|then|so|for|with|please|at|but|or)\b)\S{1,255}))?)|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using (?!(?:to|and|at)\b)[\w-]+(?: (?!(?:to|and|at|then|for|with)\b)[\w](?:[\w./:+-]*[\w/+-])?)?(?: at [\w-]+ effort)?))(?=$|[\s.,;:!?)\]}'"])/gu;
 function decorateMentionsInto(node, text) {
   text = String(text == null ? "" : text);
   MENTION_TOKEN_RE.lastIndex = 0;
@@ -5766,6 +5767,10 @@ function nodeHasCapability(bid, capability) {
   const capabilities = bid ?
     (state.backends.find(item => item.id === bid) || {}).capabilities : state.nodeCapabilities;
   return Array.isArray(capabilities) && capabilities.includes(capability);
+}
+/* A task the node applies to Main by itself when it is done. */
+function backendSupportsTaskAutoApply(bid) {
+  return nodeHasCapability(bid, "session-task-auto-apply");
 }
 
 /* "Enable tasks" sits beside "Show status bar" in both session menus. The node
@@ -12304,6 +12309,40 @@ function spawnMentionInsert(sel) {
   return parts.join(" ");
 }
 
+/* The New task wizard's directive, in the spawn directive's own words: a
+   bare "@New task" keeps Main's engine and its saved defaults; the task MCP
+   guidance defines the rest. */
+function newTaskMentionInsert(sel) {
+  const parts = ["@New task"];
+  if (sel.engine) {
+    parts.push("using " + String(sel.engine.key || ""));
+    if (sel.model && sel.model.value) parts.push(String(sel.model.value));
+    if (sel.effort && sel.effort.value)
+      parts.push("at " + String(sel.effort.value) + " effort");
+  }
+  return parts.join(" ");
+}
+
+/* A task named for the task tools: its name is only a label, the number at
+   the end (the task's session id) is what the agent reads - the session
+   mention's shape. */
+function taskMentionText(session) {
+  const name = String(session.name || "").normalize("NFKC")
+    .replace(/[^\w\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 80).replace(/-+$/, "");
+  return `@Task-${name || "Task"}-${session.id}`;
+}
+
+/* Which task tools a chat's agent has: Main's, a task's, or none - the node
+   must offer the bridge, and Main needs Tasks on and a local project. */
+function composerTaskRole(bid, sid) {
+  if (!nodeHasCapability(bid, "session-task-agent")) return "";
+  const meta = findSessionMeta(bid, sid);
+  if (!meta) return "";
+  if (meta.task) return "task";
+  if (meta.tasks_enabled === false || sessionWorkspace(meta)) return "";
+  return "main";
+}
+
 /* Efforts for one chosen model: a dynamic catalog (OpenCode) attaches
    model-specific effort_options to each model option; other engines share one
    engine-level list. */
@@ -12961,6 +13000,8 @@ function spellAutocorrection(word) {
                        (optional)
      runTool(value)    one of those opts was picked (optional)
      loop(onStarted)   open a loop for this session (chat hosts only)
+     tasks             offer the task tools' "@" rows: Main's tasks and New
+                       task, or a task's Apply when done (chat hosts only)
      menuOwner()       the view element a menu opened here belongs to, so a
                        rebuilt workspace takes it down (optional)
      uploadsBlocked()  a reason files cannot be attached through this host
@@ -14169,10 +14210,12 @@ class Composer {
     this.mentionEl.setAttribute("aria-multiselectable", this.mentionSession ? "true" : "false");
     if (wizard) {
       const head = el("div", "mention-step-head");
-      const trail = ["New spawn"];
-      if (wizard.count > 1) trail.push(`${wizard.count} agents`);
-      if (wizard.node) trail.push(wizard.node.name);
-      else if (wizard.node === null) trail.push(backendName(this.host.bid || 0));
+      const trail = [wizard.kind === "task" ? "New task" : "New spawn"];
+      if (wizard.kind !== "task") {
+        if (wizard.count > 1) trail.push(`${wizard.count} agents`);
+        if (wizard.node) trail.push(wizard.node.name);
+        else if (wizard.node === null) trail.push(backendName(this.host.bid || 0));
+      }
       if (wizard.engine) trail.push(wizard.engine.key);
       if (wizard.step === "effort" && wizard.model)
         trail.push(wizard.model.value || "default model");
@@ -14200,7 +14243,9 @@ class Composer {
       } else if (item.kind !== "spawn-wait") {
         ico.appendChild(item.kind === "browser" ? globeIcon(12) :
           item.kind === "terminal" ? terminalIcon(12) :
-          item.kind === "vnc" ? vncIcon(12) : plusIcon(11));
+          item.kind === "vnc" ? vncIcon(12) :
+          item.kind === "task" || item.kind === "all-tasks" ? tasksIcon(12) :
+          item.kind === "apply-when-done" ? applyWhenDoneIcon(12) : plusIcon(11));
       }
       row.appendChild(ico);
       row.appendChild(el("span", "mention-label", item.label));
@@ -14262,6 +14307,7 @@ class Composer {
     }
     if (item.kind === "new-vnc") { this.vncMentionBegin(); return; }
     if (item.kind === "new-spawn") { this.spawnMentionBegin(); return; }
+    if (item.kind === "new-task") { this.taskMentionBegin(); return; }
     if (item.kind === "new-loop") { this.loopMentionBegin(); return; }
     if (item.kind === "spawn-back") { this.spawnStepBack(); return; }
     if (item.kind === "spawn-step") { this.spawnStepChoose(item); return; }
@@ -14351,6 +14397,17 @@ class Composer {
       push("terminal", `Terminal ${inst.id}`, hintFor(inst.session_id), `@Terminal ${inst.id}`);
     for (const inst of this.knownVncScreens(withVnc))
       push("vnc", `VNC ${inst.id}`, inst.hint, `@VNC ${inst.id}`);
+    /* a Main chat names its tasks for the task tools, and asks for new ones;
+       a task's chat asks to be applied to Main when its work is done */
+    const taskRole = this.host.tasks ? composerTaskRole(bid, this.host.sid) : "";
+    const tasks = taskRole === "main" ? sessionsFor(bid).filter(row =>
+      row.task && row.task.parent === this.host.sid)
+      .sort((a, b) => a.task.created_at - b.task.created_at || a.id - b.id) : [];
+    for (const row of tasks)
+      push("task", `Task ${row.name || row.id}`, taskStateLabel(row.task) +
+        (row.task.auto_apply ? " · applies when done" : ""), taskMentionText(row));
+    if (tasks.length > 1)
+      push("all-tasks", "All tasks", "every task of this session", "@All tasks");
     if (!bid || backendHasCapability(backend, "session-short-references"))
       items.push({kind: "session-picker", label: "Session", hint: "reference one, several, or all",
         search: "session sessions", insert: ""});
@@ -14360,6 +14417,11 @@ class Composer {
       push("new-vnc", "New VNC connection", "a remote screen by host", "");
     if (spawnExecFor(bid))
       push("new-spawn", "New spawn", "delegate a one-shot agent", "");
+    if (taskRole === "main")
+      push("new-task", "New task", "have the agent start a task", "");
+    if (taskRole === "task")
+      push("apply-when-done", "Apply when done", "apply to Main, fold and close when finished",
+        "@Apply when done");
     if (this.host.loop && (!bid || backendHasCapability(backend, "session-loops")))
       push("new-loop", "New loop", "repeat a prompt in this session", "");
     return items;
@@ -14415,9 +14477,20 @@ class Composer {
   }
 
   spawnMentionBegin() {
-    this.mentionSpawn = { step: "count", count: null, node: undefined,
+    this.mentionSpawn = { kind: "spawn", step: "count", count: null, node: undefined,
                           engine: null, model: null, effort: null,
                           fetching: false, error: "", slide: 1 };
+    this.spawnResetQuery();
+  }
+
+  /* The "New task" row runs the same wizard on the session's own node from
+     its engine on: the first row keeps Main's engine and saved defaults (a
+     bare "@New task"), the others name an engine, model and effort. */
+  taskMentionBegin() {
+    this.mentionSpawn = { kind: "task", step: "engine", count: 1, node: null,
+                          engine: null, model: null, effort: null,
+                          fetching: false, error: "", slide: 1 };
+    this.spawnFetchEngines();
     this.spawnResetQuery();
   }
 
@@ -14512,6 +14585,9 @@ class Composer {
         items.push({ kind: "spawn-retry", label: "Retry - " + wizard.error,
                      search: "" });
       } else {
+        if (wizard.kind === "task")
+          step("Same as Main", "Main's engine with its saved defaults",
+            { sameAsMain: true, value: "" });
         for (const engine of engines) {
           if (!engine || !engine.installed || !engine.key) continue;
           step(engine.label || engine.key,
@@ -14519,7 +14595,7 @@ class Composer {
               .filter(Boolean).join(" · "),
             { engine, value: engine.key });
         }
-        if (!items.length)
+        if (!items.some(item => item.engine))
           items.push({ kind: "spawn-wait", label: "No engines installed on this backend",
                        search: "" });
       }
@@ -14559,6 +14635,7 @@ class Composer {
       return;
     }
     if (wizard.step === "engine") {
+      if (item.sameAsMain) { this.spawnFinish(); return; }
       wizard.engine = item.engine;
       if (this.spawnModelOptions(item.engine).length <= 1) {
         wizard.model = this.spawnModelOptions(item.engine)[0] || { value: "" };
@@ -14611,6 +14688,8 @@ class Composer {
       wizard.model = null;
       wizard.engine = null;
       wizard.step = "engine";
+    } else if (wizard.kind === "task") {
+      this.mentionSpawn = null;   // back out of the wizard, keep the "@" list
     } else if (wizard.step === "engine" && this.spawnNodeChoices().length > 1) {
       wizard.engine = null;
       wizard.node = undefined;
@@ -14629,7 +14708,8 @@ class Composer {
   spawnFinish() {
     const wizard = this.mentionSpawn;
     this.mentionSpawn = null;
-    this.applyMention({ insert: spawnMentionInsert(wizard) });
+    this.applyMention({ insert: wizard.kind === "task" ? newTaskMentionInsert(wizard) :
+      spawnMentionInsert(wizard) });
   }
 
   /* Clear the token's typed filter (everything after the "@") so each part
@@ -15235,7 +15315,17 @@ function sessionTaskUpdateNode(d) {
   // Session-task events carry their action in the existing text field.
   // Only split a known heading; preserve other notices in full.
   const actions = [["Task started", "busy"], ["Task changes applied", "ok"],
-    ["Conflict resolution started in task", "busy"], ["Task refreshed from Main", "ok"]];
+    ["Conflict resolution started in task", "busy"], ["Task refreshed from Main", "ok"],
+    ["Task changes applied automatically", "ok"], ["Resolving conflicts with Main in task", "busy"],
+    ["Task not applied automatically", "warn"]];
+  if (d.subtype === "session_task_sync") {
+    /* Main merged into the task's own copy: what came in, and what is left
+       for its agent to resolve */
+    const conflicts = Array.isArray(d.conflicts) ? d.conflicts : [];
+    return taskUpdateNode("Main merged into this task", conflicts.length ? "warn" : "ok",
+      text.replace(/^Main merged into this task: /, "") +
+      (conflicts.length ? " · " + conflicts.join(", ") : ""), "session-task-update");
+  }
   const [label, tone] = actions.find(([label]) => text.startsWith(label + ": ")) || ["Task updated", ""];
   return taskUpdateNode(label, tone, text, "session-task-update");
 }
@@ -16705,13 +16795,60 @@ const TASK_STATES = {
   held: ["Held", "warn"], ready: ["Review", "ok"], applied: ["Applied", ""],
   stopped: ["Stopped", "warn"], failed: ["Failed", "bad"],
 };
+/* A task set to apply when done says where that stands instead of its plain
+   state once it matters: resolving a conflict round, or finished and on its
+   way into Main - waiting while Main is busy. */
+function taskAutoLabel(task) {
+  const auto = task && task.auto_apply;
+  if (!auto) return null;
+  if (auto.phase === "resolving") return ["Resolving", "busy"];
+  if (auto.phase === "applying") return ["Applying", "busy"];
+  if (auto.phase === "waiting") return [auto.note ? "Waiting" : "Applying", "busy"];
+  return null;
+}
 function taskStateLabel(task) {
   if (task.needs_approval) return "Needs approval";
+  const auto = taskAutoLabel(task);
+  if (auto) return auto[0];
   return (TASK_STATES[task.state] || [task.state || "Unknown"])[0];
 }
 function taskStateClass(task) {
   if (task.needs_approval) return "warn";
+  const auto = taskAutoLabel(task);
+  if (auto) return auto[1];
   return (TASK_STATES[task.state] || ["", ""])[1];
+}
+/* The one line the Tasks sheet gives a task set to apply when done. */
+function taskAutoApplyLine(task) {
+  const auto = task && task.auto_apply;
+  if (!auto) return "";
+  const parts = ["Applies to Main when done"];
+  if (auto.phase === "resolving")
+    parts.push(`resolving conflicts with Main, round ${auto.rounds} of ${auto.max_rounds}`);
+  else if (auto.phase === "applying") parts.push("applying now");
+  else if (auto.phase === "waiting") parts.push(auto.note || "applying next");
+  else if (auto.phase === "paused") parts.push("once a turn finishes successfully");
+  else if (auto.phase === "held") parts.push("once its held messages are sent or discarded");
+  else if (auto.note) parts.push(auto.note);
+  return parts.join(" · ");
+}
+/* Turn a task's Apply to Main when done on or off; the answer lands on the
+   list row so every strip, sheet and menu reads it before the stream does. */
+async function setTaskAutoApply(bid, session, enabled) {
+  const task = session && session.task;
+  if (!task || !backendSupportsTaskAutoApply(bid)) return;
+  try {
+    const data = await api(bid, `sessions/${task.parent}/tasks/${session.id}/auto-apply`,
+      { method: "POST", body: { enabled } });
+    const meta = findSessionMeta(bid, session.id);
+    if (meta && data.session) Object.assign(meta, data.session);
+    const view = sessionViewFor(bid, session.id);
+    if (view && view.session && data.session) view.session.task = data.session.task;
+    renderSidebar();
+  } catch (error) {
+    if (!error.cancelled)
+      toast(`Could not turn ${enabled ? "on" : "off"} Apply to Main when done · ${error.message}`, "bad");
+  }
 }
 function taskReviewable(task) {
   return ["ready", "applied", "failed", "stopped"].includes(task.state);
@@ -16902,6 +17039,26 @@ function diffLineClass(line) {
   if (line.startsWith("+")) return "add";
   if (line.startsWith("-")) return "del";
   return "";
+}
+/* Apply when done: two branches joining into one line that runs on down
+   into an arrowhead - a task's work merging into Main - on the Tasks
+   button's 12-grid and 1.1 stroke */
+function applyWhenDoneIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", "M3 1.25v2.5c0 2 3 2.25 3 4.25v2.5 M9 1.25v2.5c0 2-3 2.25-3 4.25 M4 8.5l2 2 2-2");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.1");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  p.setAttribute("fill", "none");
+  svg.appendChild(p);
+  return svg;
 }
 /* two offset frames: a working copy beside its original, on the 12-grid the
    tab bar's + and x share */
@@ -17203,6 +17360,7 @@ class SessionWorkspaceView {
       card.appendChild(head);
       const summary = task.summary || task.prompt || "";
       card.appendChild(el("p", "task-card-summary", summary.length > 280 ? summary.slice(0, 280) + "…" : summary));
+      if (task.auto_apply) card.appendChild(el("p", "help task-card-auto", taskAutoApplyLine(task)));
       const actions = el("div", "task-card-actions");
       const open = el("button", "btn btn-sm", task.needs_approval ? "Open approval" : "Open");
       open.type = "button";
@@ -17368,6 +17526,15 @@ class SessionWorkspaceView {
       if (running) syncPromptSpinnerPhase(dot);
       tab.appendChild(dot);
       tab.appendChild(el("span", "t-title" + (titlePending(session) ? " titling" : ""), title));
+      if (task && task.auto_apply) {
+        /* set to apply when done: the mark beside the name, the label its
+           accessible name - no tooltip, like the tab's other marks */
+        const mark = el("span", "t-auto");
+        mark.setAttribute("role", "img");
+        mark.setAttribute("aria-label", "Applies to Main when done");
+        mark.appendChild(applyWhenDoneIcon(12));
+        tab.appendChild(mark);
+      }
       tab.onclick = () => this.select(sid);
       tab.onkeydown = event => {
         if (!["ArrowLeft","ArrowRight","Home","End"].includes(event.key)) return;
@@ -17450,8 +17617,14 @@ async function modalNewTask(workspace) {
       <label>Permissions<select id="nt-perm"></select></label>
     </div>
     <label class="hidden" id="nt-model-custom-wrap">Custom model<input type="text" id="nt-model-custom" placeholder="Model ID" spellcheck="false" maxlength="256"></label>
+    <div class="task-auto-apply hidden" id="nt-auto-wrap">
+      <label class="check"><input type="checkbox" id="nt-auto" aria-describedby="nt-auto-note"> Apply to Main when done</label>
+      <p class="help" id="nt-auto-note">When it finishes, Puppy applies it to Main - once it has resolved any conflicts with Main - then folds its conversation into Main and closes it.</p>
+    </div>
     <p class="form-error hidden" role="alert"></p>
     <div class="m-btns"><button type="button" class="btn" id="nt-cancel">Cancel</button><button type="button" class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal", () => { const view = state.views[workspace.tab.id]; if (view) modalNewTask(view); });
+  const autoApply = backendSupportsTaskAutoApply(bid) ? m.querySelector("#nt-auto") : null;
+  if (autoApply) m.querySelector("#nt-auto-wrap").classList.remove("hidden");
   const start = m.querySelector("#nt-start");
   const error = m.querySelector(".form-error");
   /* The task box is the chat's own prompt box - the same "@" list, pasted
@@ -17575,7 +17748,8 @@ async function modalNewTask(workspace) {
     const prompt = composer.message();
     if (!prompt) { composer.focus(); return; }
     const body = { name: nameInp.value, prompt, request_id: requestId,
-      ...choices(), auto_title: titleChoice.wanted() };
+      ...choices(), auto_title: titleChoice.wanted(),
+      ...(autoApply ? { auto_apply: autoApply.checked } : {}) };
     preparing = true; syncBusy();
     error.classList.add("hidden");
     try {
@@ -19038,6 +19212,7 @@ class SessionView {
       promptHistory: true,
       submit: () => this.submit(),
       loop: onStarted => modalNewLoop(Number(this.tab.bid) || 0, this.tab.sid, onStarted),
+      tasks: true,
       enterActions: { steer: () => this.steer(), queue: () => this.submit() },
       /* Escape with no list open interrupts the turn; it is consumed here so
          nothing above the view reads it as its own. */
@@ -20895,7 +21070,8 @@ class SessionView {
           }
           return node;
         }
-        if (d.subtype === "session_task" || d.subtype === "session_task_refresh") return sessionTaskUpdateNode(d);
+        if (d.subtype === "session_task" || d.subtype === "session_task_refresh" ||
+            d.subtype === "session_task_sync") return sessionTaskUpdateNode(d);
         if (d.subtype === "session_task_archive") return taskArchiveNode(d, ev.ts, this.tab.bid);
         if (d.subtype === "session_request" && d.session_request) {
           const card = el("div", "session-request-card");
@@ -21978,6 +22154,14 @@ class SessionView {
       });
       if (backendSupportsTaskRefresh(this.tab.bid))
         this.taskRefreshMenuButton = add("Refresh from Main", () => refreshTask(this.tab.bid, this.session));
+      /* the task's own switch: Puppy applies it to Main, folds and closes it
+         once it has finished, as the review sheet's Apply would */
+      if (backendSupportsTaskAutoApply(this.tab.bid)) {
+        const current = findSessionMeta(this.tab.bid, this.tab.sid) || this.session;
+        const armed = !!(current.task && current.task.auto_apply);
+        menu.appendChild(menuCheckRow("Apply to Main when done", armed,
+          () => setTaskAutoApply(this.tab.bid, current, !armed)));
+      }
     }
     /* the session's setting: from a task's head it sets Main's, which every
        tab of the workspace follows */
@@ -26981,6 +27165,28 @@ class SettingsView {
     spawnSection.appendChild(spawnText);
     card.appendChild(spawnSection);
 
+    /* drawn only for a backend whose payload carries it: one from before
+       the task tools has no such field to edit */
+    const tasksSection = el("section", "system-prompt-section system-prompt-tasks hidden");
+    const tasksHead = el("div", "system-prompt-section-head");
+    const tasksCopy = el("div", "system-prompt-section-copy");
+    tasksCopy.appendChild(el("h3", "", "Task guidance"));
+    tasksCopy.appendChild(el("p", "",
+      "Sent with every model turn in a session that has Tasks, and in each task; it " +
+      "governs how the agent works with the session's tasks and applies them to Main."));
+    const tasksReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
+      "Reset to default");
+    tasksReset.type = "button";
+    tasksHead.appendChild(tasksCopy);
+    tasksHead.appendChild(tasksReset);
+    const tasksText = document.createElement("textarea");
+    tasksText.className = "system-prompt-textarea config-textarea";
+    tasksText.rows = 3;
+    tasksText.setAttribute("aria-label", "Task system prompt");
+    tasksSection.appendChild(tasksHead);
+    tasksSection.appendChild(tasksText);
+    card.appendChild(tasksSection);
+
     /* the card's row like every other card's: the primary first, its
        status beside it */
     const actions = el("div", "system-prompt-actions");
@@ -27008,8 +27214,13 @@ class SettingsView {
       const maxChars = Number(prompt.max_chars);
       if (!Number.isInteger(maxChars) || maxChars < 1)
         throw new Error("backend returned an invalid system prompt limit");
+      const hasTasks = typeof prompt.tasks === "string" && typeof prompt.tasks_default === "string";
       return {
         loaded: true,
+        hasTasks,
+        tasks: hasTasks ? prompt.tasks : "",
+        tasksDraft: hasTasks ? prompt.tasks : "",
+        tasksDefault: hasTasks ? prompt.tasks_default : "",
         custom: prompt.custom,
         remoteWorkspace: prompt.remote_workspace,
         browser: prompt.browser,
@@ -27050,6 +27261,7 @@ class SettingsView {
        record.terminalDraft !== record.terminal ||
        record.vncDraft !== record.vnc ||
        record.spawnDraft !== record.spawn ||
+       (record.hasTasks && record.tasksDraft !== record.tasks) ||
        record.remoteWorkspaceDraft !== record.remoteWorkspace);
     const stash = () => {
       const record = records.get(activeBid);
@@ -27060,6 +27272,7 @@ class SettingsView {
       record.terminalDraft = terminalText.value;
       record.vncDraft = vncText.value;
       record.spawnDraft = spawnText.value;
+      if (record.hasTasks) record.tasksDraft = tasksText.value;
       record.saved = false;
     };
     const paint = () => {
@@ -27072,12 +27285,15 @@ class SettingsView {
       terminalText.disabled = !editable;
       vncText.disabled = !editable;
       spawnText.disabled = !editable;
+      tasksText.disabled = !editable;
       remoteText.disabled = !editable;
       remoteReset.disabled = !editable;
       browserReset.disabled = !editable;
       terminalReset.disabled = !editable;
       vncReset.disabled = !editable;
       spawnReset.disabled = !editable;
+      tasksReset.disabled = !editable;
+      tasksSection.classList.toggle("hidden", !(canUse && record && record.loaded && record.hasTasks));
       save.disabled = !canUse || unavailable || (!!record && record.saving);
       status.classList.remove("bad", "dirty");
       if (!canUse) {
@@ -27120,6 +27336,9 @@ class SettingsView {
         if (document.activeElement !== spawnText)
           spawnText.value = record.spawnDraft;
         spawnText.placeholder = "";
+        tasksText.maxLength = record.maxChars;
+        if (record.hasTasks && document.activeElement !== tasksText)
+          tasksText.value = record.tasksDraft;
         save.textContent = record.saving ? "Saving…" : "Save prompt";
         if (unavailable) {
           status.textContent = backendStateNote(backendStatus, true, "prompt settings");
@@ -27197,9 +27416,10 @@ class SettingsView {
     terminalText.oninput = edited;
     vncText.oninput = edited;
     spawnText.oninput = edited;
+    tasksText.oninput = edited;
     /* the multi-line editor contract: Ctrl/Cmd+Enter saves, as in agent notes */
     for (const area of [custom, remoteText, browserText, terminalText, vncText,
-                        spawnText])
+                        spawnText, tasksText])
       area.addEventListener("keydown", event => {
         if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !save.disabled) {
           event.preventDefault();
@@ -27246,6 +27466,14 @@ class SettingsView {
       paint();
       spawnText.focus();
     };
+    tasksReset.onclick = () => {
+      const record = records.get(activeBid);
+      if (!record || !record.loaded || record.saving || !record.hasTasks) return;
+      tasksText.value = record.tasksDefault;
+      stash();
+      paint();
+      tasksText.focus();
+    };
     save.onclick = async () => {
       let record = records.get(activeBid);
       if (!record || !record.loaded) { await load(true); return; }
@@ -27262,6 +27490,7 @@ class SettingsView {
         body.terminal = record.terminalDraft;
         body.vnc = record.vncDraft;
         body.spawn = record.spawnDraft;
+        if (record.hasTasks) body.tasks = record.tasksDraft;
         const result = await api(bid, "system-prompt", {
           method: "PATCH",
           body,

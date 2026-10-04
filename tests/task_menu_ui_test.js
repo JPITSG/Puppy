@@ -115,5 +115,54 @@ for (const bid of [0, 7]) {
   assert.equal([...document.querySelectorAll(".menu button")].some(b => b.textContent === "Refresh from Main"), false,
     "older nodes are never offered the new command");
 }
-console.log("PASS: local and remote task menus follow live states; refresh sits below review, gates capability, deduplicates requests and reports success, no-op, refusal and cancellation");
+/* Apply to Main when done: the task's own switch, right under Refresh from
+   Main, reading the list's record - never a stale copy - and asking for the
+   opposite of what it shows. */
+{
+  const switches = [];
+  const rows = [];
+  context.menuCheckRow = (label, on, fn) => {
+    const row = document.createElement("button");
+    row.textContent = label;
+    row.setAttribute("aria-checked", String(on));
+    row.onclick = fn;
+    rows.push(row);
+    return row;
+  };
+  context.setTaskAutoApply = (bid, session, enabled) => switches.push({ bid, id: session.id, enabled });
+  state.nodeCapabilities = ["session-task-refresh", "session-task-auto-apply"];
+  const listed = { id: 12, name: "Task", task: { parent: 10, state: "ready", auto_apply: null } };
+  context.findSessionMeta = (bid, sid) => sid === 12 ? listed : null;
+  const view = Object.create(context.SessionView.prototype);
+  view.tab = { bid: 0, sid: 12, type: "session" };
+  view.root = document.createElement("div");
+  view.session = { id: 12, name: "Task", task: { parent: 10, state: "running", auto_apply: null } };
+  const anchor = document.createElement("button");
+  document.body.appendChild(anchor);
+  const open = () => {
+    document.querySelectorAll(".menu").forEach(menu => menu.remove());
+    rows.length = 0;
+    view.showMenu(anchor);
+    return rows.find(row => row.textContent === "Apply to Main when done");
+  };
+  let row = open();
+  assert.ok(row, "the switch is offered for a task");
+  assert.equal(row.parentNode.children.indexOf(row),
+    row.parentNode.children.indexOf(view.taskRefreshMenuButton) + 1, "right under Refresh from Main");
+  assert.equal(row.getAttribute("aria-checked"), "false");
+  row.onclick();
+  assert.deepEqual(JSON.parse(JSON.stringify(switches.at(-1))), { bid: 0, id: 12, enabled: true });
+  listed.task = { ...listed.task, auto_apply: { phase: "waiting", rounds: 0, max_rounds: 8, note: "" } };
+  row = open();
+  assert.equal(row.getAttribute("aria-checked"), "true", "the list's record, not the view's older copy");
+  row.onclick();
+  assert.equal(switches.at(-1).enabled, false);
+  state.nodeCapabilities = ["session-task-refresh"];
+  assert.equal(open(), undefined, "a node without the switch never offers it");
+  view.session = { id: 12, name: "Main itself" };
+  view.tab = { bid: 0, sid: 10, type: "session" };
+  state.nodeCapabilities = ["session-task-refresh", "session-task-auto-apply"];
+  assert.equal(open(), undefined, "Main has no switch of its own");
+}
+console.log("PASS: local and remote task menus follow live states; refresh sits below review, gates capability, deduplicates requests and reports success, no-op, refusal and cancellation; the Apply to Main when done switch reads the list and asks for the opposite");
 })().catch(error => { console.error(error); process.exitCode = 1; });

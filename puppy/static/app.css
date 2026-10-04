@@ -3675,6 +3675,9 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 @media (hover:hover){.task-tabbar .task-remove-button:hover{color:var(--err)}}
 .task-tabbar .task-remove-button:active{color:var(--err)}
 .task-tab .t-state{font-size:var(--fs-2xs);color:var(--txt3);flex-shrink:0;white-space:nowrap}
+/* set to apply to Main when done: the drawn mark beside the name */
+.task-tab .t-auto{display:inline-flex;flex-shrink:0;color:var(--acc)}
+.task-tab .t-auto svg{display:block}
 /* an answer nobody has looked at yet */
 .task-tab .t-state.unread::before{
   content:"";display:inline-block;width:5px;height:5px;border-radius:50%;
@@ -3701,6 +3704,8 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
   white-space:pre-wrap;overflow-wrap:anywhere;
 }
 .task-card-actions{display:flex;gap:6px;flex-wrap:wrap}
+/* where a task set to apply when done stands, in the help voice */
+.task-card-auto{margin:-4px 0 9px}
 /* A folded task in Main's transcript: the tool card's disclosure carrying the
    task sheet's state voice, with the condensed conversation inside. */
 .task-archive .t-ico svg{display:block}
@@ -3779,6 +3784,11 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-review-diff .hunk{color:var(--acc2)}
 .task-review-diff .meta{color:var(--txt3)}
 .task-review-resolve,.task-review-fold{margin:0 0 6px}
+/* the New task dialog's Apply to Main when done, on the review sheet's
+   checkbox-and-note steps */
+.task-auto-apply{margin:0 0 6px}
+.task-auto-apply .check{margin:0}
+.task-auto-apply .help{margin:4px 0 10px}
 .task-review-resolve-note,.task-review-fold-note{margin:0 0 10px}
 .task-review-resolve-note .note-para+.note-para{margin-top:4px}
 /* the Git sheet: the session and its directory under the title, in the

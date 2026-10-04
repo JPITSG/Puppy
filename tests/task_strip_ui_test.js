@@ -43,6 +43,8 @@ const context = vm.createContext({
   titlePending: () => false,
   tasksIcon: () => el("svg", "tasks-icon"), plusIcon: () => el("svg", "plus-icon"),
   xIcon: () => el("svg", "x-icon"), trashIcon: () => el("svg", "trash-icon"), reviewIcon: () => el("svg", "review-icon"),
+  applyWhenDoneIcon: () => el("svg", "apply-when-done-icon"),
+  taskAutoApplyLine: task => task.auto_apply ? "Applies to Main when done · " + task.auto_apply.phase : "",
   sessDot: () => el("span", "sess-dot"),
   taskStateClass: () => "", taskStateLabel: task => task.state, taskActivityTitle: () => "",
   promptStatusLabel: label => el("span", "t-state", label),
@@ -269,5 +271,30 @@ workspace.refreshTasks();
     assert.equal(context.taskRemovable({ state }), false, state);
   assert.equal(context.taskRemovable(null), false, "no record, nothing to remove");
 
-  console.log("PASS: the task strip's Review and bin between Tasks and +, shown for the selected task and never for Main or an unnamed selection, Review greyed exactly as the menu's row and the bin greyed for a working or queued task, both named like the tab's close mark, one press one sheet or one request, focus handed to the selected tab when a verb greys or goes, and the Tasks sheet's Remove on the bin's rule");
+  /* ---- a task set to apply when done: the mark on its tab, the line on
+     its card - and nothing on a task that is not ---- */
+  const armed = { armed_at: 1, rounds: 0, max_rounds: 8, note: "", resolving: false, phase: "waiting" };
+  sessions = [main, task(2, "Card spacing", "ready", { auto_apply: armed }), task(3, "Phone navigation", "ready")];
+  workspace.openTask(2);
+  workspace.openTask(3);
+  const tabFor = id => workspace.strip.querySelector(`[data-sid="${id}"]`);
+  const mark = tabFor(2).querySelector(".t-auto");
+  assert.ok(mark && mark.querySelector(".apply-when-done-icon"), "a drawn mark, never a font glyph");
+  assert.equal(mark.getAttribute("role"), "img");
+  assert.equal(mark.getAttribute("aria-label"), "Applies to Main when done");
+  assert.equal(mark.title, undefined, "no tooltip, like the tab's other marks");
+  const order = tabFor(2).children.map(node => node.className.split(" ")[0]);
+  assert.ok(order.indexOf("t-title") + 1 === order.indexOf("t-auto") && order.indexOf("t-auto") < order.indexOf("t-state"),
+    "beside the name, before the state");
+  assert.equal(tabFor(3).querySelector(".t-auto"), null);
+  workspace.overview = el("div", "task-list");
+  workspace.renderedOverview = "";
+  workspace.renderOverview(workspace.tasks());
+  const lines = workspace.overview.querySelectorAll(".session-task-card").map(card =>
+    [card.querySelector(".t-name").textContent, (card.querySelector(".task-card-auto") || {}).textContent || ""]);
+  assert.deepEqual(Object.fromEntries(lines), { "Card spacing": "Applies to Main when done · waiting",
+    "Phone navigation": "" });
+  assert.ok(workspace.overview.querySelector(".task-card-auto").classList.contains("help"), "the help voice");
+
+  console.log("PASS: the task strip's Review and bin between Tasks and +, shown for the selected task and never for Main or an unnamed selection, Review greyed exactly as the menu's row and the bin greyed for a working or queued task, both named like the tab's close mark, one press one sheet or one request, focus handed to the selected tab when a verb greys or goes, and the Tasks sheet's Remove on the bin's rule; a task set to apply when done carries its mark and its card's line");
 })().catch(error => { console.error(error); process.exit(1); });

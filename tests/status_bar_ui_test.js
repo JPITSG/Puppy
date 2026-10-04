@@ -37,7 +37,7 @@ const context = vm.createContext({
   },
   cancelSessionDrag() {}, cancelTabDrag() {}, positionContextMenu() {}, positionAnchoredMenu() {},
   backendSupportsEngineDefaults: () => false, backendSupportsSessionPinning: () => false,
-  backendSupportsTaskRefresh: () => false,
+  backendSupportsTaskRefresh: () => false, backendSupportsTaskAutoApply: () => false,
   appendSessionTasksToggle() {}, sessionWorkspace: () => null, canMoveScratch: () => false,
   canMoveProject: () => false,
   titlePending: () => false, taskActivityTitle: () => "", promptStatusLabel: (text) => {

@@ -15,7 +15,7 @@ import time
 import uuid
 
 from puppy import (agent_notes, browser_agent, config, db, engine_defaults, handoff, notify, spawn_agent,
-                   system_prompts, terminal_agent, vnc_agent,
+                   system_prompts, task_agent, terminal_agent, vnc_agent,
                    session_agent, session_git, session_links, uploads, workspace_sync,
                    workspaces, session_tasks, session_titles, token_usage, tool_calls)
 from puppy.drivers import get_driver
@@ -3416,6 +3416,9 @@ class SessionHub:
                 from puppy import session_actions
                 session_actions.turn_started(self.id, text, pinned, user_seq)
             session_mcp = None if tool else session_agent.turn_mcp(self.id, pinned)
+            # Main's agent manages its tasks; a task's agent its own apply
+            task_mcp = None if tool else task_agent.turn_mcp(
+                self.id, pinned, task_agent.role_for(session))
             system_prompt_text = "" if tool else system_prompts.turn_prompt(
                 remote_workspace=descriptor is not None)
             if not tool:
@@ -3432,6 +3435,8 @@ class SessionHub:
                              "system_prompt": system_prompt_text}
             if session_mcp:
                 driver_kwargs["session_mcp"] = session_mcp
+            if task_mcp:
+                driver_kwargs["task_mcp"] = task_mcp
             if tool:
                 driver_kwargs["tool"] = tool_fields
             argv = driver.build_cmd(session, first_turn, prompt, pinned, **driver_kwargs)
@@ -4152,6 +4157,9 @@ class SessionHub:
                 self._start_turn(nxt)
             else:
                 broadcast_sessions()
+                # an idle task may now apply when done, and an idle Main
+                # may now take a finished one
+                session_tasks.wake_auto()
 
     async def _pump_stderr(self, proc) -> None:
         try:

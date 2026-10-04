@@ -44,11 +44,18 @@ still contain a value written before that release.
 - Tasks retain their durable relationships and isolated copies. The feature's
   detach-for-rollback command and rollback-only instructions are removed.
 - `config.system_prompt` contains exactly `custom`, `remote_workspace`,
-  `browser`, `terminal`, `vnc`, and `spawn`. A `config.json` written before the
-  remote-screen policy must have `system_prompt.vnc` added by hand before that
-  node starts - any string, or Puppy's `DEFAULT_VNC_SYSTEM_PROMPT`. Startup and
-  backup validation reject the earlier shape instead of filling it in, and a
-  backup archive exported before this change is refused for the same reason.
+  `browser`, `terminal`, `vnc`, `spawn`, and `tasks`. A `config.json` written
+  before the remote-screen policy must have `system_prompt.vnc` added by hand
+  before that node starts - any string, or Puppy's `DEFAULT_VNC_SYSTEM_PROMPT` -
+  and one written before the task tools `system_prompt.tasks` - any string, or
+  Puppy's `DEFAULT_TASKS_SYSTEM_PROMPT` - every runtime, headless nodes
+  included. Startup and backup validation reject an earlier shape instead of
+  filling it in, and a backup archive exported before either change is refused
+  for the same reason.
+- `session_task_auto_apply.<sid>` records are optional exact `{format: 1,
+  armed_at, rounds, resolving}` rows (`rounds` 0 to 8) belonging to an
+  existing task; absent means Apply to Main when done is off, so existing
+  databases need no preparation. See [Tasks](session-tasks.md).
 - `config.timers` contains exactly `cli_release_minutes`,
   `model_catalog_minutes`, `cli_status_minutes`, `git_check_minutes`,
   `remote_session_seconds`, `remote_engine_seconds` and

@@ -57,6 +57,8 @@ _VNC_POLICY_OPEN = "<puppy_vnc_policy>"
 _VNC_POLICY_CLOSE = "</puppy_vnc_policy>"
 _SPAWN_POLICY_OPEN = "<puppy_spawn_policy>"
 _SPAWN_POLICY_CLOSE = "</puppy_spawn_policy>"
+_TASK_POLICY_OPEN = "<puppy_task_policy>"
+_TASK_POLICY_CLOSE = "</puppy_task_policy>"
 _SYSTEM_PROMPT_OPEN = "<puppy_system_prompt>"
 _SYSTEM_PROMPT_CLOSE = "</puppy_system_prompt>"
 
@@ -109,7 +111,7 @@ def _notification(method: str, params=None) -> dict:
 
 def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
                            terminal_mcp=None, vnc_mcp=None, spawn_mcp=None,
-                           session_mcp=None) -> str:
+                           session_mcp=None, task_mcp=None) -> str:
     """Add node and turn-scoped guidance without replacing native user config.
 
     Codex's developer_instructions config value is replacement-oriented. A
@@ -141,6 +143,10 @@ def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
     session_policy = str((session_mcp or {}).get("engine_guidance") or "").strip()
     if session_policy:
         blocks.append("<puppy_session_policy>\n" + session_policy + "\n</puppy_session_policy>")
+    task_policy = str((task_mcp or {}).get("engine_guidance") or "").strip()
+    if task_policy:
+        blocks.append("{}\n{}\n{}".format(
+            _TASK_POLICY_OPEN, task_policy, _TASK_POLICY_CLOSE))
     if not blocks:
         return prompt
     return "{}\n\n{}".format("\n\n".join(blocks), prompt)
@@ -986,11 +992,11 @@ class CodexDriver(Driver):
 
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                   system_prompt="", terminal_mcp=None, vnc_mcp=None,
-                  spawn_mcp=None, session_mcp=None, tool=None):
+                  spawn_mcp=None, session_mcp=None, task_mcp=None, tool=None):
         argv = [self.binary, "app-server", "--stdio"]
         # a tool turn only addresses the existing thread: no agent bridges
         bridges = () if tool_name(tool) else (browser_mcp, terminal_mcp, vnc_mcp,
-                                              spawn_mcp, session_mcp)
+                                              spawn_mcp, session_mcp, task_mcp)
         for mcp in (item for item in bridges if item):
             prefix = "mcp_servers." + mcp["name"]
             argv += ["-c", prefix + ".command=" + json.dumps(mcp["command"]),
@@ -1006,7 +1012,7 @@ class CodexDriver(Driver):
 
     def turn_context(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                      system_prompt="", terminal_mcp=None, vnc_mcp=None,
-                     spawn_mcp=None, session_mcp=None, tool=None):
+                     spawn_mcp=None, session_mcp=None, task_mcp=None, tool=None):
         return {
             "quota_identity": _quota_identity(),
             "tool": tool_name(tool),
@@ -1034,7 +1040,7 @@ class CodexDriver(Driver):
                            self.default_permission()),
             "prompt": _with_runtime_guidance(
                 prompt, system_prompt, browser_mcp, terminal_mcp, vnc_mcp,
-                spawn_mcp, session_mcp),
+                spawn_mcp, session_mcp, task_mcp),
             "usage": {},
             "items": {},
             "item_seq": 0,
