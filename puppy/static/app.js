@@ -15835,6 +15835,27 @@ let imageViewerOpen = null;         // the viewer on the screen, if any
 
 /* The scale that shows the whole picture inside the room it is given, never
    above the picture's own size: a small screenshot stays sharp at 100%. */
+/* A picture goes on the clipboard as image data, which browsers allow only
+   a secure page (HTTPS or localhost): the viewer offers Copy only there, and
+   never a copy that would paste as anything but the picture. */
+function imageClipboardAvailable() {
+  return !!(window.isSecureContext && typeof ClipboardItem === "function" &&
+    navigator.clipboard && typeof navigator.clipboard.write === "function");
+}
+
+/* The decoded picture as PNG, the one image type every clipboard takes. */
+function imagePngBlob(img) {
+  return new Promise((resolve, reject) => {
+    const width = img.naturalWidth, height = img.naturalHeight;
+    if (!width || !height) { reject(new Error("the picture has not loaded")); return; }
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").drawImage(img, 0, 0);
+    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error("the picture could not be read")), "image/png");
+  });
+}
+
 function imageViewerFit(width, height, room) {
   if (!(width > 0 && height > 0 && room.width > 0 && room.height > 0)) return 1;
   return Math.min(1, room.width / width, room.height / height);
@@ -15946,6 +15967,7 @@ class ImageViewer {
         <button type="button" class="iv-level"></button>
         <button type="button" class="icon-btn iv-in" aria-label="Zoom in"></button>
         <span class="iv-sep" aria-hidden="true"></span>
+        <button type="button" class="icon-btn iv-copy" aria-label="Copy image"></button>
         <a class="icon-btn iv-download" aria-label="Download image"></a>
       </div>`, "image-viewer", () => openImageViewer(this.items, this.index));
     this.dialog = dialog;
@@ -15972,6 +15994,11 @@ class ImageViewer {
     this.inButton = q(".iv-in");
     this.downloadLink = q(".iv-download");
     this.downloadLink.appendChild(downloadIcon(14));
+    this.copyButton = q(".iv-copy");
+    if (imageClipboardAvailable()) {
+      this.copyButton.appendChild(copyIcon());
+      this.copyButton.onclick = () => this.copy();
+    } else this.copyButton.remove();
     this.prevButton.appendChild(chevronIcon(18, "left"));
     this.nextButton.appendChild(chevronIcon(18, "right"));
     this.outButton.appendChild(minusIcon(14));
@@ -16248,6 +16275,13 @@ class ImageViewer {
   }
 
   key(event) {
+    if (!event.defaultPrevented && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey &&
+        (event.key === "c" || event.key === "C") && this.copyButton.isConnected &&
+        !String(window.getSelection ? window.getSelection() : "")) {
+      event.preventDefault();
+      this.copy();
+      return;
+    }
     if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
     const target = event.target;
     if ((event.key === "Enter" || event.key === " ") && target && target.tagName === "BUTTON") return;
@@ -16278,6 +16312,42 @@ class ImageViewer {
       default: return;
     }
     event.preventDefault();
+  }
+
+  /* The picture shown, onto the clipboard as PNG. The write starts inside the
+     press - a clipboard takes it only there - with the picture handed over as
+     it is drawn; the button says Copied for a moment, and a failure says why. */
+  async copy() {
+    const button = this.copyButton;
+    if (!button.isConnected || !this.ready) return;
+    try {
+      const png = imagePngBlob(this.img);
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+      } catch (error) {
+        // a browser that takes only a finished picture, not one on its way
+        if (!error || error.name !== "TypeError") throw error;
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": await png })]);
+      }
+      if (this.closed) return;
+      clearTimeout(button._copyReset);
+      button.classList.add("done");
+      button.replaceChildren(copyIcon(true));
+      button.setAttribute("aria-label", "Copied");
+      button._copyReset = setTimeout(() => {
+        if (!button.isConnected) return;
+        button.classList.remove("done");
+        button.replaceChildren(copyIcon());
+        button.setAttribute("aria-label", "Copy image");
+      }, 1400);
+    } catch (error) {
+      // no check left over from an earlier copy beside the failure
+      clearTimeout(button._copyReset);
+      button.classList.remove("done");
+      button.replaceChildren(copyIcon());
+      button.setAttribute("aria-label", "Copy image");
+      toast("Could not copy the image" + (error && error.message ? " · " + error.message : ""), "bad");
+    }
   }
 
   /* A picture that failed to load still takes a press: beside nothing, it

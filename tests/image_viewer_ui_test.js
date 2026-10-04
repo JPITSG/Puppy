@@ -98,6 +98,7 @@ vm.runInContext([
   between("const el = ", "/* Close buttons"),
   between("function xIcon(size)", "function bellIcon(size, off)"),
   between("function plusIcon(size)", "/* the composer's session-tools trigger"),
+  between("function copyIcon(done = false)", "function attachmentFileIcon(size = 18)"),
   between("function attachmentFileIcon(size = 18)", "function sessionPinIcon("),
   between("const ATTACHMENT_PREVIEW_TYPES", "/* Resolve the configuration at the queue tail"),
   between("function apiPath(bid, path)", "async function api(bid, path"),
@@ -657,3 +658,82 @@ console.log("PASS: Forward reopens a fresh viewer on the picture last shown, a f
   assert.equal(empty.querySelector("pre").textContent, "(Empty)");
 }
 console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in the head that opens the viewer without folding the card, the sent image's chips under the caption, local and remote, named for the file read, an unknown id or type never a picture");
+
+/* ---- Copy: the picture onto the clipboard, offered only where a page may write one ---- */
+(async () => {
+  const insecure = api.openImageViewer([{url: "blob:p", name: "plain.png"}], 0);
+  assert.ok(!insecure.m.querySelector(".iv-copy"), "a plain-HTTP page offers no copy it cannot make");
+  insecure.dialog.close();
+
+  const writes = [], toasts = [], draws = [];
+  let refuse = null, promisesTaken = true;
+  class ClipboardItem {
+    constructor(items) {
+      if (!promisesTaken && Object.values(items).some(value => value && typeof value.then === "function"))
+        throw new TypeError("ClipboardItem takes no promise here");
+      this.items = items;
+    }
+  }
+  context.ClipboardItem = ClipboardItem;
+  context.navigator = {clipboard: {write: async items => {
+    if (refuse) throw refuse;
+    const entries = [];
+    for (const item of items) for (const [type, value] of Object.entries(item.items)) entries.push([type, await value]);
+    writes.push(entries);
+  }}};
+  context.toast = (text, tone) => toasts.push([text, tone]);
+  window.isSecureContext = true;
+  FakeElement.prototype.getContext = function () { return {drawImage: (img, x, y) => draws.push([img, x, y, this.width, this.height])}; };
+  FakeElement.prototype.toBlob = function (done, type) { done({type, width: this.width, height: this.height}); };
+  const settleCopy = () => new Promise(resolve => setImmediate(resolve));
+
+  const row = strip(["blob:a", "blob:b"]);
+  row.querySelectorAll(".attach-view")[0].onclick(new FakeEvent("click"));
+  const viewer = current();
+  layout(viewer);
+  const button = viewer.m.querySelector(".iv-bar .iv-copy");
+  assert.ok(button && button.getAttribute("aria-label") === "Copy image", "a secure page offers Copy");
+  const bar = [...viewer.bar.children].map(node => node.className.split(" ").find(name => name.startsWith("iv-")));
+  assert.deepEqual(bar, ["iv-out", "iv-level", "iv-in", "iv-sep", "iv-copy", "iv-download"],
+                   "beside the download, after the zoom");
+  // nothing to copy before the picture has loaded
+  button.onclick();
+  await settleCopy();
+  assert.equal(writes.length, 0);
+  load(viewer, 640, 480);
+  button.onclick();
+  await settleCopy(); await settleCopy();
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0][0][0], "image/png", "the one image type every clipboard takes");
+  assert.deepEqual([writes[0][0][1].type, writes[0][0][1].width, writes[0][0][1].height], ["image/png", 640, 480],
+                   "the picture at its own size, not as the viewer shows it");
+  assert.ok(draws[0][0] === viewer.img, "drawn from the picture already decoded");
+  assert.ok(button.classList.contains("done") && button.getAttribute("aria-label") === "Copied", "a moment's check");
+  advance(1500);
+  assert.ok(!button.classList.contains("done") && button.getAttribute("aria-label") === "Copy image");
+  // ctrl/cmd+C copies the picture; with text selected it is the browser's
+  let e = key(viewer, "c", {ctrlKey: true});
+  await settleCopy(); await settleCopy();
+  assert.ok(e.defaultPrevented && writes.length === 2, "ctrl+C");
+  window.getSelection = () => "a caption";
+  e = key(viewer, "c", {metaKey: true});
+  await settleCopy();
+  assert.ok(!e.defaultPrevented && writes.length === 2, "selected text keeps its own copy");
+  delete window.getSelection;
+  // a browser that takes only a finished picture is handed one
+  promisesTaken = false;
+  button.onclick();
+  await settleCopy(); await settleCopy(); await settleCopy();
+  assert.equal(writes.length, 3);
+  promisesTaken = true;
+  // a refusal says why, once, and leaves the button as it was
+  refuse = new Error("Document is not focused.");
+  button.onclick();
+  await settleCopy(); await settleCopy();
+  assert.deepEqual(toasts, [["Could not copy the image · Document is not focused.", "bad"]]);
+  assert.ok(!button.classList.contains("done"));
+  refuse = null;
+  viewer.dialog.close();
+  window.isSecureContext = false;
+  console.log("PASS: Copy puts the picture on the clipboard as PNG at its own size - offered only on a secure page, beside the download, from the press or ctrl/cmd+C, never over selected text - with a moment's check and a refusal said once");
+})().catch(error => { console.error(error); process.exit(1); });

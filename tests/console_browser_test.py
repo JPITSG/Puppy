@@ -1485,7 +1485,8 @@ async def image_viewer_checks(instance, capture=False):
     zooms about the pointer, a drag pans a zoomed picture and never leaves a
     gap at its edges, a double click zooms where it lands and back, the keys
     zoom, fit and page, the bar's download saves the picture shown under its
-    own name, and a magnified picture is drawn with square pixels. Escape, a
+    own name, its Copy puts it on the clipboard as PNG at its own size, and a
+    magnified picture is drawn with square pixels. Escape, a
     press beside the picture and Back close it at once while the picture
     flies home to its thumbnail, focus returns to the thumbnail that opened
     it, and Forward opens it again on the picture last shown. On a phone in
@@ -1682,6 +1683,19 @@ async def image_viewer_checks(instance, capture=False):
         assert data[:8] == b"\x89PNG\r\n\x1a\n" and \
             (int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")) == (360, 220), data[:24]
         assert await evaluate(instance, "!!imageViewerOpen && imageViewerOpen.index === 2"), "downloading keeps the viewer"
+        # a real press on Copy (this page is a secure one) puts the picture on the clipboard as PNG
+        await instance.call("Browser.grantPermissions", {"permissions": ["clipboardReadWrite", "clipboardSanitizedWrite"]})
+        copy = await evaluate(instance, """(() => { const b = imageViewerOpen.copyButton;
+            if (!b.isConnected) return null;
+            const r = b.getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()""")
+        assert copy, "a secure page offers Copy"
+        await click(copy["x"], copy["y"])
+        await until(instance, "imageViewerOpen.copyButton.classList.contains('done')")
+        pasted = await evaluate(instance, """(async () => { const [item] = await navigator.clipboard.read();
+            const bitmap = await createImageBitmap(await item.getType('image/png'));
+            return {types: [...item.types], width: bitmap.width, height: bitmap.height,
+                    label: imageViewerOpen.copyButton.getAttribute('aria-label')}; })()""")
+        assert pasted == {"types": ["image/png"], "width": 360, "height": 220, "label": "Copied"}, pasted
         for _ in range(2):
             await key("+", "Equal", 187, "+")
         await settle()
@@ -1823,7 +1837,7 @@ async def image_viewer_checks(instance, capture=False):
             delete window.viewerNode; delete window.viewerUrls; applyTheme('dark'); return true;
         })()""")
     print("PASS: sent images open from their thumbnails framed and centred, zoom about the wheel, pan without gaps, "
-          "double click, keys and download; Escape, Back, Forward and a press beside close or reopen with focus home; "
+          "double click, keys, download and copy; Escape, Back, Forward and a press beside close or reopen with focus home; "
           "phone taps, pinches, double taps, swipes and pulls in both themes; reduced motion opens in place", flush=True)
 
 

@@ -480,7 +480,10 @@ click or double tap, the bar's − and + buttons or the `+`, `-`, `0` (fit) and
 a zoomed picture to pan it. The side arrows, a swipe, PageUp/PageDown or the
 arrow keys step through the other images of the same message or prompt box;
 while a zoomed picture is wider than the window, the arrow keys pan it instead.
-The bar's download button saves the picture shown under its own name.
+The bar's download button saves the picture shown under its own name, and on a
+console served over HTTPS (or opened on the same machine) its copy button, or
+Ctrl/Cmd+C, puts the picture on the clipboard as a PNG; browsers allow that
+only on a secure page, so a plain-HTTP console shows no copy button.
 Escape, Back, the close button or a press beside the picture close it, and the
 picture flies back to its thumbnail when that is in view (with reduced motion
 it simply closes); Forward opens it again. On a touch screen
