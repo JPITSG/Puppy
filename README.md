@@ -647,7 +647,7 @@ does not reopen its tab. Once started, use the task's **Stop** control.
 
 Tasks need a Git repository; merging Main's newer changes into a task needs Git
 2.40 or newer on that backend. Limits: 64 tasks per session, 50,000 files or
-512 MiB per source snapshot, 16 MiB per review. Details and the exact
+512 MiB per source snapshot, 64 MiB per review. Details and the exact
 persistence contract are in [docs/session-tasks.md](docs/session-tasks.md).
 The session menu's **Enable tasks** switch hides or restores the task strip;
 disabling it requires removing that session's existing tasks first. **Show

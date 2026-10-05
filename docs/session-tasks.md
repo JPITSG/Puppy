@@ -179,7 +179,7 @@ It starts with Main's working files, including uncommitted changes and nonignore
 untracked files. Untracked ignored files/dependencies are omitted; root AGENTS.md and
 CLAUDE.md are retained. Submodules and absolute or outside-project symlinks are
 refused. Each source snapshot is bounded to 50,000 files / 512 MiB, reviews to
-16 MiB, and each session to 64 tasks. Main and other Puppy sessions working in the
+64 MiB, and each session to 64 tasks. Main and other Puppy sessions working in the
 source directory must be idle during refresh and apply. Other isolated tasks can
 continue running. External editors remain the user's responsibility; these
 working copies are not an OS security sandbox.

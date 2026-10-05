@@ -51,7 +51,7 @@ _operation_sessions = {}
 _busy_roots = set()
 _locks = {}
 _project_locks = {}
-MAX_PATCH = 16 * 1024 * 1024
+MAX_PATCH = 64 * 1024 * 1024
 # The most a task copy holds, whether copied from Main's working files or
 # checked out from its last commit.
 COPY_FILES = 50000
@@ -894,7 +894,8 @@ def _changes(session, value):
         _git(cwd, "add", "-A", env=env)
         patch = _git(cwd, "diff", "--cached", "--binary", "--no-ext-diff", value["base"], env=env)
         if len(patch) > MAX_PATCH:
-            raise TaskError("Task changes exceed the 16 MiB review limit; split the work into smaller tasks")
+            raise TaskError("Task changes exceed the {} MiB review limit; split the work into smaller tasks"
+                            .format(MAX_PATCH >> 20))
         tree = _git(cwd, "write-tree", env=env).decode().strip()
         files = _git(cwd, "diff", "--cached", "--name-status", "--no-ext-diff", value["base"], env=env).decode("utf-8", "replace")
     finally:
@@ -1685,7 +1686,8 @@ async def _auto_locked(parent_id, parent, sid, task, value, auto, root, resolve)
                                      sync=(value, tree, merged, conflicts, main))
         patch = await operations.to_thread(_git, task["cwd"], "diff", "--binary", "--no-ext-diff", main, merged)
         if len(patch) > MAX_PATCH:
-            raise TaskError("Task changes exceed the 16 MiB review limit; split the work into smaller tasks")
+            raise TaskError("Task changes exceed the {} MiB review limit; split the work into smaller tasks"
+                            .format(MAX_PATCH >> 20))
         if patch:
             await operations.to_thread(_git, root, "apply", "--check", "--binary", "-", data=patch)
         merged_with_main = True
