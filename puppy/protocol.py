@@ -61,6 +61,8 @@ SYSTEM_PROMPT_CAPABILITY = "system-prompt"
 # GET on an upload id returns the stored image, so a preview outlives the
 # blob URL held by the page.
 UPLOAD_PREVIEW_CAPABILITY = "upload-preview"
+# Recorded native image-view calls can preview their still-present local file.
+TOOL_IMAGE_FILES_CAPABILITY = "session-tool-image-files"
 # A headless node sends one best-effort ``node_stopping`` event to its update
 # and session WebSockets before graceful shutdown waits for/interrupts turns.
 # Full WebUI runtimes do not advertise this: only the separately managed
@@ -341,6 +343,7 @@ BASE_CAPABILITIES = (
     VNC_INSTANCES_CAPABILITY,
     VNC_CONNECT_CANCEL_CAPABILITY,
     UPLOAD_PREVIEW_CAPABILITY,
+    TOOL_IMAGE_FILES_CAPABILITY,
     ENGINE_AUTO_UPGRADE_CAPABILITY,
     ENGINE_DEFAULTS_CAPABILITY,
     TIMER_SETTINGS_CAPABILITY,

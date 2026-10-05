@@ -101,7 +101,7 @@ ROOT = private_root("tool-images-")
 os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
-from puppy import config, db, runner, uploads  # noqa: E402
+from puppy import config, db, protocol, runner, uploads  # noqa: E402
 from puppy.drivers import base, get_driver  # noqa: E402
 from puppy.web import build_app  # noqa: E402
 from backend.puppy_backend.app import build_app as backend_app  # noqa: E402
@@ -289,6 +289,7 @@ async def runtime_contract(factory):
                     assert response.status == 200, await response.text()
                     assert response.headers["Content-Type"] == kind
                     assert response.headers["X-Content-Type-Options"] == "nosniff"
+                    assert response.headers["Cache-Control"] == "private, no-store"
                     assert await response.read() == raw
                 # the composer's discard route never takes a tool's picture
                 async with client.delete(path, headers=headers) as response:
@@ -302,11 +303,78 @@ async def runtime_contract(factory):
                 assert response.status == 404
             async with client.get("/api/sessions/{}/upload/{}".format(sid, read["images"][0]["id"])) as response:
                 assert response.status == 401, "the bytes are the session's, behind its sign-in"
+            await native_image_contract(client, headers, sid)
+            # A cached tool picture is no longer available after its file goes.
+            target = uploads._validated_upload_file(sid, read["images"][0]["id"])
+            target.unlink()
+            for method in (client.get, client.head):
+                async with method("/api/sessions/{}/upload/{}?preview=1".format(
+                        sid, read["images"][0]["id"]), headers=headers) as response:
+                    assert response.status in (404, 409)
         finally:
             runner.drop_hub(sid)
             uploads.remove_session_storage(sid)
             db.delete_session(sid)
     print("PASS: " + factory.__module__ + " stores a turn's tool pictures, names them on the event and serves them back exactly")
+
+
+async def native_image_contract(client, headers, sid):
+    assert protocol.TOOL_IMAGE_FILES_CAPABILITY in protocol.execution_capabilities()
+    target = ROOT / "native image.png"
+    target.write_bytes(PNG)
+    driver = get_driver("codex")
+
+    def record(path, kind="imageView", failed=False):
+        actions = driver._item_completed({"type": kind, "id": "native-{}".format(time.time_ns()),
+                                          "path": path, "status": "failed" if failed else "completed"}, {})
+        events = [db.add_event(sid, act["kind"], act["data"]) for act in actions if act.get("a") == "event"]
+        assert events[-1]["kind"] == "tool_result" and "images" not in events[-1]["data"]
+        return "/api/sessions/{}/tool-image/{}".format(sid, events[-1]["seq"])
+
+    path = record(str(target))
+    for method in (client.get, client.head):
+        async with method(path, headers=headers) as response:
+            assert response.status == 200, await response.text()
+            assert response.headers["Content-Type"] == "image/png"
+            assert response.headers["Content-Length"] == str(len(PNG))
+            assert response.headers["Cache-Control"] == "private, no-store"
+            assert await response.read() == (PNG if method == client.get else b"")
+    async with client.get(path) as response:
+        assert response.status == 401
+    relative = record(target.name, "view_image")
+    async with client.get(relative, headers=headers) as response:
+        assert response.status == 200 and await response.read() == PNG
+    other = db.create_session("Other image fixture", "codex", str(ROOT), "", "", "", "default")
+    try:
+        async with client.get(path.replace("/{}/".format(sid), "/{}/".format(other)), headers=headers) as response:
+            assert response.status == 404, "event ids cannot reach another session's paths"
+    finally:
+        db.delete_session(other)
+    for refused in (record(str(target), failed=True), record(str(target), "readFile"),
+                    path.rsplit("/", 1)[0] + "/999999"):
+        async with client.get(refused, headers=headers) as response:
+            assert response.status == 404
+    with patch.object(base, "TOOL_IMAGE_MAX_BYTES", len(PNG) - 1):
+        async with client.get(path, headers=headers) as response:
+            assert response.status == 404, "file previews share the image byte bound"
+    target.write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+    async with client.get(path, headers=headers) as response:
+        assert response.status == 404, "a .png name never makes non-raster bytes an image"
+    target.unlink()
+    for method in (client.get, client.head):
+        async with method(path, headers=headers) as response:
+            assert response.status == 404
+    other_file = ROOT / "other-image.png"
+    other_file.write_bytes(PNG)
+    target.symlink_to(other_file)
+    async with client.get(path, headers=headers) as response:
+        assert response.status == 404, "a substituted symlink cannot change the served file"
+    target.unlink()
+    os.mkfifo(target)
+    async with client.get(path, headers=headers) as response:
+        assert response.status == 404, "a replaced FIFO cannot hang the preview worker"
+    target.unlink()
+    print("PASS: native imageView history previews its recorded file, private and bounded, gone on deletion or replacement")
 
 
 async def main():

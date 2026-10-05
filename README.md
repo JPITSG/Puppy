@@ -498,8 +498,18 @@ in Codex's MCP results (an image in an OpenCode tool update is read the same
 way). The backend keeps a copy with the session's files, so a folded tool card
 shows a small thumbnail beside its status and the opened card shows the picture
 under the result. Either one opens
-the viewer on that call's pictures, named for the file the call read. Pictures
-from turns before this release were never kept and still read as `[image]`.
+the viewer on that call's pictures, named for the file the call read. Native
+`imageView` / `view_image` calls also show their local PNG, JPEG, WebP or GIF,
+including older calls whose recorded path still exists on the backend; these
+previews read the original file instead of keeping a copy. Other older results
+without saved image bytes still read as `[image]`.
+
+Missing or unreadable images lose their clickable previews. The console checks
+visible tool cards and attachments every 30 seconds and checks again when opening
+the viewer, including when a browser still holds a cached image. A missing image
+is removed from both the tool card's thumbnail and its result's image controls;
+its filename and the tool's text remain. An open viewer disables the missing
+picture, and Forward cannot reopen a picture already known to be missing.
 
 Engines that keep working after answering are handled too: Claude Code's
 background commands, agents and monitors keep their turn alive until they end.

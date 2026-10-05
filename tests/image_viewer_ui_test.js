@@ -89,7 +89,8 @@ function modal(html, className = "", reopen = null) {
 }
 
 const context = vm.createContext({
-  document, window, modal, console, Math, Number, Promise,
+  document, window, modal, console, Math, Number, Promise, AbortController,
+  fetch: async () => ({status: 200}),
   setTimeout: setTimeoutFake, clearTimeout: clearTimeoutFake,
   requestAnimationFrame: fn => fn(),
   fmtBytes: bytes => bytes + " B",
@@ -109,7 +110,7 @@ vm.runInContext([
   between("function fillToolResultInto(card, d, endedAt", "/* The task's ending decides the mark"),
 ].join("\n"), context);
 const api = vm.runInContext(`({ attachmentChipNode, openImageViewer, openImageViewerFrom,
-  fillToolResultInto, toolImageItems, el,
+  fillToolResultInto, toolImageItems, el, checkImagePreviews, imagePreviewUnavailable,
   imageViewerFit, imageViewerRange, imageViewerClamp, imageViewerAround, imageViewerCover,
   imageViewerInset, imageViewerVelocity, IMAGE_VIEWER_MAX_SCALE, IMAGE_VIEWER_TAP_MS })`, context);
 const current = () => vm.runInContext("imageViewerOpen", context);
@@ -192,8 +193,11 @@ function load(viewer, width, height) {
 function strip(urls) {
   const row = document.createElement("div");
   row.className = "attach-strip sent";
-  for (const [n, url] of urls.entries())
-    row.appendChild(api.attachmentChipNode({name: "shot-" + (n + 1) + ".png", path: "/u/" + n, preview: true}, url));
+  for (const [n, url] of urls.entries()) {
+    const chip = api.attachmentChipNode({name: "shot-" + (n + 1) + ".png", path: "/u/" + n, preview: true}, url);
+    row.appendChild(chip);
+    chip.querySelector("img").onload();
+  }
   document.body.appendChild(row);
   return row;
 }
@@ -604,7 +608,7 @@ console.log("PASS: Forward reopens a fresh viewer on the picture last shown, a f
   assert.ok(thumb.nextSibling === head.querySelector(".t-state"), "just before the call's state");
   assert.equal(thumb.getAttribute("aria-label"), "View 10-crop.png", "named for the file the call read");
   const small = thumb.querySelector("img");
-  assert.equal(small.src, "/api/sessions/7/upload/" + ID);
+  assert.equal(small.src, "/api/sessions/7/upload/" + ID + "?preview=1");
   assert.equal(small.loading, "lazy", "a long history fetches only what is scrolled to");
   assert.ok(thumb.querySelector(".t-thumb-more") === null);
   const body = read.querySelector(".tool-body");
@@ -614,6 +618,8 @@ console.log("PASS: Forward reopens a fresh viewer on the picture last shown, a f
   assert.ok(chip && chip.src === small.src && chip.loading === "lazy", "and under the result the sent image's chip");
   // a press on the head's picture opens the viewer, never folds the card
   const press = new FakeEvent("click");
+  assert.ok(thumb.disabled, "not clickable until the image has loaded");
+  small.onload();
   thumb.onclick(press);
   assert.ok(press.propagationStopped, "the card's fold never sees it");
   assert.equal(read.folds(), 0);
@@ -623,6 +629,7 @@ console.log("PASS: Forward reopens a fresh viewer on the picture last shown, a f
   viewer.dialog.close();
   assert.ok(current() === null);
   // the result chip opens the same viewer on the card's pictures
+  chip.onload();
   strip.querySelector(".attach-view").onclick();
   assert.deepEqual(plain(current().items.map(item => item.name)), ["10-crop.png"]);
   current().dialog.close();
@@ -638,12 +645,19 @@ console.log("PASS: Forward reopens a fresh viewer on the picture last shown, a f
   const several = shot.querySelector(".t-thumb");
   assert.equal(several.getAttribute("aria-label"), "View 3 images");
   assert.equal(several.querySelector(".t-thumb-more").textContent, "+2");
-  assert.equal(several.querySelector("img").src, "/api/b/3/sessions/9/upload/" + ids[0], "asked of the backend that holds it");
+  assert.equal(several.querySelector("img").src, "/api/b/3/sessions/9/upload/" + ids[0] + "?preview=1", "asked of the backend that holds it");
+  several.querySelector("img").onload();
   several.onclick(new FakeEvent("click"));
   assert.deepEqual(plain(current().items.map(item => item.name)), ["image-1.png", "image-2.jpg", "image-3.webp"]);
   current().dialog.close();
   // a picture the node no longer has takes its head button with it
   several.querySelector("img").onerror();
+  assert.equal(shot.querySelector(".t-thumb").getAttribute("aria-label"), "View 2 images");
+  assert.equal(shot.querySelector(".t-thumb-more").textContent, "+1");
+  assert.equal(shot.querySelectorAll(".attach-view").length, 2, "both entry points lose the missing picture");
+  assert.equal(shot.querySelector(".t-thumb img").src, "/api/b/3/sessions/9/upload/" + ids[1] + "?preview=1");
+  shot.querySelector(".t-thumb img").onerror();
+  shot.querySelector(".t-thumb img").onerror();
   assert.ok(shot.querySelector(".t-thumb") === null);
 
   // only what the node stores is a picture: an id of its form, a raster type
@@ -661,6 +675,46 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
 
 /* ---- Copy: the picture onto the clipboard, offered only where a page may write one ---- */
 (async () => {
+  const native = api.el("div", "tool-card");
+  native.innerHTML = '<div class="tool-head"><span class="t-state"></span></div><div class="tool-body"></div>';
+  native._toolName = "imageView";
+  native._toolInput = {path: "/demo/screens/previous.png"};
+  document.body.appendChild(native);
+  box(native, 10, 10, 400, 60);
+  api.fillToolResultInto(native, {content: "(imageView completed)"}, 2, {bid: 0, sid: 7}, 42);
+  const thumb = native.querySelector(".t-thumb img");
+  assert.equal(thumb.src, "/api/sessions/7/tool-image/42", "history needs only its recorded result id");
+  assert.equal(native.querySelector("pre").textContent, "(imageView completed)", "the original result stays readable");
+  thumb.onload();
+  native.querySelector(".t-thumb").onclick(new FakeEvent("click"));
+  const shown = current(), historyEntry = dialogs[dialogs.length - 1];
+  layout(shown); load(shown, 400, 200);
+  const calls = [];
+  context.fetch = async (url, opts) => { calls.push([url, opts.method, opts.cache]); return {status: 503}; };
+  await api.checkImagePreviews();
+  assert.ok(native.querySelector(".t-thumb") && shown.ready, "an offline node does not prove deletion");
+  assert.deepEqual(calls, [[thumb.src, "HEAD", "no-store"]], "one request for the head, chip and viewer");
+  context.fetch = async () => ({status: 404});
+  await api.checkImagePreviews();
+  assert.ok(!native.querySelector(".t-thumb") && !native.querySelector(".attach-view"));
+  assert.ok(!shown.ready && !shown.downloadLink.hasAttribute("href"));
+  load(shown, 400, 200);
+  assert.ok(!shown.ready, "a late decoded image cannot revive a missing preview");
+  shown.dialog.close();
+  assert.equal(historyEntry.reopen(), null, "Forward does not revive the missing picture");
+  assert.equal(api.openImageViewer([{url: thumb.dataset.imagePreview, name: "previous.png"}]), null,
+    "a detached history factory without its old thumbnail also remembers the missing URL");
+  native.remove();
+  const local = api.attachmentChipNode({name: "sent.png"}, "blob:still-decoded", false,
+    {checkUrl: "/api/sessions/7/upload/1700000000001-b2c3d4e5f6?preview=1"});
+  document.body.appendChild(local);
+  box(local.querySelector("img"), 10, 10, 100, 80);
+  await api.checkImagePreviews();
+  assert.ok(!local.querySelector(".attach-view"), "a live blob cannot keep a deleted attachment clickable");
+  local.remove();
+  context.fetch = async () => ({status: 200});
+  console.log("PASS: native imageView history, shared availability checks, cached and blob previews removed on deletion, open viewer and Forward never revive missing images");
+
   const insecure = api.openImageViewer([{url: "blob:p", name: "plain.png"}], 0);
   assert.ok(!insecure.m.querySelector(".iv-copy"), "a plain-HTTP page offers no copy it cannot make");
   insecure.dialog.close();

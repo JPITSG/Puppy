@@ -114,6 +114,14 @@ still contain a value written before that release.
   the session's storage and its backups. Older events have no `images` and keep
   their `[image]` text. This additive field changes no database schema,
   snapshot format, capability or protocol version.
+- `session-tool-image-files` adds GET/HEAD
+  `/api/sessions/{sid}/tool-image/{seq}` for a successful recorded native
+  `imageView`, `image_view` or `view_image` result. Its matching call owns the
+  path; no caller-supplied path is accepted. The original file must still be a
+  readable, regular non-symlink raster image within the tool-image byte limit.
+  File and upload previews use `private, no-store`. Consoles check visible
+  previews periodically and on viewer opening, retiring missing images from
+  every entry point. No event, database or snapshot shape changes.
 - Session reordering requires both starting-order and pin-cohort compare tokens.
   `session-order-recency` adds durable `order_at` timestamps for merging the
   sidebar across backends below all pins, and an optional `expected_recency`

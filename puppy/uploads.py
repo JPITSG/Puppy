@@ -700,8 +700,75 @@ async def h_session_upload_preview(request: web.Request):
         "Content-Disposition": "inline",
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox",
-        # an upload id names immutable bytes, so a reload can reuse them
-        "Cache-Control": "private, max-age=86400, immutable",
+        # The bytes may have been removed since the last preview.
+        "Cache-Control": "private, no-store",
+    })
+
+
+def _tool_image_file(session_id: int, seq: int, head: bool = False):
+    """Resolve a successful image-view result through its recorded call.
+
+    The URL contains only event identity, never a client-supplied filesystem
+    path. This also works for history recorded before file previews existed.
+    """
+    session = db.get_session(session_id)
+    events = db.get_events(session_id, before_seq=seq + 1, limit=1)
+    if not session or not events or events[0]["seq"] != seq:
+        raise FileNotFoundError
+    result = events[0]
+    data = result["data"]
+    if result["kind"] != "tool_result" or not isinstance(data, dict) or \
+            data.get("is_error") or data.get("interrupted"):
+        raise FileNotFoundError
+    call_id = data.get("tool_use_id")
+    if not isinstance(call_id, str) or not call_id:
+        raise FileNotFoundError
+    row = db.query_one(
+        "SELECT payload FROM events WHERE session_id=? AND seq<? "
+        "AND kind='tool_use' AND instr(payload, ?) > 0 ORDER BY seq DESC LIMIT 1",
+        (session_id, seq, json.dumps(call_id)))
+    call = json.loads(row["payload"]) if row else {}
+    if not isinstance(call, dict) or call.get("tool_use_id") != call_id or \
+            call.get("tool") not in ("imageView", "image_view", "view_image"):
+        raise FileNotFoundError
+    values = call.get("input")
+    path = values.get("path") if isinstance(values, dict) else None
+    if not isinstance(path, str) or not path or "\x00" in path:
+        raise FileNotFoundError
+    target = Path(path)
+    if not target.is_absolute():
+        target = Path(session["cwd"]) / target
+    # Open once and serve these same bounded bytes: a replaced path cannot
+    # swap a checked raster for a different file during FileResponse's read.
+    from puppy.drivers.base import TOOL_IMAGE_MAX_BYTES
+    fd = os.open(str(target), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) |
+                 getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= TOOL_IMAGE_MAX_BYTES:
+            raise FileNotFoundError
+        raw = handle.read(16 if head else TOOL_IMAGE_MAX_BYTES + 1)
+    suffix = _image_suffix(raw)
+    if suffix is None or len(raw) > TOOL_IMAGE_MAX_BYTES:
+        raise FileNotFoundError
+    return raw, PREVIEW_CONTENT_TYPES[suffix], info.st_size if head else len(raw)
+
+
+async def h_session_tool_image(request: web.Request):
+    try:
+        raw, content_type, size = await asyncio.get_running_loop().run_in_executor(
+            None, _tool_image_file, int(request.match_info["sid"]),
+            int(request.match_info["seq"]), request.method == "HEAD")
+    except (OSError, ValueError, TypeError):
+        return web.json_response({"error": "tool image not available"}, status=404,
+                                 headers={"Cache-Control": "no-store"})
+    return web.Response(body=raw, headers={
+        "Content-Type": content_type,
+        "Content-Length": str(size),
+        "Content-Disposition": "inline",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, no-store",
     })
 
 
@@ -709,6 +776,8 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/uploads/settings", h_settings_get)
     app.router.add_patch("/api/uploads/settings", h_settings_patch)
     app.router.add_post("/api/sessions/{sid:\\d+}/upload", h_session_upload)
+    app.router.add_get("/api/sessions/{sid:\\d+}/tool-image/{seq:\\d+}",
+                       h_session_tool_image)
     app.router.add_get(
         "/api/sessions/{sid:\\d+}/upload/{upload_id:t?[0-9]{13}-[0-9a-f]{10}}",
         h_session_upload_preview)

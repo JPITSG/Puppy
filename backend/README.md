@@ -1246,7 +1246,20 @@ caller-supplied filename - an upload directory holds exactly one file. Older
 nodes omit the capability and their previews stay as named cards. The same route
 serves the pictures a tool gave the model, which the node stores beside the
 session's uploads under a `t`-prefixed id and names on the `tool_result` event's
-`images`; the discard route never accepts those ids.
+`images`; the discard route never accepts those ids. Preview responses use
+`Cache-Control: private, no-store`; GET and HEAD check the file's current
+availability so consoles can retire previews after deletion.
+
+The additive `session-tool-image-files` capability provides
+`GET /api/sessions/{sid}/tool-image/{seq}` (and HEAD). The sequence names a
+successful recorded tool result whose matching call is `imageView`, `image_view`
+or `view_image`. The backend resolves the path from that call, relative to the
+session directory when needed; the URL never takes a filesystem path. It serves
+only regular, non-symlink PNG/JPEG/WebP/GIF files, verified by their bytes and
+bounded by the same 20 MiB limit as returned tool images. These previews read
+the original file, including for old history, and disappear when it is removed
+or becomes unreadable. Work runs off the event loop; no copy or new durable
+record is created.
 
 Controllers stream remote uploads rather than buffering them and preserve TLS
 pinning, token authentication, redirect rejection, and the receiving node's

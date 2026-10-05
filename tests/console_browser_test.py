@@ -1569,6 +1569,13 @@ async def image_viewer_checks(instance, capture=False):
         assert abs(g["left"] - g["x"]) < 0.6 and abs(g["top"] - g["y"]) < 0.6, g
         assert abs(g["width"] - g["w"] * g["s"]) < 0.6, g
 
+    sid = await evaluate(instance, "demoView.tab.sid")
+    preview_ids = []
+    for name in ("desktop.png", "phone.png", "detail.png"):
+        folder = uploads._new_upload_directory(sid)
+        (folder / name).write_bytes(demo_png(1, 1, (99, 200, 186)))
+        preview_ids.append(folder.name)
+    await evaluate(instance, "window.viewerUploadIds = " + json.dumps(preview_ids))
     await evaluate(instance, r"""(async () => {
         const draw = (w, h, base, accent, label) => new Promise(resolve => {
             const c = document.createElement('canvas'); c.width = w; c.height = h;
@@ -1586,7 +1593,7 @@ async def image_viewer_checks(instance, capture=False):
                              await draw(900, 1950, '#281c46', '#9d7bff', 'Phone'),
                              await draw(360, 220, '#3c1e14', '#ffb64d', 'Detail')];
         const paths = ['desktop.png', 'phone.png', 'detail.png'].map((name, n) =>
-            '/home/mira/.puppy/uploads/1/179000000000' + n + '-a1b2c3d4e' + n + '/' + name);
+            '/home/mira/.puppy/uploads/' + demoView.tab.sid + '/' + viewerUploadIds[n] + '/' + name);
         paths.forEach((path, n) => demoView.composer.sentThumbs.set(path, viewerUrls[n]));
         window.viewerNode = demoView.buildEventNode({kind: 'user', data: {text: 'The current screens\n' +
             paths.map(path => ATTACH_IMAGE_PREFIX + path + ATTACH_IMAGE_SUFFIX).join('\n')}});
@@ -1926,7 +1933,7 @@ async def tool_image_checks(instance):
             href: imageViewerOpen.downloadLink.getAttribute('href'), download: imageViewerOpen.downloadLink.download,
             open: toolCard.classList.contains('open')})""")
         assert shown["name"] == "10-crop.png" and shown["meta"] == "640 × 360", shown
-        assert shown["href"].endswith("/api/sessions/%d/upload/%s" % (sid, stored[0]["id"])), shown
+        assert shown["href"].endswith("/api/sessions/%d/upload/%s?preview=1" % (sid, stored[0]["id"])), shown
         assert shown["download"] == "10-crop.png" and shown["open"] is False, ("the card stays folded", shown)
         await escape()
         assert await evaluate(instance, "document.activeElement === toolCard.querySelector('.t-thumb')")
@@ -1942,11 +1949,48 @@ async def tool_image_checks(instance):
         await until(instance, "!!imageViewerOpen && imageViewerOpen.ready && imageViewerOpen.name.textContent === '10-crop.png'")
         await escape()
         assert await evaluate(instance, "toolCard.classList.contains('open')")
+
+        # The native call has a path and no returned bytes, including already
+        # recorded history. Serve it through its result event on this node.
+        native_file = ROOT / "native-tool.png"
+        native_file.write_bytes(demo_png(480, 240, (99, 160, 186)))
+        use = db.add_event(sid, "tool_use", {"tool": "imageView", "tool_use_id": "native-shot",
+                                            "input": {"path": str(native_file)}})
+        result = db.add_event(sid, "tool_result", {"tool_use_id": "native-shot",
+                                                  "content": "(imageView completed)", "is_error": False})
+        await evaluate(instance, """(() => {
+            window.nativeCard = demoView.buildEventNode(%s);
+            toolShot.appendChild(nativeCard); demoView.buildEventNode(%s);
+            nativeCard.scrollIntoView({block: 'center'}); return true;
+        })()""" % (json.dumps(use), json.dumps(result)))
+        await until(instance, "nativeCard.querySelector('.t-thumb img').naturalWidth === 480 && "
+                              "!nativeCard.querySelector('.t-thumb').disabled")
+        await click("nativeCard.querySelector('.t-thumb')")
+        await until(instance, "imageViewerOpen?.ready && imageViewerOpen.name.textContent === 'native-tool.png'")
+        assert await evaluate(instance, "imageViewerOpen.width === 480 && imageViewerOpen.height === 240")
+        # Both the source file and an existing stored tool picture disappear
+        # without a reload. The open viewer and every thumbnail must agree.
+        native_file.unlink()
+        uploads._validated_upload_file(sid, stored[0]["id"]).unlink()
+        await evaluate(instance, "checkImagePreviews().then(() => true)")
+        await until(instance, "!nativeCard.querySelector('.t-thumb') && !nativeCard.querySelector('.attach-view') && "
+                              "imageViewerOpen.m.classList.contains('iv-failed')")
+        assert await evaluate(instance, "!imageViewerOpen.downloadLink.hasAttribute('href') && !imageViewerOpen.ready")
+        await evaluate(instance, "history.back(); true")
+        await until(instance, "!imageViewerOpen && !document.querySelector('.image-viewer')")
+        assert await evaluate(instance, """new Promise(resolve => {
+            window.addEventListener('popstate', () => requestAnimationFrame(() => requestAnimationFrame(() =>
+                resolve(!imageViewerOpen && !document.querySelector('.image-viewer')))), {once: true});
+            history.forward();
+        })"""), "Forward cannot revive a picture known to be missing"
+        await evaluate(instance, "toolCard.scrollIntoView({block: 'center'}); checkImagePreviews().then(() => true)")
+        await until(instance, "!toolCard.querySelector('.t-thumb') && !toolCard.querySelector('.attach-view')")
     finally:
         await evaluate(instance, """(() => { if (imageViewerOpen) imageViewerOpen.dialog.close();
             document.querySelectorAll('.iv-ghost').forEach(node => node.remove());
             if (window.toolShot) toolShot.remove(); delete window.toolShot; delete window.toolCard;
-            delete demoView.toolCards.toolu_shot; delete demoView.toolCards.toolu_text; return true; })()""")
+            delete demoView.toolCards.toolu_shot; delete demoView.toolCards.toolu_text;
+            delete demoView.toolCards['native-shot']; delete window.nativeCard; return true; })()""")
     print("PASS: a tool's picture opens in the image viewer from the folded card's head and from its result, "
           "named for the file read, the card never folded by it, its head never grown, focus home on Escape", flush=True)
 

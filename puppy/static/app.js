@@ -5468,7 +5468,7 @@ function uploadPreviewUrl(bid, storedPath) {
   const match = /\/uploads\/(\d+)\/(\d{13}-[0-9a-f]{10})\/[^/]+$/
     .exec(String(storedPath || ""));
   if (!match) return "";
-  return apiPath(bid, `sessions/${match[1]}/upload/${match[2]}`);
+  return apiPath(bid, `sessions/${match[1]}/upload/${match[2]}?preview=1`);
 }
 
 function backendSupportsScratch(bid) {
@@ -15016,7 +15016,8 @@ class Composer {
     for (const a of this.attachments) {
       // the local blob while this page still holds it, else the node's copy
       const chip = attachmentChipNode(a, a.preview
-        ? (a.url || uploadPreviewUrl(this.host.bid, a.path)) : "", a.uploading);
+        ? (a.url || uploadPreviewUrl(this.host.bid, a.path)) : "", a.uploading,
+        {checkUrl: a.path ? uploadPreviewUrl(this.host.bid, a.path) : ""});
       const x = el("button", "attach-x");
       x.type = "button";
       x.appendChild(xIcon(12));
@@ -15339,7 +15340,7 @@ function backgroundTaskUpdateNode(d) {
 /* A result belongs inside its call's card, folded away like every other
    card's body until the reader opens it. `endedAt` is the result event's own
    stamp, which the mark's hover measures the call to. */
-function fillToolResultInto(card, d, endedAt, source = null) {
+function fillToolResultInto(card, d, endedAt, source = null, resultSeq = 0) {
   card._toolEndedAt = Number(endedAt);
   toolStateInto(card.querySelector(".t-state"), true, d.is_error);
   card.classList.toggle("err", !!d.is_error);
@@ -15351,6 +15352,13 @@ function fillToolResultInto(card, d, endedAt, source = null) {
     questionMarkChosen(card._questions.list, card._questions.rows, d.content);
   body.appendChild(el("div", "tb-label", d.interrupted ? "interrupted" : d.is_error ? "error" : "result"));
   const images = source ? toolImageItems(source.bid, source.sid, d.images, card._toolInput) : [];
+  if (!images.length && source && !d.is_error && !d.interrupted && resultSeq > 0 &&
+      ["imageView", "image_view", "view_image"].includes(card._toolName) &&
+      typeof card._toolInput?.path === "string" && card._toolInput.path &&
+      (!source.bid || backendHasCapability(state.backends.find(b => b.id === source.bid), "session-tool-image-files"))) {
+    images.push({url: apiPath(source.bid, `sessions/${source.sid}/tool-image/${resultSeq}`),
+      name: baseName(card._toolInput.path), sizeText: "image"});
+  }
   /* The engine's text keeps an [image] line where each picture was; the
      pictures themselves stand in for those lines here. */
   const text = images.length
@@ -15380,7 +15388,7 @@ function toolImageItems(bid, sid, images, input) {
     : "";
   const own = list.length === 1 && path && /\.(png|jpe?g|webp|gif)$/i.test(path) ? baseName(path) : "";
   return list.map((image, index) => ({
-    url: apiPath(bid, `sessions/${sid}/upload/${image.id}`),
+    url: apiPath(bid, `sessions/${sid}/upload/${image.id}?preview=1`),
     name: own || `image${list.length > 1 ? "-" + (index + 1) : ""}${TOOL_IMAGE_EXTENSIONS[image.type]}`,
     size: Number(image.size) || 0,
   }));
@@ -15388,26 +15396,39 @@ function toolImageItems(bid, sid, images, input) {
 
 function toolImagesInto(card, body, images) {
   const strip = el("div", "attach-strip tool-images");
-  for (const item of images)
-    strip.appendChild(attachmentChipNode({ name: item.name, size: item.size }, item.url, false, { lazy: true }));
-  body.appendChild(strip);
   const head = card.querySelector(".tool-head");
-  if (!head || head.querySelector(".t-thumb")) return;
-  const view = el("button", "t-thumb");
-  view.type = "button";
-  view.setAttribute("aria-label", images.length === 1 ? `View ${images[0].name}` : `View ${images.length} images`);
-  const img = el("img", "t-thumb-img");
-  img.alt = images[0].name;
-  img.loading = "lazy";
-  img.onerror = () => view.remove();   // gone from the node: the result's own chip says so
-  img.src = images[0].url;
-  view.appendChild(img);
-  if (images.length > 1) view.appendChild(el("span", "t-thumb-more", `+${images.length - 1}`));
-  view.onclick = event => {
-    event.stopPropagation();   // a picture to look at, not the card's fold
-    openImageViewer(images.map((item, index) => ({ url: item.url, name: item.name, thumb: index ? null : img })), 0, img);
+  const refreshHead = () => {
+    if (!head) return;
+    const thumbs = [...strip.querySelectorAll(".attach-thumb")];
+    const previous = head.querySelector(".t-thumb"), oldImage = previous?.querySelector("img");
+    if (oldImage && !thumbs.some(img => img.dataset.imagePreview === oldImage.dataset.imagePreview))
+      oldImage._previewMissing = true;
+    previous?.remove();
+    if (!thumbs.length) return;
+    const first = thumbs[0], view = el("button", "t-thumb"), img = el("img", "t-thumb-img");
+    view.type = "button";
+    view.setAttribute("aria-label", thumbs.length === 1 ? `View ${first.alt}` : `View ${thumbs.length} images`);
+    img.alt = first.alt;
+    img.loading = "lazy";
+    bindImagePreview(img, first.dataset.imagePreview, view, () => {
+      first._previewUnavailable();
+    });
+    img.src = first.dataset.imagePreview;
+    view.appendChild(img);
+    if (thumbs.length > 1) view.appendChild(el("span", "t-thumb-more", `+${thumbs.length - 1}`));
+    view.onclick = event => {
+      event.stopPropagation();
+      if (view.disabled) return;
+      const items = [...strip.querySelectorAll(".attach-thumb")].map((thumb, index) =>
+        ({url: thumb.dataset.imagePreview, name: thumb.alt, thumb: index ? thumb : img}));
+      openImageViewer(items, 0, img);
+    };
+    head.insertBefore(view, head.querySelector(".t-state"));
   };
-  head.insertBefore(view, head.querySelector(".t-state"));
+  for (const item of images)
+    strip.appendChild(attachmentChipNode(item, item.url, false, {lazy: true, unavailable: refreshHead}));
+  body.appendChild(strip);
+  refreshHead();
 }
 
 /* The task's ending decides the mark, so the call took until that ending. */
@@ -15748,6 +15769,7 @@ function toolCardNode(data, completed = false) {
     body.appendChild(linkifyInto(el("pre"), displayValue(d.input)));
   }
   n._toolInput = d.input;
+  n._toolName = d.tool;
   head.onclick = () => n.classList.toggle("open");
   n.appendChild(head); n.appendChild(body);
   return n;
@@ -15811,7 +15833,7 @@ function parseAttachmentMarker(line) {
    here so the two presentations cannot drift apart. `url` is the preview to
    show; "" gives the named-file card, which is also what an image falls back
    to once its local preview is gone. */
-function attachmentChipNode(a, url, uploading = false, { lazy = false } = {}) {
+function attachmentChipNode(a, url, uploading = false, { lazy = false, unavailable = null, checkUrl = url } = {}) {
   const chip = el("span", "attach-chip");
   const asFile = () => {
     chip.className = "attach-chip file" + (uploading ? " uploading" : "");
@@ -15832,24 +15854,110 @@ function attachmentChipNode(a, url, uploading = false, { lazy = false } = {}) {
   const view = el("button", "attach-view");
   view.type = "button";
   view.setAttribute("aria-label", "View " + a.name);
-  view.onclick = () => openImageViewerFrom(view);
+  view.onclick = () => { if (!view.disabled) openImageViewerFrom(view); };
   const img = el("img", "attach-thumb");
   img.alt = a.name;
   /* A node too old to serve previews, or an upload since discarded, answers
      with an error rather than bytes: keep the remove control and fall back to
      the named card the composer already shows for a preview-less image. */
-  img.onerror = () => {
+  bindImagePreview(img, url, view, () => {
     const remove = chip.querySelector(".attach-x");
     chip.innerHTML = "";
     asFile();
     if (remove) chip.appendChild(remove);
-  };
+    if (unavailable) unavailable();
+  }, checkUrl);
   if (lazy) img.loading = "lazy";   // before src, or the load has already begun
   img.src = url;
   view.appendChild(img);
   chip.appendChild(view);
   if (uploading) chip.appendChild(el("span", "attach-state", "Uploading"));
   return chip;
+}
+
+/* A failed picture loses every entry point, including another thumbnail of
+   the same tool result and a viewer/history entry already holding it. Keep
+   no registry of transcript nodes: detached pages can be collected normally. */
+const IMAGE_PREVIEW_CHECK_MS = 30000;
+const imagePreviewMissing = new Set();  // bounded tombstones for detached history factories
+let imagePreviewTimer = null;
+let imagePreviewChecking = false;
+function bindImagePreview(img, url, button, unavailable, checkUrl = url) {
+  img.dataset.imagePreview = url;
+  img._previewCheckUrl = checkUrl;
+  button.disabled = !url.startsWith("blob:");
+  img._previewUnavailable = () => {
+    if (img._previewMissing) return;
+    img._previewMissing = true;
+    button.disabled = true;
+    unavailable();
+  };
+  img.onload = () => {
+    if (!img._previewMissing) { button.disabled = false; imagePreviewMissing.delete(url); }
+  };
+  img.onerror = () => { img._previewUnavailable(); imagePreviewUnavailable(url); };
+  if (checkUrl?.startsWith("/api/") && !imagePreviewTimer && !imagePreviewChecking)
+    imagePreviewTimer = setTimeout(checkImagePreviews, IMAGE_PREVIEW_CHECK_MS);
+}
+
+function imagePreviewUnavailable(url) {
+  imagePreviewMissing.delete(url);
+  imagePreviewMissing.add(url);
+  if (imagePreviewMissing.size > 256) imagePreviewMissing.delete(imagePreviewMissing.values().next().value);
+  for (const img of document.querySelectorAll("img[data-image-preview]"))
+    if (img.dataset.imagePreview === url) img._previewUnavailable?.();
+  const viewer = imageViewerOpen;
+  if (viewer) {
+    for (const item of viewer.items) if (item.url === url) item.missing = true;
+    if (viewer.items[viewer.index]?.url === url) viewer.failed();
+  }
+}
+
+async function checkImagePreviews() {
+  if (imagePreviewChecking) return;
+  clearTimeout(imagePreviewTimer);
+  imagePreviewTimer = null;
+  const nodes = [...document.querySelectorAll("img[data-image-preview]")];
+  if (!nodes.length && !imageViewerOpen) return;
+  const checks = new Map();
+  if (!document.hidden) for (const img of nodes) {
+    const url = img._previewCheckUrl, rect = (img.closest(".tool-card") || img).getBoundingClientRect();
+    if (!url || !url.startsWith("/api/") || img._previewMissing ||
+        !(rect.width && rect.height && rect.bottom > 0 && rect.top < window.innerHeight)) continue;
+    if (!checks.has(url)) checks.set(url, new Set());
+    checks.get(url).add(img.dataset.imagePreview);
+  }
+  const shown = imageViewerOpen?.items[imageViewerOpen.index];
+  const shownUrl = shown?.thumb?._previewCheckUrl || shown?.url;
+  if (!document.hidden && shownUrl?.startsWith("/api/") && !shown.missing) {
+    if (!checks.has(shownUrl)) checks.set(shownUrl, new Set());
+    checks.get(shownUrl).add(shown.url);
+  }
+  const queue = [...checks];
+  imagePreviewChecking = true;
+  try {
+    await Promise.all(Array.from({length: Math.min(4, queue.length)}, async () => {
+      while (queue.length) {
+        const [url, previews] = queue.shift();
+        await checkImagePreview(url, previews);
+      }
+    }));
+  } finally {
+    imagePreviewChecking = false;
+    imagePreviewTimer = setTimeout(checkImagePreviews, IMAGE_PREVIEW_CHECK_MS);
+  }
+}
+
+async function checkImagePreview(url, previews) {
+  if (!url?.startsWith("/api/")) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(url, {method: "HEAD", cache: "no-store", signal: controller.signal});
+    if ([404, 409, 410, 415].includes(response.status))
+      for (const preview of previews) imagePreviewUnavailable(preview);
+  } catch (_) { /* an outage is not evidence that the file was deleted */ }
+  finally { clearTimeout(timer); }
 }
 
 function splitAttachmentMarkers(text) {
@@ -16129,8 +16237,8 @@ class ImageViewer {
     const item = this.items[index];
     if (!item) return null;
     if (item.thumb && item.thumb.isConnected) return item.thumb;
-    return [...document.querySelectorAll(".attach-view .attach-thumb")]
-      .find(img => (img.currentSrc || img.src) === item.url) || null;
+    return [...document.querySelectorAll(".t-thumb-img, .attach-view .attach-thumb")]
+      .find(img => (img.dataset.imagePreview || img.currentSrc || img.src) === item.url) || null;
   }
 
   counter() {
@@ -16173,11 +16281,15 @@ class ImageViewer {
     const img = this.img;
     const settle = ok => {
       if (generation !== this.generation || this.closed) return;
-      if (ok && img.naturalWidth > 0) this.loaded(direction, thumb);
-      else this.failed();
+      if (item.missing || item.thumb?._previewMissing) this.failed();
+      else if (ok && img.naturalWidth > 0) this.loaded(direction, thumb);
+      else { this.failed(); imagePreviewUnavailable(item.url); }
     };
     img.onload = img.onerror = null;
     img.src = item.url;
+    // A decoded browser image can outlive its file even with no-store. Check
+    // the node when opening too, including previews backed by a live blob.
+    checkImagePreview(item.thumb?._previewCheckUrl || item.url, [item.url]);
     if (typeof img.decode === "function")
       img.decode().then(() => settle(true), () => settle(img.complete));
     else {
@@ -16200,6 +16312,7 @@ class ImageViewer {
     this.enable(this.outButton, false);
     this.enable(this.inButton, false);
     this.enable(this.level, false);
+    this.downloadLink.removeAttribute("href");
   }
 
   loaded(direction, thumb) {
@@ -16705,7 +16818,8 @@ class ImageViewer {
 /* Open the viewer on `items` ({url, name, thumb}) at `index`, flying from
    `thumb` when it is on the screen. */
 function openImageViewer(items, index = 0, thumb = null) {
-  const list = (items || []).filter(item => item && item.url);
+  const list = (items || []).filter(item => item && item.url && !item.missing &&
+    !item.thumb?._previewMissing && !imagePreviewMissing.has(item.url));
   if (!list.length) return null;
   const at = Math.max(0, list.indexOf(items[index]));
   return new ImageViewer(list, at).open(thumb || (list[at] && list[at].thumb));
@@ -16718,7 +16832,7 @@ function openImageViewerFrom(button) {
   const buttons = strip ? [...strip.querySelectorAll(".attach-view")] : [button];
   const items = buttons.map(node => {
     const img = node.querySelector(".attach-thumb");
-    return { url: img ? img.currentSrc || img.src : "", name: img ? img.alt : "", thumb: img };
+    return { url: img ? img.dataset.imagePreview || img.currentSrc || img.src : "", name: img ? img.alt : "", thumb: img };
   });
   return openImageViewer(items, Math.max(0, buttons.indexOf(button)));
 }
@@ -21010,7 +21124,7 @@ class SessionView {
                reload keeps its thumbnails rather than a row of named cards. */
             const chip = attachmentChipNode(a, a.preview
               ? (this.composer.sentPreview(a.path) || uploadPreviewUrl(this.tab.bid, a.path))
-              : "");
+              : "", false, {checkUrl: uploadPreviewUrl(this.tab.bid, a.path)});
             chip.setAttribute("aria-label", `${a.name} · ${a.path}`);
             strip.appendChild(chip);
           }
@@ -21056,7 +21170,7 @@ class SessionView {
           /* Paging back reunites the pair: the result this call was missing
              moves into it and stops standing alone. */
           for (const orphan of this.orphanResults.get(d.tool_use_id) || []) {
-            fillToolResultInto(n, orphan.data, orphan.ts, this.tab);
+            fillToolResultInto(n, orphan.data, orphan.ts, this.tab, orphan.seq);
             orphan.node.remove();
           }
           this.orphanResults.delete(d.tool_use_id);
@@ -21066,16 +21180,16 @@ class SessionView {
       }
       case "tool_result": {
         const card = d.tool_use_id && this.toolCards[d.tool_use_id];
-        if (card) { fillToolResultInto(card, d, ev.ts, this.tab); return null; }
+        if (card) { fillToolResultInto(card, d, ev.ts, this.tab, ev.seq); return null; }
         /* The call is outside this window - the newest page starts partway
            through a turn, or the reader jumped into history - so the result
            stands on its own until paging back brings its card in. It is still
            a result: folded away like any other, never opened for the reader. */
         const n = toolCardNode({tool: d.tool || "tool_result", is_error: d.is_error}, true);
-        fillToolResultInto(n, d, ev.ts, this.tab);
+        fillToolResultInto(n, d, ev.ts, this.tab, ev.seq);
         if (d.tool_use_id) {
           const waiting = this.orphanResults.get(d.tool_use_id) || [];
-          waiting.push({node: n, data: d, ts: ev.ts});
+          waiting.push({node: n, data: d, ts: ev.ts, seq: ev.seq});
           this.orphanResults.set(d.tool_use_id, waiting);
         }
         return n;

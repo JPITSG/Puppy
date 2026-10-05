@@ -218,6 +218,23 @@ function fixture() {
   await f.move(-1); await f.move(1);
   assert.equal(layers.length, 0, "Forward never revives a resolved transaction");
 
+  // A viewer's reopen factory can discover that every picture has gone.
+  // Skipping that layer must leave Back/Forward and the base page usable.
+  f = fixture(); let pictureExists = true, imageLayer = null;
+  function imageLayerOpen() {
+    if (!pictureExists) return null;
+    const release = f.history.layer(() => { imageLayer = null; release(); }, imageLayerOpen);
+    imageLayer = release;
+    return release;
+  }
+  imageLayerOpen(); await tick(); await f.move(-1);
+  pictureExists = false;
+  await f.move(1);
+  assert.equal(imageLayer, null);
+  assert.equal(f.history.layers.length, 0, "a missing picture has no resurrected modal layer");
+  await f.move(-1);
+  assert.equal(f.view.tab, "s:0:1"); assert.equal(f.errors, 0);
+
   f = fixture(); let cancelling = 0;
   const finish = f.history.layer(() => cancelling++);
   await tick(); await f.move(-1);

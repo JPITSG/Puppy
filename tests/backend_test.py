@@ -3694,7 +3694,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
                 assert await response.read() == png
                 assert response.headers["Content-Type"].startswith("image/png")
                 assert response.headers["X-Content-Type-Options"] == "nosniff"
-                assert "no-store" not in response.headers.get("Cache-Control", "")
+                assert response.headers.get("Cache-Control") == "private, no-store"
             # unauthenticated readers get nothing, and unknown ids are not found
             async with http.get(
                     url + f"/api/sessions/{normal['id']}/upload/{image_upload['upload_id']}",
