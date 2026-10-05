@@ -17040,18 +17040,21 @@ function diffLineClass(line) {
   if (line.startsWith("-")) return "del";
   return "";
 }
-/* Apply when done: two branches joining into one line that runs on down
-   into an arrowhead - a task's work merging into Main - on the Tasks
-   button's 12-grid and 1.1 stroke */
+/* Apply when done: two strands curving together into one line that runs
+   on into an arrowhead - a task's work merging into Main - drawn sideways,
+   along the tab's own line, with the Tasks button's 1.1 stroke. Its grid
+   is two units wider than the strip's 12 (`size` is the height), so the
+   merge and the head stand apart and the head reads smaller than the
+   strands it gathers, never as a second chevron */
 function applyWhenDoneIcon(size) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("viewBox", "0 0 12 12");
-  svg.setAttribute("width", size);
+  svg.setAttribute("viewBox", "0 0 14 12");
+  svg.setAttribute("width", size * 14 / 12);
   svg.setAttribute("height", size);
   svg.setAttribute("aria-hidden", "true");
   const p = document.createElementNS(NS, "path");
-  p.setAttribute("d", "M3 1.25v2.5c0 2 3 2.25 3 4.25v2.5 M9 1.25v2.5c0 2-3 2.25-3 4.25 M4 8.5l2 2 2-2");
+  p.setAttribute("d", "M1.25 2.75c3.25 0 3.5 3.25 6.5 3.25h5 M1.25 9.25c3.25 0 3.5-3.25 6.5-3.25 M10.5 3.75l2.25 2.25-2.25 2.25");
   p.setAttribute("stroke", "currentColor");
   p.setAttribute("stroke-width", "1.1");
   p.setAttribute("stroke-linecap", "round");
