@@ -255,10 +255,11 @@ wait while an apply runs. The one exception is Main's own agent waiting for a
 task through the task tools' `wait`: its engine is blocked on that very call,
 so Puppy may apply then, and the wait cannot return until the apply is over.
 A task whose turn fails or is stopped waits for a successful one; held
-messages wait for you. A task with the switch on shows a merge mark on its tab
-and reads **Resolving** during a conflict round, **Applying** once finished,
-or **Waiting** while Main is busy; the Tasks sheet carries the same line.
-Switching it off leaves the task as it is for an ordinary review.
+messages wait for you. A task with the switch on shows an arrow turning into
+Main (↳) on its tab and reads **Resolving** during a conflict round,
+**Applying** once finished, or **Waiting** while Main is busy; the Tasks sheet
+carries the same line. Switching it off leaves the task as it is for an
+ordinary review.
 
 ## Task tools for agents
 

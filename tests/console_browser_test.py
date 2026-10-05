@@ -3491,8 +3491,7 @@ async def task_tools_checks(instance, capture=False):
                                 label: mark.getAttribute('aria-label'),
                                 other: !!document.querySelector('.task-tab[data-sid="%d"] .t-auto'),
                                 within: box.right <= tabBox.right && box.left >= tabBox.left}; })()""" % (tid, other))
-                    # drawn sideways along the tab's line: two units wider than tall
-                    assert tab["size"] == [14, 12] and tab["svg"] and tab["order"] and tab["colour"], (where, tab)
+                    assert tab["size"] == [12, 12] and tab["svg"] and tab["order"] and tab["colour"], (where, tab)
                     assert tab["level"] <= 1 and tab["within"] and not tab["other"], (where, tab)
                     assert tab["label"] == "Applies to Main when done", (where, tab)
                     # a conflict round: the tab says so, and so does the sheet

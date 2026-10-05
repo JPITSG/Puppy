@@ -630,13 +630,13 @@ does not reopen its tab. Once started, use the task's **Stop** control.
   the same files one after another settle in turn. Tasks that apply cleanly go
   first, in the order they finished. A resolution that still holds unmerged
   files or Puppy's conflict markers is never applied, and nothing is written
-  into Main while any turn works in its project. The tab carries a merge mark
-  and reads **Resolving** during a conflict round, **Applying** once the task
-  has finished, or **Waiting** while Main is busy; the Tasks sheet says where
-  it stands. A task whose turn fails or is stopped waits
-  for a successful one; switching it off leaves the task for review, and after
-  eight rounds Puppy stops and says so in Main. Requires a backend advertising
-  `session-task-auto-apply`.
+  into Main while any turn works in its project. The tab carries an arrow
+  turning into Main (↳) and reads **Resolving** during a conflict round,
+  **Applying** once the task has finished, or **Waiting** while Main is busy;
+  the Tasks sheet says where it stands. A task whose turn fails or is stopped
+  waits for a successful one; switching it off leaves the task for review, and
+  after eight rounds Puppy stops and says so in Main. Requires a backend
+  advertising `session-task-auto-apply`.
 - Task starts, applied changes (by hand or automatically), conflict-resolution
   rounds and merges of Main into a task appear as labeled, left-aligned cards
   in Main’s or the task's transcript, matching background-task updates.
