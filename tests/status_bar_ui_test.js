@@ -43,7 +43,7 @@ const context = vm.createContext({
   titlePending: () => false, taskActivityTitle: () => "", promptStatusLabel: (text) => {
     const node = document.createElement("span"); node.textContent = text; return node;
   },
-  syncPromptSpinnerPhase() {}, wireTabDrag() {}, syncHorizontalOverflow() {},
+  syncPromptSpinnerPhase() {}, wireTabDrag() {}, syncHorizontalOverflow() {}, fitTabTitles() {},
   toast: (text, tone) => toasts.push([text, tone]),
   refreshGroup: bid => refreshed.push(bid),
   /* the real one begins exactly so: every workspace re-reads its tasks */

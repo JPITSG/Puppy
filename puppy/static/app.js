@@ -17184,6 +17184,56 @@ async function removeTask(bid, session) {
     renderSidebar();
   } catch (error) { if (!error.cancelled) toast(error.message, "bad"); }
 }
+/* text-overflow cuts a long name at the last glyph that leaves room for its
+   ellipsis, so the name's box runs on past its ink by up to a glyph and every
+   gap after it reads wider than the others. Size each cut name's box to its
+   ink instead (the tab is as wide as its content and gives the room back),
+   and take back the empty side room the ellipsis glyph carries after its last
+   dot. Idempotent (one pass clears the last fit, the reads follow, the writes
+   come last), and a strip with no layout yet - a workspace not on the screen -
+   waits for its next call. */
+function fitTabTitles(strip) {
+  if (!strip || typeof document.createRange !== "function") return;
+  const titles = [...strip.querySelectorAll(".task-tab .t-title")];
+  for (const title of titles) { title.style.width = ""; title.style.marginInlineEnd = ""; }
+  const fits = [];
+  let ellipsis = null, bearing = 0;
+  for (const title of titles) {
+    const room = title.getBoundingClientRect().width;
+    const text = title.firstChild;
+    if (!room || !text || text.nodeType !== 3 || title.scrollWidth <= Math.ceil(room)) continue;
+    if (ellipsis === null) {
+      // the glyph, measured in the strip's own font
+      const probe = el("span", "t-title", "\u2026");
+      probe.style.cssText = "position:absolute;visibility:hidden;width:auto;max-width:none;flex:none";
+      title.parentNode.appendChild(probe);
+      ellipsis = probe.getBoundingClientRect().width;
+      probe.remove();
+      // advance less ink, measured at a size where rounding is not a pixel
+      const style = getComputedStyle(title), ctx = document.createElement("canvas").getContext("2d");
+      ctx.font = `${style.fontStyle} ${style.fontWeight} 200px ${style.fontFamily}`;
+      const glyph = ctx.measureText("\u2026");
+      bearing = Math.max(0, (glyph.width - glyph.actualBoundingBoxRight) / 200 * parseFloat(style.fontSize)) || 0;
+    }
+    // the longest prefix that still leaves room for the ellipsis
+    const range = document.createRange();
+    let low = 0, high = text.length;
+    while (low < high) {
+      const mid = (low + high + 1) >> 1;
+      range.setStart(text, 0);
+      range.setEnd(text, mid);
+      if (range.getBoundingClientRect().width + ellipsis <= room) low = mid; else high = mid - 1;
+    }
+    range.setStart(text, 0);
+    range.setEnd(text, low);
+    // half a pixel over, so rounding never drops the glyph this fit was measured for
+    fits.push([title, range.getBoundingClientRect().width + ellipsis + .5]);
+  }
+  for (const [title, width] of fits) {
+    title.style.width = width + "px";
+    title.style.marginInlineEnd = -bearing + "px";
+  }
+}
 class SessionWorkspaceView {
   constructor(tab) {
     this.tab = tab;
@@ -17572,12 +17622,13 @@ class SessionWorkspaceView {
       const selected = this.strip.querySelector('[aria-selected="true"]');
       if (selected) selected.focus({ preventScroll: true });
     }
+    fitTabTitles(this.strip);
     syncHorizontalOverflow(this.strip);
     this.save();
   }
-  onShow(focus = true) { this.refreshTasks(); this.activeView().onShow(focus); }
+  onShow(focus = true) { this.refreshTasks(); fitTabTitles(this.strip); this.activeView().onShow(focus); }
   onVisibility(visible) {
-    if (visible) this.refreshTasks();
+    if (visible) { this.refreshTasks(); fitTabTitles(this.strip); }
     else for (const view of this.taskViews.values()) view.onVisibility(false);
   }
   captureScroll() { return [...this.taskViews].map(([sid, view]) => [sid, view.captureScroll()]); }

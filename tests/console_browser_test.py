@@ -3434,6 +3434,226 @@ async def task_strip_verbs_checks(instance):
     print("PASS: the task strip's Review and bin stand between Tasks and + for the selected task only, both greyed while it works with the bin keeping its place and taking no tone, glyphs centred on the strip's box, the bin red under the pointer, real clicks opening the review sheet and the named Remove task confirm, Cancel keeping everything", flush=True)
 
 
+async def task_tab_spacing_checks(instance, explore=False):
+    """A task tab's items stand an equal distance apart, measured on their ink
+    and not on their boxes. The tab is screenshotted at twice the pixels, and
+    in the page every item's own pixels - the dot or spinner, the name, the
+    apply mark, the state words, the close cross - are found by what differs
+    from the tab's face on the same row, so the empty room inside an item (the
+    cross's 18px button around 6.5px of cross, the mark's margin inside its 12
+    box, a name's room after its ellipsis) counts as the gap it looks like.
+    Checked on a desktop and a phone in both themes, for a short name and one
+    cut by its ellipsis, with the apply mark, without it, and in the finished
+    state: every gap within two and a half pixels of the others (the letters'
+    own side room is about a pixel, the old spread was six) and all of them tighter
+    than the eleven pixels the shortest used to be, the cross as far from the
+    tab's right edge as the dot is from its left, a cut name handing the room
+    it did not need back to the tab. The state's animated dots keep all three
+    in layout, so the tab never changes width, and the third hangs a dot into
+    the gap before the cross: that gap is the equal one while two dots show,
+    a dot wider while one does and a dot narrower while all three do; a strip
+    first drawn while its workspace was hidden is fitted when it is shown.
+    The worker is held still so the demo copies are never touched."""
+    workspace = "state.views['s:0:1']"
+    tid = next(s["id"] for s in db.list_sessions() if s["name"] == "Card spacing")
+    other = next(s["id"] for s in db.list_sessions() if s["name"] == "Phone navigation")
+    hub = runner.hub(tid)
+    record = session_tasks.record(tid)
+    armed = {"format": 1, "armed_at": time.time(), "rounds": 0, "resolving": False}
+    SHORT, LONG = "Fix lint", "Polish Android App Alignment and UI"
+    FIRST = ".prompt-status-label::after{animation:none!important;clip-path:inset(0 66.6667% 0 0)!important}"
+    MIDDLE = ".prompt-status-label::after{animation:none!important;clip-path:inset(0 33.3333% 0 0)!important}"
+    FULL = ".prompt-status-label::after{animation:none!important;clip-path:none!important}"
+    await evaluate(instance, """(() => {
+        // transitions off, the strip's edge fade off (it tints a tab at the strip's end)
+        const style = document.createElement('style'); style.id = 'tabInkFreeze';
+        style.textContent = '.task-tab,.task-tab *{transition:none!important}' +
+            '.tab-scroll,.tabs,.task-tabbar{-webkit-mask-image:none!important;mask-image:none!important}';
+        document.head.appendChild(style);
+        const dots = document.createElement('style'); dots.id = 'tabInkDots'; document.head.appendChild(dots);
+        window.tabScan = async (data, spec) => {
+            // the image is a pixel-aligned crop: k device pixels to a CSS pixel, the tab
+            // standing (ox, oy) CSS pixels inside it
+            const img = new Image(); img.src = 'data:image/png;base64,' + data; await img.decode();
+            const canvas = document.createElement('canvas'); canvas.width = img.width; canvas.height = img.height;
+            const ctx = canvas.getContext('2d', {willReadFrequently: true}); ctx.drawImage(img, 0, 0);
+            const k = spec.k, ox = spec.ox, width = img.width;
+            const px = ctx.getImageData(0, 0, img.width, img.height).data;
+            const y0 = Math.floor((spec.oy + spec.rows[0]) * k), y1 = Math.ceil((spec.oy + spec.rows[1]) * k);
+            const ref = Math.round((ox + spec.ref) * k);
+            const ink = x => {
+                for (let y = y0; y < y1; y++) {
+                    const i = (y * width + x) * 4, j = (y * width + ref) * 4;
+                    if (Math.abs(px[i] - px[j]) + Math.abs(px[i + 1] - px[j + 1]) + Math.abs(px[i + 2] - px[j + 2]) > spec.threshold)
+                        return true;
+                }
+                return false;
+            };
+            // runs of inked columns, left to right; the items are told apart by the widest
+            // gaps between them - a letter space is narrower than the gap between two items
+            const runs = [];
+            let start = null;
+            for (let x = Math.floor((ox + spec.span[0]) * k); x < Math.ceil((ox + spec.span[1]) * k); x++) {
+                if (ink(x)) { if (start === null) start = x; }
+                else if (start !== null) { runs.push([start / k - ox, x / k - ox]); start = null; }
+            }
+            if (start !== null) runs.push([start / k - ox, Math.ceil((ox + spec.span[1]) * k) / k - ox]);
+            const gaps = runs.slice(1).map((run, i) => [run[0] - runs[i][1], i]);
+            const cuts = gaps.sort((a, b) => b[0] - a[0]).slice(0, spec.count - 1).map(gap => gap[1]).sort((a, b) => a - b);
+            const clusters = [];
+            let from = 0;
+            for (const cut of [...cuts, runs.length - 1]) {
+                clusters.push(from > cut || !runs.length ? [null, null] : [runs[from][0], runs[cut][1]]);
+                from = cut + 1;
+            }
+            return clusters;
+        };
+        return true;
+    })()""")
+
+    async def dots(css):
+        await evaluate(instance, "document.getElementById('tabInkDots').textContent = %s; true" % json.dumps(css))
+
+    async def measure(label):
+        """Every item's ink extent, relative to the tab's left edge."""
+        await evaluate(instance, """document.querySelector('.task-tab[data-sid="%d"]')
+            .scrollIntoView({inline: 'center', block: 'nearest'}); true""" % tid)
+        await asyncio.sleep(.2)
+        box = await evaluate(instance, """(() => {
+            const tab = document.querySelector('.task-tab[data-sid="%d"]');
+            const t = tab.getBoundingClientRect(), title = tab.querySelector('.t-title');
+            const items = [...tab.children].map(node => {
+                const r = node.getBoundingClientRect();
+                return {name: node.className.split(' ')[0], left: r.left - t.left, right: r.right - t.left};
+            });
+            // a pixel-aligned crop with room around the tab, so a fractional width
+            // or position never stretches or shifts what is read from it
+            const clip = {x: Math.floor(t.x) - 2, y: Math.floor(t.y) - 2,
+                          width: Math.ceil(t.width) + 4, height: Math.ceil(t.height) + 4, scale: 1};
+            return {x: t.x, y: t.y, width: t.width, height: t.height, items, clip,
+                    ox: t.x - clip.x, oy: t.y - clip.y, k: window.devicePixelRatio,
+                    cut: title.scrollWidth > Math.ceil(title.getBoundingClientRect().width)};
+        })()""" % tid)
+        shot = await instance.call("Page.captureScreenshot", {"format": "png", "clip": box["clip"]},
+                                   session=instance.page_session)
+        spec = {"k": box["k"], "ox": box["ox"], "oy": box["oy"], "rows": [9, box["height"] - 3], "ref": 4,
+                "threshold": 48, "span": [2, box["width"] - 2], "count": len(box["items"])}
+        ink = await evaluate(instance, "tabScan(%s, %s)" % (json.dumps(shot["data"]), json.dumps(spec)))
+        rows = [(item["name"], first, last) for item, (first, last) in zip(box["items"], ink)]
+        assert all(first is not None for _name, first, _last in rows), (label, rows)
+        gaps = [round(rows[i + 1][1] - rows[i][2], 2) for i in range(len(rows) - 1)]
+        edges = [round(rows[0][1], 2), round(box["width"] - rows[-1][2], 2)]
+        row = {"label": label, "width": round(box["width"], 2), "cut": box["cut"],
+               "names": [name for name, _first, _last in rows], "ink": rows, "gaps": gaps, "edges": edges}
+        if explore:
+            print(label, "| width", row["width"], "| cut", row["cut"], "| edges", edges, "| gaps", gaps,
+                  "|", " ".join("{}[{:.1f}..{:.1f}]".format(n, a, b) for n, a, b in rows),
+                  "| boxes", " ".join("{}[{:.1f}..{:.1f}]".format(i["name"], i["left"], i["right"]) for i in box["items"]), flush=True)
+        return row
+
+    def check(row, cut):
+        gaps, edges, label = row["gaps"], row["edges"], row["label"]
+        assert row["names"][0] == "t-dot" and row["names"][-1] == "t-close", row
+        assert max(gaps) - min(gaps) <= 2.5, ("the gaps are not equal", label, gaps)
+        assert 6.5 <= min(gaps) and max(gaps) <= 10.0, ("the gaps are not the tighter 8-9px", label, gaps)
+        assert abs(edges[0] - edges[1]) <= 1.5 and all(9 <= edge <= 12 for edge in edges), \
+            ("the cross is not as far from the right edge as the dot is from the left", label, edges)
+        assert row["cut"] == cut, ("the name should%s be cut" % ("" if cut else " not"), label)
+        if cut:
+            assert row["width"] < 199, ("a cut name should hand its spare room back to the tab", label, row["width"])
+
+    async def put(name, armed_on, review):
+        db.touch_session(tid, name=name)
+        if armed_on:
+            session_tasks._save_auto(tid, dict(armed, rounds=0, resolving=False))
+        else:
+            db.meta_del(session_tasks.AUTO_PREFIX + str(tid))
+        if review:
+            hub.status = "idle"
+            db.touch_session(tid, status="idle")
+            session_tasks._save(tid, dict(record, outcome="ok", completed_at=time.time(), result_seq=5))
+        else:
+            hub.status = "running"
+            db.touch_session(tid, status="running")
+            session_tasks._save(tid, dict(record))
+        runner.broadcast_sessions()
+        await until(instance, "document.querySelector('.task-tab[data-sid=\"%d\"] .t-title')?.textContent === %s"
+                    % (tid, json.dumps(name)))
+        await until(instance, "!!document.querySelector('.task-tab[data-sid=\"%d\"] .t-state')" % tid)
+        await asyncio.sleep(.3)
+
+    async def open_tabs(theme):
+        await evaluate(instance, "applyTheme(%s); closeDrawer && closeDrawer(); activateTab('s:0:1'); "
+                       "%s.openTask(%d); %s.openTask(%d); %s.select(%d); true"
+                       % (json.dumps(theme), workspace, other, workspace, tid, workspace, tid))
+
+    results = []
+    with patch.object(session_tasks, "_auto_pass", AsyncMock()):
+        try:
+            await dots(MIDDLE)
+            for width, height, mobile, scale in ((1440, 900, False, 2), (390, 844, True, 2)):
+                await instance.call("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile},
+                    session=instance.page_session)
+                for theme in ("dark", "light"):
+                    await open_tabs(theme)
+                    for name, cut in ((SHORT, False), (LONG, True)):
+                        for armed_on, review in ((True, False), (False, False), (False, True)):
+                            await put(name, armed_on, review)
+                            state = "finished" if review else ("running+mark" if armed_on else "running")
+                            row = await measure("{} {} {} {}".format(width, theme, "long" if cut else "short", state))
+                            check(row, cut)
+                            results.append(row)
+            # the animated dots: the tab never changes width, and the gap before the
+            # cross is wider by at most the dots that are not showing yet
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": 1440, "height": 900, "deviceScaleFactor": 2, "mobile": False}, session=instance.page_session)
+            await open_tabs("dark")
+            await put(LONG, True, False)
+            middle = await measure("dots two")
+            await dots(FIRST)
+            first = await measure("dots one")
+            await dots(FULL)
+            full = await measure("dots three")
+            await dots(MIDDLE)
+            assert first["width"] == middle["width"] == full["width"], \
+                ("the dots moved the cross", first["width"], middle["width"], full["width"])
+            # a period is about 2.7px: one dot wider with one showing, one narrower with three
+            assert 1.5 <= first["gaps"][-1] - middle["gaps"][-1] <= 4.5, (middle["gaps"], first["gaps"])
+            assert 1.5 <= middle["gaps"][-1] - full["gaps"][-1] <= 4.5, (middle["gaps"], full["gaps"])
+            # the spinner turns, so the dot's own edge moves by a half pixel between frames
+            assert all(max(a, b, c) - min(a, b, c) <= 1.0 for a, b, c in
+                       zip(first["gaps"][:-1], middle["gaps"][:-1], full["gaps"][:-1])), \
+                ("the dots moved something besides the cross's gap", first["gaps"], middle["gaps"], full["gaps"])
+            # a strip first drawn while its workspace was hidden is fitted when it is shown
+            await put(SHORT, True, False)
+            await evaluate(instance, "openSettingsTab(null); true")
+            await until(instance, "getComputedStyle(%s.root).display === 'none'" % workspace)
+            await put(LONG, True, False)
+            hidden = await evaluate(instance, "document.querySelector('.task-tab[data-sid=\"%d\"] .t-title').style.width" % tid)
+            assert hidden == "", ("a hidden strip has no layout to fit", hidden)
+            await evaluate(instance, "closeTab('settings'); activateTab('s:0:1'); true")
+            await until(instance, "document.querySelector('.task-tab[data-sid=\"%d\"] .t-title').style.width !== ''" % tid)
+            shown = await measure("shown after hidden")
+            check(shown, True)
+        finally:
+            db.meta_del(session_tasks.AUTO_PREFIX + str(tid))
+            hub.status = "running"
+            db.touch_session(tid, status="running", name="Card spacing")
+            session_tasks._save(tid, dict(record))
+            runner.broadcast_sessions()
+            await evaluate(instance, "document.getElementById('tabInkFreeze')?.remove(); "
+                           "document.getElementById('tabInkDots')?.remove(); delete window.tabScan; "
+                           "closeTab('settings'); activateTab('s:0:1'); applyTheme('dark'); true")
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    print("PASS: a task tab's dot, name, apply mark, state and cross stand an equal 8-9px apart on their ink "
+          "(the cross as far from the right edge as the dot from the left, a cut name handing its room back, "
+          "the animated dots never moving the cross, a strip drawn while hidden fitted when shown) on a desktop "
+          "and a phone in both themes", flush=True)
+    return results
+
+
 async def task_tools_checks(instance, capture=False):
     """Apply to Main when done in real layout, on a desktop and a phone in
     both themes: a task set to apply carries its drawn mark between its name
@@ -8123,6 +8343,9 @@ async def main(args):
             if args.task_tools_only:
                 await task_tools_checks(instances[0], args.screenshots)
                 return
+            if args.task_tab_spacing_only:
+                await task_tab_spacing_checks(instances[0], explore=True)
+                return
             if args.token_usage_only:
                 await token_usage_checks(instances[0], args.screenshots)
                 return
@@ -8159,6 +8382,7 @@ async def main(args):
             await image_viewer_checks(instances[0], args.screenshots)
             await tool_image_checks(instances[0])
             await task_tools_checks(instances[0])
+            await task_tab_spacing_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])
@@ -8190,6 +8414,7 @@ if __name__ == "__main__":
     parser.add_argument("--tool-clock-only", action="store_true")
     parser.add_argument("--task-refresh-only", action="store_true")
     parser.add_argument("--task-tools-only", action="store_true")
+    parser.add_argument("--task-tab-spacing-only", action="store_true")
     parser.add_argument("--token-usage-only", action="store_true")
     parser.add_argument("--question-scroll-only", action="store_true")
     parser.add_argument("--image-viewer-only", action="store_true")

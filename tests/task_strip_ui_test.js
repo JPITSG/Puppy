@@ -28,6 +28,7 @@ const BID = 3;
 let sessions = [];
 let main = { id: 1, name: "Demo project", status: "idle", engine: "codex", tasks_enabled: true };
 const storage = new Map();
+const fits = [];          // every fitTabTitles call: the strip it was asked to fit
 const removals = [];      // every removeTask call: [bid, session]
 const reviews = [];       // every modalReviewTask call: [workspace, session]
 let settle = null;        // resolves the removal in flight
@@ -39,7 +40,7 @@ const context = vm.createContext({
   sessionsFor: () => sessions,
   findSessionMeta: (bid, sid) => sid === 1 ? main : sessions.find(session => session.id === sid),
   navigationRemember() {}, navigationChanged() {},
-  wireTabbar() {}, wireTabDrag() {}, syncHorizontalOverflow() {}, syncPromptSpinnerPhase() {},
+  wireTabbar() {}, wireTabDrag() {}, syncHorizontalOverflow() {}, fitTabTitles: strip => { fits.push(strip); }, syncPromptSpinnerPhase() {},
   titlePending: () => false,
   tasksIcon: () => el("svg", "tasks-icon"), plusIcon: () => el("svg", "plus-icon"),
   xIcon: () => el("svg", "x-icon"), trashIcon: () => el("svg", "trash-icon"), reviewIcon: () => el("svg", "review-icon"),
@@ -296,5 +297,21 @@ workspace.refreshTasks();
     "Phone navigation": "" });
   assert.ok(workspace.overview.querySelector(".task-card-auto").classList.contains("help"), "the help voice");
 
-  console.log("PASS: the task strip's Review and bin between Tasks and +, shown for the selected task and never for Main or an unnamed selection, Review greyed exactly as the menu's row and the bin greyed for a working or queued task, both named like the tab's close mark, one press one sheet or one request, focus handed to the selected tab when a verb greys or goes, and the Tasks sheet's Remove on the bin's rule; a task set to apply when done carries its mark and its card's line");
+  /* a name cut by its ellipsis is sized to its ink once the tabs are drawn, and again whenever the
+     workspace comes onto the screen - a strip drawn while hidden had no layout to fit */
+  {
+    const mine = () => fits.filter(strip => strip === workspace.strip).length;
+    assert.ok(mine() > 0, "every render fits its own strip");
+    let before = mine();
+    workspace.onShow(false);
+    assert.equal(mine(), before + 1, "shown: fitted once more");
+    before = mine();
+    workspace.onVisibility(true);
+    assert.equal(mine(), before + 1, "visible again: fitted once more");
+    before = mine();
+    workspace.onVisibility(false);
+    assert.equal(mine(), before, "hidden: nothing to fit");
+  }
+
+  console.log("PASS: the task strip's Review and bin between Tasks and +, shown for the selected task and never for Main or an unnamed selection, Review greyed exactly as the menu's row and the bin greyed for a working or queued task, both named like the tab's close mark, one press one sheet or one request, focus handed to the selected tab when a verb greys or goes, and the Tasks sheet's Remove on the bin's rule; a task set to apply when done carries its mark and its card's line; the tab names are fitted after a render and on show");
 })().catch(error => { console.error(error); process.exit(1); });

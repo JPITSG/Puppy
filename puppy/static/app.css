@@ -3664,7 +3664,27 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-tabbar{min-height:36px;padding:6px 10px 0 8px;z-index:1}
 /* Keep the same face when the shared drag card is attached to body. */
 /* Phones retain the same label space; the strip scrolls to reach more tasks. */
-.tab.task-tab{font-size:var(--fs-sm);padding:5px var(--tab-space);max-width:200px}
+/* A task tab's items - the dot, the name, the apply mark, the state words, the
+   close cross - stand one --tab-gap apart measured on their drawn ink, so the
+   gaps read as equal. The flex gap is box to box and every box holds empty room
+   of its own, which the margins below take back: the cross is 6.5px of drawing
+   in an 18px button ((18 - 6.5) / 2 each side), the mark's arrow starts 1.7
+   and stops 1.45 inside its 12 box (its path less its stroke). The cross's
+   room is taken on both sides, so the ink ends as far from the tab's right edge
+   as the dot starts from its left. A name cut short by its ellipsis is sized to
+   its ink by fitTabTitles. What is left is the side room of the letters
+   themselves, about a pixel. */
+.tab.task-tab{
+  --tab-gap:8px;
+  gap:var(--tab-gap);font-size:var(--fs-sm);padding:5px var(--tab-space);max-width:200px;
+}
+.task-tab .t-close{margin-inline:-5.75px}
+/* The state's animated dots keep all three in layout, so the tab never changes
+   width, while one to three show. The third hangs one dot's width (a period is
+   about .27em) into the gap before the cross: the gap is the equal one while
+   two dots show, a dot wider while one does and a dot narrower while all three
+   do, never two dots apart as it would be measured from the full three. */
+.task-tab .prompt-status-label::after{margin-right:-.27em}
 .task-tabbar .tab-add-wrap{margin-top:-6px;gap:2px}
 .task-tabbar .icon-btn.attention{color:var(--warn)}
 /* the bin is the strip's one destructive verb: quiet at rest like its
@@ -3676,7 +3696,7 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-tabbar .task-remove-button:active{color:var(--err)}
 .task-tab .t-state{font-size:var(--fs-2xs);color:var(--txt3);flex-shrink:0;white-space:nowrap}
 /* set to apply to Main when done: the drawn mark beside the name */
-.task-tab .t-auto{display:inline-flex;flex-shrink:0;color:var(--acc)}
+.task-tab .t-auto{display:inline-flex;flex-shrink:0;color:var(--acc);margin-inline:-1.7px -1.45px}
 .task-tab .t-auto svg{display:block}
 /* an answer nobody has looked at yet */
 .task-tab .t-state.unread::before{

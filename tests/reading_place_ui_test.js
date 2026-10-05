@@ -35,7 +35,7 @@ const context = vm.createContext({
   sessionsFor: () => sessions,
   findSessionMeta: (bid, sid) => sessions.find(session => session.id === sid),
   navigationRemember: () => { remembered++; }, navigationChanged: () => { changed++; },
-  wireTabbar() {}, wireTabDrag() {}, syncHorizontalOverflow() {}, syncPromptSpinnerPhase() {},
+  wireTabbar() {}, wireTabDrag() {}, syncHorizontalOverflow() {}, fitTabTitles() {}, syncPromptSpinnerPhase() {},
   titlePending: () => false,
   tasksIcon: () => el("svg"), plusIcon: () => el("svg"), xIcon: () => el("svg"), trashIcon: () => el("svg"),
   reviewIcon: () => el("svg"),
