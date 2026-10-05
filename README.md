@@ -623,6 +623,7 @@ does not reopen its tab. Once started, use the task's **Stop** control.
   task's menu, off by default - has Puppy finish the task for you: once a turn
   of the task ends successfully and Main is idle, Puppy applies its changes the
   way the review sheet does, folds its conversation into Main and closes it.
+  The New task checkbox starts unchecked each time you open the dialog.
   When Main has moved under the task, Git merges Main's newer changes with the
   task's; where both changed the same lines, Puppy merges Main into the task's
   copy with standard conflict markers and sends its agent one follow-up to

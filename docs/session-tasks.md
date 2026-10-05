@@ -203,12 +203,12 @@ included, and no look is taken for it.
 task's turns ends successfully, with nothing left in its queue, and Main is
 idle, Puppy applies the task to Main the way the review sheet's **Apply to
 Main** with **Fold into Main after applying** would, folds its conversation
-into Main and closes it. It is off by default; turn it on in the **New task**
-dialog, in the task's own menu (right under **Refresh from Main**), through
-Main's agent (`apply_when_done`), or from inside the task, where the agent sets
-it for itself when you ask it to merge into Main once it is done (**Apply when
-done** in the task's `@` menu inserts `@Apply when done` for that). Backends
-advertise it as `session-task-auto-apply`.
+into Main and closes it. It starts unchecked each time you open the **New task**
+dialog. Turn it on there, in the task's own menu (right under **Refresh from
+Main**), through Main's agent (`apply_when_done`), or from inside the task,
+where the agent sets it for itself when you ask it to merge into Main once it
+is done (**Apply when done** in the task's `@` menu inserts `@Apply when done`
+for that). Backends advertise it as `session-task-auto-apply`.
 
 How an apply goes:
 

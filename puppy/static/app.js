@@ -17669,13 +17669,17 @@ async function modalNewTask(workspace) {
     </div>
     <label class="hidden" id="nt-model-custom-wrap">Custom model<input type="text" id="nt-model-custom" placeholder="Model ID" spellcheck="false" maxlength="256"></label>
     <div class="task-auto-apply hidden" id="nt-auto-wrap">
-      <label class="check"><input type="checkbox" id="nt-auto" aria-describedby="nt-auto-note"> Apply to Main when done</label>
+      <label class="check"><input type="checkbox" id="nt-auto" autocomplete="off" aria-describedby="nt-auto-note"> Apply to Main when done</label>
       <p class="help" id="nt-auto-note">When it finishes, Puppy applies it to Main - once it has resolved any conflicts with Main - then folds its conversation into Main and closes it.</p>
     </div>
     <p class="form-error hidden" role="alert"></p>
     <div class="m-btns"><button type="button" class="btn" id="nt-cancel">Cancel</button><button type="button" class="btn btn-pri" id="nt-start">Start task</button></div>`, "new-task-modal", () => { const view = state.views[workspace.tab.id]; if (view) modalNewTask(view); });
   const autoApply = backendSupportsTaskAutoApply(bid) ? m.querySelector("#nt-auto") : null;
-  if (autoApply) m.querySelector("#nt-auto-wrap").classList.remove("hidden");
+  if (autoApply) {
+    // Applying automatically is a fresh choice for each new task.
+    autoApply.checked = false;
+    m.querySelector("#nt-auto-wrap").classList.remove("hidden");
+  }
   const start = m.querySelector("#nt-start");
   const error = m.querySelector(".form-error");
   /* The task box is the chat's own prompt box - the same "@" list, pasted
