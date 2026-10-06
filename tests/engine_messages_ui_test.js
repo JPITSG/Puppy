@@ -26,6 +26,7 @@ const context = vm.createContext({
 });
 vm.runInContext([
   between("const $ = (id)", "/* Close buttons"),
+  between("function xIcon(size)", "function bellIcon(size"),
   between("const TOAST_SWIPE_INTENT_PX", "/* Clipboard.writeText is unavailable"),
   between("/* Engine adapters own protocol meanings", "/* ================= notifications ================= */"),
   "function receive(d) { switch (d.type) {",

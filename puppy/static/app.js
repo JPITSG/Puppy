@@ -1172,6 +1172,9 @@ function wireToastSwipe(target, dismiss, pause, resume) {
 
   target.addEventListener("pointerdown", event => {
     if (event.pointerType !== "touch" || event.isPrimary === false || gesture) return;
+    /* A finger on the dismiss strip (a touch laptop shows it) is a tap on that
+       button, never a swipe: capturing the pointer would take its click. */
+    if (event.target && event.target.closest && event.target.closest(".toast-x")) return;
     clearSettle();
     target.classList.add("toast-touch");
     gesture = {
@@ -1309,10 +1312,19 @@ function toast(text, tone = "info", ms = TOAST_SHORT) {
   const node = el("div", "toast " + level);
   const count = el("span", "toast-count");
   const label = el("span", "toast-text", body);
+  /* The pointer's way out, the swipe's counterpart: a dismiss strip ending the
+     row. It is always in the row; the stylesheet shows it only where the
+     primary pointer hovers and aims (a mouse or trackpad), so a touch screen
+     keeps its full text width and its swipe. */
+  const close = el("button", "toast-x");
+  close.type = "button";
+  close.setAttribute("aria-label", "Dismiss notification");
+  close.appendChild(xIcon(12));
   node.appendChild(label);
+  node.appendChild(close);
   $("toasts").appendChild(node);
 
-  let seen = 1, timer = null, deadline = 0, held = false;
+  let seen = 1, timer = null, deadline = 0, held = false, closing = false;
   const clearTimer = () => {
     if (timer !== null) clearTimeout(timer);
     timer = null;
@@ -1322,9 +1334,35 @@ function toast(text, tone = "info", ms = TOAST_SHORT) {
     if (liveToasts.get(key) === record) liveToasts.delete(key);
     node.remove();
   };
+  /* Dismissed by hand, the toast slides out the way a swiped one does. Its
+     identity is released at once, so the same notice arriving during the exit
+     is a new row rather than a count on one that is leaving. */
+  const dismiss = () => {
+    if (closing) return;
+    closing = true;
+    clearTimer();
+    if (liveToasts.get(key) === record) liveToasts.delete(key);
+    const reduced = window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduced) { node.remove(); return; }
+    node.classList.add("toast-closing", "toast-swipe-settling", "toast-swipe-dismissing");
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      node.remove();
+    };
+    node.addEventListener("transitionend", finish, { once: true });
+    setTimeout(finish, TOAST_SWIPE_SETTLE_MS + 40);
+  };
+  close.addEventListener("click", event => {
+    event.preventDefault();
+    dismiss();
+  });
   /* One deadline the toast never loses: a repeat may extend it, a held toast
      keeps it while the finger is down, and nothing may shorten it. */
   const arm = life => {
+    if (closing) return;
     deadline = Math.max(deadline, Date.now() + life);
     clearTimer();
     if (!held) timer = setTimeout(remove, Math.max(0, deadline - Date.now()));

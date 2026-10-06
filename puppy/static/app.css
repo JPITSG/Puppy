@@ -320,7 +320,7 @@ a{color:var(--acc2)}
 }
 /* Every icon-only control owns a geometric box; block SVGs never contribute
    an inline baseline, and their buttons can centre the box on both axes. */
-.t-close svg,.attach-chip .attach-x svg,.queue-strip .q-x svg,
+.t-close svg,.toast-x svg,.attach-chip .attach-x svg,.queue-strip .q-x svg,
 .queue-strip .q-edit svg,.queue-strip .q-pause svg,.queue-strip .q-resend svg,
 .choice-arrow svg,.choice-mark svg,.br-owner-arrow svg{display:block;margin:0}
 .prov{
@@ -3318,6 +3318,32 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 }
 .toast.toast-swipe-dismissing{
   transform:translate3d(calc(100% + 24px),0,0);opacity:0;pointer-events:none;
+}
+/* a toast dismissed by hand leaves by the swipe's own two classes; this one
+   only stops an entrance still playing from holding the slide back */
+.toast.toast-closing{animation:none}
+/* The pointer's way out: a full-height dismiss strip closing the row, set off
+   by a hairline. The row's right padding is given to it, so it fills the
+   toast's end exactly, with the corner radius the border leaves inside; a
+   single line makes it a square cap and a tall toast a tall one. It is always
+   in the markup and shown only where the primary pointer hovers and aims -
+   the same test as precisePointer() - because a touch screen swipes and keeps
+   the width for the text. Its ring is inset: outside the strip it would fall
+   off the toast's edge. */
+.toast-x{display:none}
+@media (hover:hover) and (pointer:fine){
+  .toast{padding-right:0}
+  .toast-x{
+    flex:none;align-self:stretch;display:grid;place-items:center;
+    width:34px;margin:-10px 0 -10px 5px;padding:0;
+    border:0;border-left:1px solid var(--line);
+    border-radius:0 calc(var(--r-md) - 1px) calc(var(--r-md) - 1px) 0;
+    background:none;color:var(--txt3);cursor:pointer;line-height:0;
+    transition:background var(--t-base) var(--ease),color var(--t-base) var(--ease);
+  }
+  .toast-x:hover{background:var(--hov);color:var(--txt)}
+  .toast-x:active{background:var(--hov-strong);color:var(--txt)}
+  .toast-x:focus-visible{outline-offset:-2px}
 }
 @keyframes toast-in{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
 

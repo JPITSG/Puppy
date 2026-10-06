@@ -5954,6 +5954,7 @@ async def checks(a, b, hub, capture=False):
     await host_panel_checks(a, capture)
     await notices_panel_checks(a, capture)
     await notice_wrapping_checks(a, capture)
+    await toast_dismiss_checks(a, capture)
     await token_usage_checks(a, capture)
     # Measure real layout: an idle status must not reserve a row below tools.
     for width, height in [(1440, 900), (390, 844)]:
@@ -7605,6 +7606,151 @@ async def notice_wrapping_checks(instance, capture=False):
           "in both themes", flush=True)
 
 
+async def toast_dismiss_checks(instance, capture=False):
+    """A toast ends in a full-height dismiss strip where the primary pointer is
+    a mouse - on one line and on many, in both themes - a real press dismisses
+    only its own toast, and a touch screen has no strip and its full width."""
+    long_text = ("Laptop: Could not move project · /home/mira/projects/" + "preview" * 8 +
+                 "/with/nested/folders is a mount point · choose a folder on the same filesystem")
+    measure = """(() => {
+        const rows=[...$('toasts').querySelectorAll('.toast')];
+        for (const row of rows) for (const node of [row, ...row.children])
+            for (const animation of node.getAnimations()) animation.finish();
+        return rows.map(row => {
+            const r=row.getBoundingClientRect(), css=getComputedStyle(row);
+            const x=row.querySelector('.toast-x'), b=x.getBoundingClientRect(), xs=getComputedStyle(x);
+            const icon=x.querySelector('svg').getBoundingClientRect();
+            const text=row.querySelector('.toast-text').getBoundingClientRect();
+            const border=parseFloat(css.borderTopWidth), rule=parseFloat(xs.borderLeftWidth);
+            return {text:row.querySelector('.toast-text').textContent, display:xs.display,
+                    label:x.getAttribute('aria-label'), type:x.type, last:row.lastElementChild===x,
+                    width:b.width, top:b.top-r.top-border, bottom:r.bottom-border-b.bottom,
+                    right:r.right-border-b.right, rule:xs.borderLeftWidth, padRight:css.paddingRight,
+                    centre:[icon.left+icon.width/2-(b.left+rule+(b.width-rule)/2),
+                            icon.top+icon.height/2-(b.top+b.height/2)],
+                    gap:b.left-text.right, height:r.height, lines:Math.round(text.height/18.75),
+                    inside:r.left>=0 && r.right<=innerWidth};
+        });
+    })()"""
+    try:
+        # This headless Chromium has no pointing device (pointer:none, and CDP
+        # cannot emulate one), so the strip starts hidden - the gate working as
+        # written. A mouse is then simulated by laying the stylesheet's own
+        # (hover:hover) and (pointer:fine) rules over it, unconditionally.
+        await evaluate(instance, "liveToasts.clear(); $('toasts').replaceChildren();"
+                                 " toast('Gate', 'ok', 600000); true")
+        gate = await evaluate(instance, """(() => ({
+            media:matchMedia('(hover:hover) and (pointer:fine)').matches,
+            display:getComputedStyle($('toasts').querySelector('.toast-x')).display}))()""")
+        assert gate == {"media": False, "display": "none"}, gate
+        borrowed = await evaluate(instance, """(() => {
+            const rules=[];
+            for (const sheet of document.styleSheets) for (const rule of sheet.cssRules)
+                if (rule.type===CSSRule.MEDIA_RULE &&
+                    rule.conditionText.replace(/\\s/g,'')==='(hover:hover)and(pointer:fine)')
+                    for (const inner of rule.cssRules)
+                        if (inner.cssText.includes('.toast')) rules.push(inner.cssText);
+            const style=document.createElement('style'); style.id='toast-mouse-test';
+            style.textContent=rules.join('\\n'); document.head.appendChild(style);
+            return rules.length;
+        })()""")
+        assert borrowed >= 5, borrowed   # the padding, the strip, its hover, press and focus ring
+        for theme in ("dark", "light"):
+            await evaluate(instance, "applyTheme(%s); liveToasts.clear(); $('toasts').replaceChildren();"
+                           " toast('Copied', 'ok', 600000);"
+                           " toast('Could not copy to the clipboard', 'bad', 600000);"
+                           " toast('Could not copy to the clipboard', 'bad', 600000);"
+                           " toast(%s, 'warn', 600000); true" % (json.dumps(theme), json.dumps(long_text)))
+            rows = await evaluate(instance, measure)
+            assert len(rows) == 3 and rows[1]["text"] == "Could not copy to the clipboard", rows
+            for row in rows:
+                context = (theme, row)
+                assert row["display"] == "grid" and row["type"] == "button" and row["last"], context
+                assert row["label"] == "Dismiss notification" and row["inside"], context
+                assert row["width"] == 34 and row["rule"] == "1px" and row["padRight"] == "0px", context
+                # the strip fills the toast's end exactly, inside its border
+                assert abs(row["top"]) < .6 and abs(row["bottom"]) < .6 and abs(row["right"]) < .6, context
+                assert abs(row["centre"][0]) < .6 and abs(row["centre"][1]) < .6, context
+                assert abs(row["gap"] - 12) < .6, context
+            # a one-line toast is no taller than a line of text and its padding;
+            # a long one wraps and the strip grows with it
+            assert rows[0]["height"] < 42 and rows[1]["height"] < 42, rows
+            assert rows[2]["lines"] > 1 and rows[2]["height"] > rows[0]["height"] + 18, rows
+            if capture:
+                shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                           session=instance.page_session)
+                (BASE / "data" / ("toast-dismiss-" + theme + ".png")).write_bytes(
+                    base64.b64decode(shot["data"]))
+        # a real press on the first toast's strip: the pointer's wash first,
+        # then only that toast slides out and goes; the others stay put and
+        # its notice can arrive again as a fresh row
+        point = await evaluate(instance, """(() => {
+            const r=$('toasts').querySelector('.toast .toast-x').getBoundingClientRect();
+            return {x:r.x+r.width/2, y:r.y+r.height/2};
+        })()""")
+        await instance.call("Input.dispatchMouseEvent", dict(point, type="mouseMoved"),
+                            session=instance.page_session)
+        await until(instance, "getComputedStyle($('toasts').querySelector('.toast .toast-x'))"
+                              ".backgroundColor!=='rgba(0, 0, 0, 0)'")
+        washed = await evaluate(instance, """(() => {
+            const x=$('toasts').querySelector('.toast .toast-x'), css=getComputedStyle(x);
+            return {wash:css.backgroundColor, cursor:css.cursor};
+        })()""")
+        assert washed["cursor"] == "pointer" and washed["wash"] != "rgba(0, 0, 0, 0)", washed
+        await evaluate(instance, """(() => {
+            const row=$('toasts').querySelector('.toast');
+            window.__slide=new Promise(done => {
+                row.addEventListener('transitionend', event => done(event.propertyName), {once:true});
+                setTimeout(() => done('none'), 1500);
+            });
+            return true;
+        })()""")
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1),
+                                session=instance.page_session)
+        # the slide really ran: the browser's own transition ended, not the fallback timer
+        assert await evaluate(instance, "window.__slide") in ("transform", "opacity")
+        await until(instance, "[...$('toasts').querySelectorAll('.toast-text')].map(n=>n.textContent)"
+                              ".join('|').startsWith('Could not copy to the clipboard')")
+        left = await evaluate(instance, """(() => ({
+            texts:[...$('toasts').querySelectorAll('.toast-text')].map(n=>n.textContent),
+            count:$('toasts').querySelector('.toast-count').textContent,
+            live:liveToasts.size}))()""")
+        assert left["texts"][0] == "Could not copy to the clipboard" and len(left["texts"]) == 2, left
+        assert left["count"] == "2 ×" and left["live"] == 2, left
+        await evaluate(instance, "toast('Copied', 'ok', 600000); true")
+        assert await evaluate(instance, "$('toasts').querySelectorAll('.toast').length===3"
+                                        " && !$('toasts').lastElementChild.querySelector('.toast-count')")
+        # a touch screen swipes instead: no strip, and the toast keeps its padding
+        await evaluate(instance, "document.getElementById('toast-mouse-test').remove(); true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 390, "height": 844, "deviceScaleFactor": 2, "mobile": True},
+            session=instance.page_session)
+        await instance.call("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 5},
+                            session=instance.page_session)
+        assert await evaluate(instance, "!precisePointer() && matchMedia('(pointer:coarse)').matches")
+        phone = await evaluate(instance, """(() => [...$('toasts').querySelectorAll('.toast')].map(row => {
+            const x=row.querySelector('.toast-x'), css=getComputedStyle(row);
+            const text=row.querySelector('.toast-text').getBoundingClientRect(), r=row.getBoundingClientRect();
+            return {display:getComputedStyle(x).display, box:x.getBoundingClientRect().width,
+                    padRight:css.paddingRight, room:r.right-1-text.right};
+        }))()""")
+        for row in phone:
+            assert row["display"] == "none" and row["box"] == 0, phone
+            assert row["padRight"] == "14px" and abs(row["room"] - 14) < .6, phone
+    finally:
+        await instance.call("Emulation.setTouchEmulationEnabled", {"enabled": False},
+                            session=instance.page_session)
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+            session=instance.page_session)
+        await evaluate(instance, "document.getElementById('toast-mouse-test')?.remove();"
+                                 " applyTheme('dark'); liveToasts.clear(); $('toasts').replaceChildren(); true")
+    print("PASS: toasts are gated to a mouse and end in a full-height dismiss strip on one line "
+          "and many, in both themes; a real press dismisses only its own toast; a touch screen "
+          "has none", flush=True)
+
+
 # The chart palette the validator passed on the console's two surfaces
 # (#12141a dark, #ffffff light): the Engine grouping wears each engine's slot.
 USAGE_PALETTE = {
@@ -8433,6 +8579,7 @@ async def main(args):
             if args.notices_only:
                 await notices_panel_checks(instances[0], args.screenshots)
                 await notice_wrapping_checks(instances[0], args.screenshots)
+                await toast_dismiss_checks(instances[0], args.screenshots)
                 return
             if args.chat_filter_only:
                 await chat_filter_checks(*instances, args.screenshots)

@@ -941,8 +941,9 @@ with a window of history around it.
   unbroken identifiers, wraps inside the notice on desktop and phone. The same
   notice arriving again counts up on the row it already occupies (*2 ×*, *3 ×*)
   and restarts its timer instead of stacking copies; anything naming a next
-  step stays up longer. On touch, hold a notice to keep it or swipe it right to
-  dismiss it.
+  step stays up longer. With a mouse or trackpad, every notice ends in a small
+  ✕ strip that dismisses it at once; on touch, hold a notice to keep it or swipe
+  it right to dismiss it.
   Engine notices use readable messages: approaching a usage limit is distinct
   from reaching it, with the reported percentage and local reset time when
   available. Native warning text is preserved, retries remain activity updates,
@@ -1248,7 +1249,7 @@ node tests/image_viewer_ui_test.js   # the image viewer, and the pictures on too
 node tests/session_request_ui_test.js # the session request and workflow sheet
 node tests/prompt_gutter_ui_test.js   # the prompt gutter: pins, numbers, plates, steps and the prompt list
 python3 tests/prompt_index_test.py   # the prompt index: one line per prompt, paged, on both runtimes
-node tests/toast_ui_test.js          # notice grammar, tones, lives, folded repeats and their reports
+node tests/toast_ui_test.js          # notice grammar, tones, lives, folded repeats, the dismiss strip and their reports
 node tests/notices_ui_test.js        # the notification box: its slide, rows, live arrivals, its clear
 python3 tests/engine_messages_test.py # native notices, safe fallbacks, both runtimes' session sockets
 node tests/engine_messages_ui_test.js # readable notices, reset clocks, safe text and notification history

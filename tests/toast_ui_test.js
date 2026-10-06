@@ -2,9 +2,10 @@
    The console's one notice surface, against the fake DOM: the shared grammar
    every message is held to, the status tone vocabulary, the two lives, the
    folding of an identical notice into a counted row that renews its own hide
-   timer instead of stacking a second copy, and the report every shown notice
-   sends to the controller's history - in order, one at a time, kept through
-   an outage and dropped only on a refusal. */
+   timer instead of stacking a second copy, the dismiss strip a mouse ends a
+   toast with, and the report every shown notice sends to the controller's
+   history - in order, one at a time, kept through an outage and dropped only
+   on a refusal. */
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -31,8 +32,11 @@ const timers = new Map();
 const reports = [];
 const ingested = [];
 let answer = () => ({ type: "notices", items: [] });
+/* prefers-reduced-motion, flipped by the dismiss section */
+let reduced = false;
 const context = vm.createContext({
   document,
+  window: { matchMedia: query => ({ matches: reduced && /reduced-motion/.test(query) }) },
   Date: { now: () => now },
   setTimeout: (fn, ms) => {
     const id = ++nextTimer;
@@ -65,6 +69,7 @@ const advance = ms => {
 };
 vm.runInContext([
   between("const $ = (id)", "/* Close buttons"),
+  between("function xIcon(size)", "function bellIcon(size"),
   between("const TOAST_SWIPE_INTENT_PX", "/* Clipboard.writeText is unavailable"),
 ].join("\n"), context);
 /* top-level const stays lexical to the script, so read those by name */
@@ -145,7 +150,7 @@ assert.equal(rows().length, 0);
 // ---- repeats fold instead of stacking ----------------------------------
 toast("Could not copy to the clipboard", "bad");
 const folded = only();
-assert.equal(folded.children.length, 1, "the first notice carries no count");
+assert.equal(folded.querySelector(".toast-count"), null, "the first notice carries no count");
 toast("Could not copy to the clipboard", "bad");
 assert.equal(rows().length, 1, "an identical notice never stacks a second row");
 assert.equal(rows()[0], folded, "the live row is counted where it already sits");
@@ -181,7 +186,7 @@ advance(1);
 assert.equal(rows().length, 0);
 /* once gone, the same notice starts a fresh row rather than resuming a count */
 toast("Workspace sync is still pending", "warn");
-assert.equal(only().children.length, 1);
+assert.equal(only().querySelector(".toast-count"), null);
 assert.equal(only().textContent, "Workspace sync is still pending");
 clear();
 
@@ -205,8 +210,67 @@ touch(swiped, "pointerup", { clientX: 100, clientY: 0 });
 advance(400);
 assert.equal(rows().length, 0, "a rightward swipe dismisses the notice");
 toast("Not connected · wait for the session to reconnect", "bad", TOAST_LONG);
-assert.equal(only().children.length, 1,
+assert.equal(only().querySelector(".toast-count"), null,
   "a swiped notice releases its slot, so the next one is not counted onto it");
+clear();
+
+// ---- the dismiss strip: the pointer's way out --------------------------
+toast("Session deleted", "ok");
+const dismissable = only();
+const strip = dismissable.querySelector(".toast-x");
+assert.ok(strip, "every toast carries the dismiss button; the stylesheet shows it for a mouse");
+assert.equal(strip.tagName, "BUTTON");
+assert.equal(strip.type, "button");
+assert.equal(strip.getAttribute("aria-label"), "Dismiss notification");
+assert.equal(dismissable.children[dismissable.children.length - 1], strip, "it ends the row");
+assert.ok(strip.querySelector("svg"), "a drawn cross, never a font glyph");
+assert.equal(dismissable.textContent, "Session deleted", "the cross adds no words to the notice");
+strip.click();
+assert.ok(dismissable.classList.contains("toast-closing"), "a pressed toast slides out");
+assert.equal(rows().length, 1, "and is still there for its exit");
+strip.click();
+assert.equal(rows().length, 1, "a second press on a leaving toast does nothing");
+toast("Session deleted", "ok");
+assert.equal(rows().length, 2, "the same notice during the exit is a fresh row");
+assert.equal(rows()[1].querySelector(".toast-count"), null,
+  "and is not counted onto the one that is leaving");
+advance(read("TOAST_SWIPE_SETTLE_MS") + 39);
+assert.equal(rows().length, 2, "the exit is given its full transition");
+advance(1);
+assert.equal(rows().length, 1, "then the toast is gone");
+assert.notEqual(rows()[0], dismissable);
+assert.ok(!dismissable.isConnected);
+/* the transition's own end removes it as soon as it happens */
+toast("Draft saved", "ok");
+const quick = rows()[rows().length - 1];
+quick.querySelector(".toast-x").click();
+quick.dispatchEvent(new FakeEvent("transitionend"));
+assert.ok(!quick.isConnected, "transitionend ends the exit at once");
+/* its own life is cancelled with it: nothing fires on a removed row */
+advance(TOAST_LONG * 2);
+/* reduced motion skips the slide */
+reduced = true;
+toast("Quiet", "ok");
+const still = rows()[rows().length - 1];
+still.querySelector(".toast-x").click();
+assert.ok(!still.isConnected && !still.classList.contains("toast-closing"),
+  "reduced motion removes the toast without the slide");
+reduced = false;
+clear();
+/* a finger on the strip (a touch laptop shows it) is a tap, never a swipe, and
+   the toast is not held open by it */
+toast("Touch laptop", "ok");
+const tapped = only();
+touch(tapped.querySelector(".toast-x"), "pointerdown", { clientX: 0, clientY: 0, bubbles: true });
+assert.ok(!tapped.classList.contains("toast-touch"), "the strip never starts a swipe");
+advance(TOAST_SHORT);
+assert.equal(rows().length, 0, "the toast keeps its ordinary life");
+/* the stylesheet shows the strip only where the primary pointer hovers and aims */
+const css = fs.readFileSync(path.join(__dirname, "../puppy/static/app.css"), "utf8");
+assert.ok(css.includes(".toast-x{display:none}"), "hidden unless the pointer is a mouse");
+const pointerRules = /@media \(hover:hover\) and \(pointer:fine\)\{[^@]*?\.toast\{padding-right:0\}[^@]*?\.toast-x\{[^}]*display:grid/.exec(css);
+assert.ok(pointerRules, "the strip and the padding it takes over come only with a mouse");
+clear();
 
 // ---- every shown notice is reported to the history, in order -----------
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -329,6 +393,6 @@ const refusal = status => Object.assign(new Error(`HTTP ${status}`), { status })
   assert.equal(outbox().length, 0);
 
   console.log("PASS: toast grammar, tone vocabulary, two lives, folded repeats with " +
-    "renewed timers, swipe/hold lifetimes, and every shown notice reported to the " +
-    "history in order through outages, refusals and reconnects");
+    "renewed timers, swipe/hold lifetimes, the dismiss strip, and every shown notice " +
+    "reported to the history in order through outages, refusals and reconnects");
 })().catch(error => { console.error(error); process.exit(1); });
