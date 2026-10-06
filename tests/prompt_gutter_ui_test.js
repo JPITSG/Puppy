@@ -5,7 +5,7 @@
    node's kind=user event pages (and no read at all from a node with
    neither); the line a prompt is listed by; numbers that count the
    session's prompts with steers aside, kept until the index changes; a pin
-   for every prompt on the page - its number or steer ring, time, label,
+   for every prompt on the page - its number or steer bead, time, label,
    place beside its bubble - the room the gutter takes from a narrow column
    and none from a wide one, no gutter for a narrow transcript, a filtered
    one or one with no prompts, the thread standing still between the plates
@@ -308,7 +308,7 @@ const key = (node, name) => {
     gutter.render();
     assert.ok(!gutter.layer.classList.contains("hidden"));
   }
-  console.log("PASS: a pin per prompt beside its bubble, numbered from the session's first prompt with steers as rings, " +
+  console.log("PASS: a pin per prompt beside its bubble, numbered from the session's first prompt with steers as beads, " +
               "the list button under the top plate, the room taken only from a narrow column, no gutter when too narrow or filtered");
 
   /* ---- scrolling: the thread, tucked pins, the lit prompt, the plates' reach ---- */
@@ -508,7 +508,11 @@ const key = (node, name) => {
     assert.equal(drawn()[0].getAttribute("aria-setsize"), String(total), "a window of the whole list");
     assert.ok(drawn().length <= bound && drawn().every(node => node._at < bound));
     const steer = drawn().find(node => node.classList.contains("steer"));
-    assert.ok(steer && steer.querySelector(".prompt-list-num").textContent === "", "a steer is a ring");
+    assert.ok(steer && steer.querySelector(".prompt-list-num").textContent === "", "a steer is a bead with no number");
+    const beside = by => drawn().find(node => node._at === steer._at + by);
+    assert.ok(steer.classList.contains("rail-up") && beside(-1).classList.contains("rail-down") &&
+              !steer.classList.contains("rail-down") && !beside(1).classList.contains("rail-up") &&
+              !beside(-1).classList.contains("rail-up"), "a steer hangs on a rail from the prompt it was steered into");
     // the keys: down, up, a page, a pick
     key(filter, "ArrowDown");
     const active = () => drawn().find(node => node.classList.contains("active"));
@@ -529,6 +533,12 @@ const key = (node, name) => {
     assert.equal(rows.scrollTop, 0);
     assert.ok(drawn().every(node => /flaky/.test(node.textContent)));
     assert.equal(active()._at, 0, "the first match is the one Enter takes");
+    // a filter can put any row above a steer: no rail from a prompt it was not steered into
+    filter.value = "release notes";
+    filter.dispatchEvent(new FakeEvent("input"));
+    assert.ok(drawn().filter(node => node.classList.contains("steer")).length > 1);
+    assert.ok(drawn().every(node => !node.classList.contains("rail-up") && !node.classList.contains("rail-down")),
+              "no rail between rows that are not neighbours in the session");
     filter.value = "#576";
     filter.dispatchEvent(new FakeEvent("input"));
     assert.deepEqual(drawn().map(node => node._seq), [4800], "a number finds its prompt");
@@ -590,6 +600,7 @@ const key = (node, name) => {
     layout.width = 1200; view.scroll.clientWidth = 1200;
   }
   console.log("PASS: the prompt list over six hundred prompts - a shared float that draws only the rows in view, the " +
-              "prompt being read lit and centred, its own scroll, the filter by text or number, the keys and the " +
+              "prompt being read lit and centred, steers on a rail from their own prompt and from no other, its own " +
+              "scroll, the filter by text or number, the keys and the " +
               "pointer, picks landing like a step, a new index under it, and every way it closes");
 })().catch(error => { console.error(error); process.exit(1); });

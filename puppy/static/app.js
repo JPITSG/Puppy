@@ -18563,16 +18563,18 @@ class SharedDraft {
 
 /* ================= prompt gutter =================
    Every prompt of a conversation is a numbered pin in the transcript's left
-   gutter, level with its bubble and scrolling with it, its time under it; a
-   prompt steered into a turn already running is a violet ring with no number
-   of its own. A thread runs down the gutter between two plates that stay at
+   gutter, level with its bubble and scrolling with it, its time under it, the
+   number in a capsule as wide as its digits; a prompt steered into a turn
+   already running is a small violet bead with no number or time of its own. A thread runs down the gutter between two plates that stay at
    its ends - the previous prompt at the top, the next at the bottom - and a
    pin sliding behind a plate fades. A step lands its prompt just under the
    list button with the pin lit and the bubble flashed, loading history that
    is not on the page through the message jump's own paging. The list button
    under the top plate opens every prompt of the session as one line each -
    number, first line, stamp - windowed so only the rows in view exist, with a
-   filter for the hundreds a long project collects; a pick lands like a step.
+   filter for the thousands a long project collects; a steer is a bead on a
+   rail hanging from the prompt it was steered into, and a pick lands like a
+   step.
    The index of prompts is the node's: one compact row per prompt
    (session-prompt-index, read after the last prompt it holds and whole again
    when its count no longer adds up), or kind=user event pages from a node
@@ -18711,15 +18713,19 @@ class PromptGutter {
     this.frame = requestAnimationFrame(() => { this.frame = 0; this.render(); });
   }
 
-  /* The index in seq order with each prompt's number - steers aside - kept
-     until the index changes, so a render or a scroll never sorts it. */
+  /* The index in seq order with each prompt's number - steers aside - and
+     its place in that order, kept until the index changes, so a render or a
+     scroll never sorts it. */
   ordered() {
     if (!this.order) {
       const list = [...this.index.values()].sort((a, b) => a.seq - b.seq);
-      const numbers = new Map();
+      const numbers = new Map(), places = new Map();
       let count = 0;
-      for (const prompt of list) numbers.set(prompt.seq, prompt.steering ? 0 : ++count);
-      this.order = { list, numbers, count };
+      list.forEach((prompt, at) => {
+        numbers.set(prompt.seq, prompt.steering ? 0 : ++count);
+        places.set(prompt.seq, at);
+      });
+      this.order = { list, numbers, places, count };
     }
     return this.order;
   }
@@ -19047,7 +19053,23 @@ class PromptGutter {
     const empty = panel.appendChild(el("div", "prompt-list-empty hidden", "No prompt matches"));
     const list = {
       panel, filter, rows, space, count, empty,
-      matches: [], activeAt: -1, row: PROMPT_LIST_ROW, drawn: new Map(), frame: 0, query: null,
+      matches: [], activeAt: -1, row: PROMPT_LIST_ROW, digits: 0, drawn: new Map(), frame: 0, query: null,
+      /* one row's height, read from a row of the list's own font, and the
+         number column as wide as the capsule of the session's largest number,
+         so every capsule and every first line stand in one column - measured
+         again only when the largest number gains a digit */
+      fit() {
+        const largest = Math.max(1, gutter.ordered().count);
+        if (String(largest).length === this.digits) return;
+        this.digits = String(largest).length;
+        const probe = space.appendChild(this.rowNode({ seq: 0, text: "Probe", at: 0, steering: false }, largest));
+        this.row = probe.offsetHeight || PROMPT_LIST_ROW;
+        const number = probe.querySelector(".prompt-list-num");
+        number.style.width = "max-content";
+        const width = Math.ceil(number.getBoundingClientRect().width);
+        if (width) panel.style.setProperty("--prompt-list-num", width + "px");
+        probe.remove();
+      },
       /* the prompts the filter keeps: their text, or their number */
       match() {
         const { list: all, numbers, count: numbered } = gutter.ordered();
@@ -19073,7 +19095,9 @@ class PromptGutter {
       },
       /* the rows the list's scroll shows, and a few either side */
       paint() {
-        const { numbers } = gutter.ordered();
+        const { numbers, places } = gutter.ordered();
+        // a row and its neighbour in the list that are neighbours in the session too
+        const adjacent = (prompt, other, by) => !!other && places.get(other.seq) === places.get(prompt.seq) + by;
         const view = rows.clientHeight || this.row * 12;
         const first = Math.max(0, Math.floor(rows.scrollTop / this.row) - PROMPT_LIST_OVERSCAN);
         const last = Math.min(this.matches.length, Math.ceil((rows.scrollTop + view) / this.row) + PROMPT_LIST_OVERSCAN);
@@ -19097,6 +19121,10 @@ class PromptGutter {
           }
           node.classList.toggle("active", at === this.activeAt);
           node.classList.toggle("current", prompt.seq === gutter.current);
+          // a steer hangs on a rail from the prompt it was steered into, never from a row a filter put above it
+          const next = this.matches[at + 1];
+          node.classList.toggle("rail-up", prompt.steering && adjacent(prompt, this.matches[at - 1], -1));
+          node.classList.toggle("rail-down", !!next && next.steering && adjacent(prompt, next, 1));
           node.setAttribute("aria-selected", at === this.activeAt ? "true" : "false");
         }
         // rows drawn above the window join at its end: keep the list in reading order
@@ -19141,7 +19169,7 @@ class PromptGutter {
         gutter.view.jumpToPrompt(prompt.seq);
       },
       /* a new index, or the transcript moving under an open list */
-      sync() { this.match(); this.paint(); },
+      sync() { this.fit(); this.match(); this.paint(); },
       markCurrent() {
         for (const node of this.drawn.values()) node.classList.toggle("current", node._seq === gutter.current);
       },
@@ -19174,10 +19202,7 @@ class PromptGutter {
     this.list = list;
     this.listButton.setAttribute("aria-expanded", "true");
     document.body.appendChild(panel);
-    // one row's height, read from a row of the list's own font
-    const probe = space.appendChild(list.rowNode({ seq: 0, text: "Probe", at: 0, steering: false }, 0));
-    list.row = probe.offsetHeight || PROMPT_LIST_ROW;
-    probe.remove();
+    list.fit();
     list.match();
     this.placeList();
     list.reveal(list.activeAt, true);

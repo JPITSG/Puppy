@@ -161,8 +161,9 @@ reading anywhere further up is never pulled away from it.
   keeps the transcript intact; opening a search hit or message link temporarily
   reveals its target without changing the saved choices.
 - **Skip between your prompts.** Every prompt you sent has a numbered pin in
-  the transcript's left gutter, level with it and showing its time; a prompt
-  you steered into a running turn is a violet ring instead. The pins sit on a
+  the transcript's left gutter, level with it and showing its time, its
+  number in a capsule that widens with the digits; a prompt you steered into
+  a running turn is a small violet dot instead. The pins sit on a
   thread between two round buttons at the gutter's ends: **↑** goes to the
   previous prompt and **↓** to the next, landing it near the top of the
   transcript with its pin lit, and a press on a pin goes to that prompt. Past
@@ -170,8 +171,11 @@ reading anywhere further up is never pulled away from it.
   there from anywhere, and it greys only once you are there. The
   list button under **↑** opens every prompt of the session, one line each -
   its number, first line and when it was sent - with the one you are reading
-  lit; type in its filter to narrow hundreds of prompts by their words or
-  their number, then pick one with the arrow keys and Enter or a click.
+  lit. Its numbers stand in capsules of one width, so the lines start in one
+  column however many prompts a session has, and a steered prompt hangs as a
+  violet dot from the prompt it was steered into. Type in its filter to
+  narrow thousands of prompts by their words or their number, then pick one
+  with the arrow keys and Enter or a click.
   Numbers count from the session's first prompt, and the buttons and the list
   reach prompts in older history that is not loaded yet; a backend reads its
   prompt list as one short line per prompt and sends only the prompts that

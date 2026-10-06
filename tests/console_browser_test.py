@@ -1998,8 +1998,8 @@ async def tool_image_checks(instance):
 async def prompt_gutter_checks(instance):
     """The prompt gutter in real layout. A session longer than the page, its
     first prompts not loaded: a pin level with every prompt on the page,
-    numbered from the session's first prompt (the node's index) with a steer
-    a violet ring; pins, thread and plates on one line, the thread running
+    numbered from the session's first prompt (the node's index) in capsules
+    their digits fit, a steer a small violet bead with no time; pins, thread and plates on one line, the thread running
     from under one plate to under the other; the column still aligned with
     the composer. Real clicks on the top plate step back prompt by prompt,
     each landing just under the plate with its pin lit, into history the
@@ -2048,7 +2048,9 @@ async def prompt_gutter_checks(instance):
             return {seq, number: pin.querySelector('.prompt-pin-dot').textContent, steer: pin.classList.contains('steer'),
                     centre: centre(dot), gap: box.top - r(bubbles.get(String(seq))).top, right: box.right,
                     tucked: pin.classList.contains('tucked'), on: pin.classList.contains('on'),
-                    border: getComputedStyle(pin.querySelector('.prompt-pin-dot')).borderTopColor};
+                    fill: getComputedStyle(pin.querySelector('.prompt-pin-dot')).backgroundColor, width: dot.width,
+                    fits: pin._dot.scrollWidth <= pin._dot.clientWidth,
+                    timeShown: pin.querySelector('.prompt-pin-time').getClientRects().length > 0};
         });
         const probe = document.createElement('span');
         probe.style.color = 'var(--viz-7)'; document.body.appendChild(probe);
@@ -2100,7 +2102,10 @@ async def prompt_gutter_checks(instance):
             assert numbers[-1] == "30" and int(numbers[0]) > 1, ("numbered from the session's first prompt", numbers)
             assert g["oldest"] > 1, "the first prompts are not on the page"
             steer = [pin for pin in g["pins"] if pin["steer"]]
-            assert steer and all(pin["border"] == g["violet"] and pin["number"] == "" for pin in steer), (theme, steer)
+            assert steer and all(pin["fill"] == g["violet"] and pin["number"] == "" and abs(pin["width"] - 8) < 0.1
+                                 and not pin["timeShown"] for pin in steer), ("a violet bead, no time", theme, steer)
+            assert all(pin["fits"] and pin["timeShown"] for pin in g["pins"] if not pin["steer"]), \
+                ("every number inside its capsule, its time under it", theme, g["pins"])
             assert g["downDisabled"] and not g["upDisabled"], ("at the tail only the top plate steps", g)
             # a greyed plate fades its arrow, never its disc: the thread ends under it
             assert all(d["opacity"] == "1" and not d["background"].startswith("rgba") for d in g["discs"]), \
@@ -2211,13 +2216,13 @@ async def prompt_gutter_checks(instance):
         db.delete_session(sid)
         runner.broadcast_sessions()
         await until(instance, "!findSessionMeta(0,%d)" % sid)
-    print("PASS: the prompt gutter's pins level with their prompts and numbered from the session's first, steers as violet "
-          "rings, pins, thread and plates on one line with the thread ending under both plates and the column aligned "
+    print("PASS: the prompt gutter's pins level with their prompts and numbered from the session's first in capsules "
+          "their digits fit, steers as violet beads with no time, pins, thread and plates on one line with the thread ending under both plates and the column aligned "
           "with the composer, in both themes; real plate clicks stepping prompt by prompt into history not on the page "
           "and back, each landing under the list button, a real double click and a press past the last prompt going "
           "to the newest message; a narrow pane making room, a phone and a filtered transcript "
           "showing none; the prompt list over four hundred prompts read from the node's compact index, opened by a "
-          "real click beside the gutter, drawing only the rows in view, scrolled by a real wheel, filtered by text "
+          "real click beside the gutter, drawing only the rows in view in capsules of one width, scrolled by a real wheel, filtered by text "
           "and number, Enter and a real click landing prompts the page did not hold, in both themes", flush=True)
 
 
@@ -2261,6 +2266,11 @@ async def prompt_list_checks(instance, landing):
             return {left: box.left, right: box.right, top: box.top, bottom: box.bottom, buttonRight: button.right,
                     buttonTop: button.top, vw: innerWidth, vh: innerHeight, drawn: drawn.length,
                     visible: visible.map(n => n.querySelector('.prompt-list-num').textContent),
+                    // every capsule one width, its number inside it, every first line in one column
+                    capsules: [...new Set(visible.map(n => r(n.querySelector('.prompt-list-num')).width))],
+                    fits: visible.every(n => { const c = n.querySelector('.prompt-list-num');
+                        return c.scrollWidth <= c.clientWidth; }),
+                    texts: [...new Set(visible.map(n => r(n.querySelector('.prompt-list-text')).left))],
                     first: visible.length ? visible[0].querySelector('.prompt-list-text').textContent : '',
                     current: current ? {number: current.querySelector('.prompt-list-num').textContent,
                         inView: r(current).top >= shown.top - 0.5 && r(current).bottom <= shown.bottom + 0.5} : null,
@@ -2305,6 +2315,8 @@ async def prompt_list_checks(instance, landing):
             assert g["count"] == "400", g["count"]
             assert g["drawn"] < 60, ("only the rows in view, not four hundred", g["drawn"])
             assert g["current"] == {"number": "400", "inView": True}, ("the prompt being read, lit and in view", g)
+            assert len(g["capsules"]) == 1 and g["capsules"][0] > 22 and g["fits"] and len(g["texts"]) == 1, \
+                ("three digits in capsules of one width, the first lines in one column", theme, g)
             assert not g["overflow"] and g["clipped"] and abs(g["timeRight"] - g["rowRight"] + 8) < 1, \
                 ("one line a row, its time at the end", theme, g)
             # a real wheel takes the list to the first prompt

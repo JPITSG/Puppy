@@ -1376,8 +1376,8 @@ select.choice-native{display:none!important}
 }
 .chat-inner{max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:10px}
 /* The prompt gutter (PromptGutter in app.js): a numbered pin beside every
-   prompt, scrolling with it, its time under it - a steered prompt a violet
-   ring - on a thread that runs between two plates fixed at the ends of the
+   prompt, scrolling with it, its time under it - the number in a capsule as
+   wide as its digits, a steered prompt a small violet bead - on a thread that runs between two plates fixed at the ends of the
    pane, the previous prompt's and the next's. A pin sliding behind a plate
    fades; the prompt being read is lit. --prompt-gutter is the room it takes
    from the column where the column's own margin is too narrow. */
@@ -1389,19 +1389,20 @@ select.choice-native{display:none!important}
   transition:opacity var(--t-fast) var(--ease);
 }
 .prompt-pin-dot{
-  width:22px;height:22px;border-radius:50%;display:grid;place-items:center;
-  font:600 var(--fs-2xs) var(--sans);color:var(--acc);border:1px solid var(--acc-line-soft);
+  min-width:22px;height:22px;padding:0 5px;border-radius:11px;display:grid;place-items:center;
+  font:600 var(--fs-2xs) var(--sans);font-variant-numeric:tabular-nums;color:var(--acc);border:1px solid var(--acc-line-soft);
   background:linear-gradient(var(--acc-dim),var(--acc-dim)),var(--bg);
   transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease),border-color var(--t-fast) var(--ease);
 }
-.prompt-pin.steer .prompt-pin-dot{width:12px;height:12px;margin:5px 0;background:var(--bg);border:2px solid var(--viz-7)}
+.prompt-pin.steer .prompt-pin-dot{min-width:0;width:8px;height:8px;margin:7px 0;padding:0;border:0;background:var(--viz-7)}
+.prompt-pin.steer .prompt-pin-time{display:none}
 .prompt-pin-time{padding:1px 2px;font:var(--fs-2xs) var(--mono);line-height:1;white-space:nowrap;background:var(--bg)}
 @media (hover:hover){
   .prompt-pin:hover .prompt-pin-dot{background:var(--acc);color:var(--bg);border-color:var(--acc)}
-  .prompt-pin.steer:hover .prompt-pin-dot{background:var(--viz-7);border-color:var(--viz-7)}
+  .prompt-pin.steer:hover .prompt-pin-dot{background:var(--viz-7);box-shadow:0 0 0 3px color-mix(in srgb,var(--viz-7) 30%,transparent)}
 }
 .prompt-pin.on .prompt-pin-dot{background:var(--acc);color:var(--bg);border-color:var(--acc)}
-.prompt-pin.steer.on .prompt-pin-dot{background:var(--viz-7);border-color:var(--viz-7)}
+.prompt-pin.steer.on .prompt-pin-dot{background:var(--viz-7);box-shadow:0 0 0 3px color-mix(in srgb,var(--viz-7) 30%,transparent)}
 .prompt-pin.on .prompt-pin-time{color:var(--txt2)}
 .prompt-pin.tucked{opacity:0;pointer-events:none}
 .prompt-plates{position:absolute;inset:0;pointer-events:none;z-index:var(--z-float)}
@@ -1427,9 +1428,12 @@ select.choice-native{display:none!important}
 @media (prefers-reduced-motion:reduce){.prompt-pin,.prompt-pin-dot,.prompt-plate,.prompt-list-button{transition:none}}
 /* The prompt list: one of the shared floats in its own shape - a head with
    the count, the filter, and a window of one-line rows (number, first line,
-   time) that only draws what is in view; a steered prompt is indented on its
-   violet ring, the prompt being read is lit, the row the keys or the pointer
-   are on takes the menus' hover. */
+   time) that only draws what is in view. Every number's capsule is as wide as
+   the session's largest (--prompt-list-num, measured once), so the first
+   lines stand in one column; a steered prompt is a violet bead in that column,
+   hanging on a faint violet rail from the row above when that row is the
+   prompt before it. The prompt being read is lit, the row the keys or the
+   pointer are on takes the menus' hover. */
 .choice-menu.prompt-list{
   width:min(460px,calc(100vw - 16px));max-width:none;max-height:none;padding:0;
   display:flex;flex-direction:column;overflow:hidden;
@@ -1441,21 +1445,27 @@ select.choice-native{display:none!important}
 .prompt-list-rows{flex:1;min-height:0;overflow-y:auto;padding:0 5px 5px;overscroll-behavior:contain}
 .prompt-list-space{position:relative}
 .prompt-list-row{
-  position:absolute;left:0;right:0;height:32px;display:grid;grid-template-columns:22px minmax(0,1fr) auto;
+  position:absolute;left:0;right:0;height:32px;display:grid;grid-template-columns:var(--prompt-list-num,22px) minmax(0,1fr) auto;
   align-items:center;gap:10px;padding:0 8px;border-radius:var(--r-sm);cursor:pointer;
   font:var(--fs-sm) var(--sans);color:var(--txt);
 }
 .prompt-list-row.active{background:var(--float-menu-hover)}
 .prompt-list-row.current{background:var(--acc-dim)}
 .prompt-list-num{
-  width:22px;height:22px;border-radius:50%;display:grid;place-items:center;
-  font:600 var(--fs-2xs) var(--sans);color:var(--acc);border:1px solid var(--acc-line-soft);
+  position:relative;z-index:1;min-width:22px;height:22px;padding:0 5px;border-radius:11px;display:grid;place-items:center;
+  font:600 var(--fs-2xs) var(--sans);font-variant-numeric:tabular-nums;color:var(--acc);border:1px solid var(--acc-line-soft);
   background:linear-gradient(var(--acc-dim),var(--acc-dim)),var(--bg);
 }
 .prompt-list-row.current .prompt-list-num{background:var(--acc);color:var(--bg);border-color:var(--acc)}
-.prompt-list-row.steer{grid-template-columns:10px minmax(0,1fr) auto;padding-left:20px}
-.prompt-list-row.steer .prompt-list-num{width:10px;height:10px;background:var(--bg);border:2px solid var(--viz-7)}
-.prompt-list-row.steer.current .prompt-list-num{background:var(--viz-7);border-color:var(--viz-7)}
+.prompt-list-row.steer .prompt-list-num{justify-self:center;min-width:0;width:8px;height:8px;padding:0;border:0;background:var(--viz-7)}
+.prompt-list-row.steer.current .prompt-list-num{box-shadow:0 0 0 3px color-mix(in srgb,var(--viz-7) 30%,transparent)}
+.prompt-list-row.rail-up::before,.prompt-list-row.rail-down::after{
+  content:"";position:absolute;left:calc(8px + var(--prompt-list-num,22px) / 2 - 1px);width:2px;
+  background:color-mix(in srgb,var(--viz-7) 38%,transparent);
+}
+.prompt-list-row.rail-up::before{top:0;bottom:50%}
+.prompt-list-row.rail-down::after{top:50%;bottom:0}
+.prompt-list-row.rail-down:not(.steer)::after{top:calc(50% + 11px)}
 .prompt-list-row.steer .prompt-list-text{color:var(--txt2)}
 .prompt-list-text{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .prompt-list-time{font:var(--fs-2xs) var(--mono);color:var(--txt3)}
