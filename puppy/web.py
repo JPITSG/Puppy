@@ -2257,6 +2257,8 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     session_tasks.register(app)
     search.register(app)
     agent_notes.register(app)
+    from puppy import session_directories
+    session_directories.register(app)
     session_git.register(app)
     session_titles.register(app)
     state_stream.register(

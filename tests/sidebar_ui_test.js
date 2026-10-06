@@ -12,6 +12,32 @@ function between(from, to) {
   return source.slice(start, end);
 }
 
+// Both sidebar and Open session use the same row and the node's explicit
+// verdict. Unknown/older payloads and an offline backend imply no red path.
+{
+  const document = new FakeDocument();
+  const el = (tag, cls = "", text = "") => {
+    const n = document.createElement(tag); n.className = cls; n.textContent = text; return n;
+  };
+  const context = vm.createContext({el, sessDot: () => el("i"), provIcon: () => el("i"),
+    titlePending: () => false, sessionLocationLabel: s => s.cwd,
+    sessionLocationTitle: s => s.cwd, sessionWorkspace: () => null,
+    backendName: bid => `Backend ${bid}`});
+  vm.runInContext(between("function sessionRowRows(", "/* Merge authoritative node lists"), context);
+  const s = {id: 1, cwd: "/demo/project"};
+  for (const bid of [0, 2]) {
+    for (const value of [undefined, null, true, false, true]) {
+      s.cwd_available = value;
+      const path = context.sessionRowRows(bid, s).r2.querySelector(".si-sub");
+      assert.equal(path.classList.contains("bad"), value === false);
+      assert.equal(path.getAttribute("aria-label").includes("unavailable"), value === false);
+      assert.equal(path.textContent, s.cwd);
+    }
+    const missingScratch = context.sessionRowRows(bid, {...s, workspace_missing: true}).r2;
+    assert.ok(missingScratch.querySelector(".si-sub.bad"));
+  }
+}
+
 function consoleFor(sessions, remoteSessions, marks = false) {
   const document = new FakeDocument();
   const el = (tag, cls = "", text = "") => {

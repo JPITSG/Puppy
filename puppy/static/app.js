@@ -5963,9 +5963,11 @@ function sessionRowRows(bid, s, slots = []) {
   for (const slot of slots) if (slot) r1.appendChild(slot);
   const r2 = el("div", "si-row sub");
   r2.appendChild(provIcon(s.engine));
-  const workspace = el("div", "si-sub" + (s.workspace_missing ? " warn" : ""),
+  const unavailable = s.cwd_available === false || s.workspace_missing === true;
+  const workspace = el("div", "si-sub" + (unavailable ? " bad" : ""),
     sessionLocationLabel(s, bid));
-  workspace.setAttribute("aria-label", sessionLocationTitle(s, bid));
+  workspace.setAttribute("aria-label", sessionLocationTitle(s, bid) +
+    (unavailable ? ` · Working directory unavailable on ${backendName(bid)}` : ""));
   r2.appendChild(workspace);
   if (sessionWorkspace(s)) {
     const wsLink = linkForSession(bid, s.id);

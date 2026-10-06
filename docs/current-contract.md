@@ -126,6 +126,13 @@ still contain a value written before that release.
   `session-order-recency` adds durable `order_at` timestamps for merging the
   sidebar across backends below all pins, and an optional `expected_recency`
   compare token for activity that leaves the node's ID order unchanged.
+- Session payloads add `cwd_available` (`null` until checked, then boolean).
+  Each node checks its execution directories off the event loop, wakes on
+  relevant filesystem events where available, and rechecks every 15 seconds.
+  Missing or inaccessible directories turn the sidebar location red; recovery
+  restores the normal color through the existing sessions state topic. Linked
+  workspaces report the private execution copy. No new capability, route,
+  persisted shape or protocol version; an omitted field remains unknown.
 - Remote spawned jobs always use controller-chosen IDs and ownership leases.
   Use `idle_timeout_s` and `max_runtime_s`; the old `timeout_s` field is rejected.
   With `timeout-settings`, omitted limits use the executing node's settings;

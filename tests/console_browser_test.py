@@ -30,7 +30,7 @@ os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from puppy import auth, backends, browser, config, db, notices, runner, search, session_git, session_tasks, session_aliases, terminal, token_usage, uploads, workspaces
+from puppy import auth, backends, browser, config, db, notices, runner, search, session_directories, session_git, session_tasks, session_aliases, terminal, token_usage, uploads, workspaces
 from puppy import web as webui
 from puppy.drivers import all_drivers, get_driver
 
@@ -230,6 +230,9 @@ async def fixture():
     demo_token_usage()
     for cwd in DEMO_GIT:
         session_git._store(cwd, demo_git(cwd))
+        # Invented availability: one unavailable project demonstrates the
+        # sidebar's red path without probing any real person's directories.
+        session_directories._records[cwd] = not cwd.endswith("/notes")
     app = webui.build_app()
     app.on_startup.clear()
     app.on_shutdown.clear()
@@ -6077,6 +6080,56 @@ async def checks(a, b, hub, capture=False):
     print("PASS: two real browser profiles, simultaneous/offline collisions, presence, caret/selection/height, review, reload, refused send and retry", flush=True)
 
 
+async def directory_checks(instance, app):
+    project = ROOT / "directory-preview"
+    project.mkdir()
+    sid = db.create_session("Directory preview", "codex", str(project), "", "", "", "default")
+    original = session_directories.inspect
+
+    def inspect(cwd):
+        return not cwd.endswith("/notes") if cwd in DEMO_GIT else original(cwd)
+
+    with patch.object(session_directories, "inspect", inspect), \
+            patch.object(session_directories, "CHECK_SECONDS", 3600):
+        worker = session_directories._lifecycle(app)
+        await worker.__anext__()
+        selector = '.sess-item[data-session-key="0:%d"] .si-sub' % sid
+        try:
+            await until(instance, "!!document.querySelector(%s)" % json.dumps(selector))
+            for width, height in [(1440, 900), (390, 844)]:
+                await instance.call("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": height, "deviceScaleFactor": 1,
+                    "mobile": width == 390}, session=instance.page_session)
+                await evaluate(instance, "$('app').classList.add('side-open'); true")
+                for theme in ("dark", "light"):
+                    await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                    project.rmdir()
+                    await until(instance, "document.querySelector(%s)?.classList.contains('bad')" % json.dumps(selector))
+                    assert await evaluate(instance, """(() => {
+                        const n=document.querySelector(%s), probe=document.createElement('i');
+                        probe.style.color='var(--err)'; document.body.append(probe);
+                        const ok=getComputedStyle(n).color===getComputedStyle(probe).color &&
+                            n.getAttribute('aria-label').includes('unavailable');
+                        probe.remove();return ok;})()""" % json.dumps(selector))
+                    project.mkdir()
+                    await until(instance, "!document.querySelector(%s)?.classList.contains('bad')" % json.dumps(selector))
+                    assert await evaluate(instance, """(() => {
+                        const n=document.querySelector(%s), probe=document.createElement('i');
+                        probe.style.color='var(--txt3)'; document.body.append(probe);
+                        const ok=getComputedStyle(n).color===getComputedStyle(probe).color &&
+                            !n.getAttribute('aria-label').includes('unavailable');
+                        probe.remove();return ok;})()""" % json.dumps(selector))
+        finally:
+            await worker.aclose()
+            db.delete_session(sid)
+            runner.broadcast_sessions()
+            await evaluate(instance, "$('app').classList.remove('side-open'); applyTheme('dark'); true")
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": 1440, "height": 900, "deviceScaleFactor": 1,
+                "mobile": False}, session=instance.page_session)
+    print("PASS: directory disappearance and recovery reach the sidebar by filesystem event and session stream, desktop/phone in both themes", flush=True)
+
+
 async def screenshots(instance):
     assets = BASE / "assets"
     # Invented live work demonstrates the count through the real snapshot
@@ -8418,6 +8471,11 @@ async def main(args):
                 await image_viewer_checks(instances[0], args.screenshots)
                 await tool_image_checks(instances[0])
                 return
+            await directory_checks(instances[0], app)
+            if args.directories_only:
+                if args.screenshots:
+                    await screenshots(instances[0])
+                return
             await backup_schedule_checks(instances[0], app, args.screenshots)
             if args.backup_schedule_only:
                 return
@@ -8479,4 +8537,5 @@ if __name__ == "__main__":
     parser.add_argument("--sidebar-width-only", action="store_true")
     parser.add_argument("--backup-schedule-only", action="store_true")
     parser.add_argument("--lazy-assets-only", action="store_true")
+    parser.add_argument("--directories-only", action="store_true")
     asyncio.run(main(parser.parse_args()))

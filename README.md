@@ -255,6 +255,14 @@ reading anywhere further up is never pulled away from it.
   randomly; you can choose another color. The order belongs to the backend,
   so every console sees the same list. Session context menus stay within the screen and scroll when there
   are more actions than the available height.
+- **Directory availability.** A session's location turns red when its working
+  directory is missing, is no longer a directory, or cannot be read or entered
+  by its backend. It returns to its normal color when access recovers. Each
+  backend watches filesystem changes where supported and rechecks every 15
+  seconds to cover network mounts and missed events; changes reach open
+  consoles through the existing session stream, without browser polling.
+  An offline backend alone does not mark its paths missing. Linked workspaces
+  report availability of the executing backend's synchronized copy.
 - **Git repositories.** A branch mark on every session row, between the pin
   and the agent notes, shows whether the session's directory is inside a Git
   repository - and turns orange when that repository is holding work you have
@@ -1219,6 +1227,7 @@ python3 tests/auth_surface_test.py   # public sign-in isolation and authenticate
 node tests/auth_ui_test.js           # sign-in/setup, direct state startup and expired logins
 node tests/lazy_assets_ui_test.js     # optional libraries, retries and closed-view guards
 node tests/sidebar_ui_test.js        # sidebar ordering, pins, reorders, filtering
+python3 tests/session_directories_test.py # directory events, recovery and fallback on both runtimes
 node tests/tab_drag_ui_test.js       # task discovery, saved visibility and tab dragging
 node tests/drag_scroll_ui_test.js    # the lists a reorder drag scrolls, and the drops past their ends
 node tests/menu_dismiss_ui_test.js   # menu dismissal, toggles and open dropdowns

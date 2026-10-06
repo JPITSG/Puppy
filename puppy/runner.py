@@ -16,7 +16,7 @@ import uuid
 
 from puppy import (agent_notes, browser_agent, config, db, engine_defaults, handoff, notify, spawn_agent,
                    system_prompts, task_agent, terminal_agent, vnc_agent,
-                   session_agent, session_git, session_links, uploads, workspace_sync,
+                   session_agent, session_directories, session_git, session_links, uploads, workspace_sync,
                    workspaces, session_tasks, session_titles, token_usage, tool_calls)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
@@ -374,6 +374,7 @@ def session_payload(session):
     out["session_ref"] = session_links.reference(session["id"])
     out["agent_notes"] = agent_notes.present(session.get("cwd"))
     out["git"] = session_git.record(session.get("cwd"))
+    out["cwd_available"] = session_directories.record(session.get("cwd"))
     out["workspace_missing"] = workspaces.is_temporary(out) and not workspaces.is_available(out)
     out["used_config"] = parse_used_config(out["used_config"])
     # The status bar is the session's setting: a task's strip shows and
@@ -630,6 +631,7 @@ def sessions_payload() -> dict:
             # whether it is inside a Git work tree: the node's cached answer,
             # null until its worker has looked (asking wakes the worker)
             "git": session_git.record(s["cwd"]),
+            "cwd_available": session_directories.record(s["cwd"]),
             "workspace_missing": workspaces.is_temporary(s) and not workspaces.is_available(s),
             "workspace": descriptor,
             "ws_dirty": bool(s["ws_dirty"]),

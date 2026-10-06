@@ -898,6 +898,22 @@ values so simultaneous consoles fail with 409 instead of overwriting one
 another. Malformed or duplicate lists return 400; changed membership, order,
 or pin state returns 409.
 
+## Directory availability
+
+Every session payload carries the additive `cwd_available`: `null` until
+checked, then a boolean indicating whether the executing node can read and
+traverse the session's working directory. Missing paths, regular files and
+filesystem access errors answer `false`. For linked workspaces this checks
+the private execution copy without exposing its path. Older nodes omit the
+field; that is unknown, not unavailable.
+
+One in-memory answer per directory is shared by its sessions. Linux inotify
+events on paths, ancestors and symlink targets trigger a debounced check;
+ordinary file edits do not. A 15-second fallback covers network filesystems,
+watch limits and systems without inotify. Filesystem work runs in an executor,
+and changed answers publish the existing sessions state topic. There is no
+new route, browser poll, configuration key or persisted state.
+
 ## Agent notes
 
 Nodes advertising `session-agent-notes` serve the AGENTS.md and CLAUDE.md

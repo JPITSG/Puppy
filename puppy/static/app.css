@@ -367,7 +367,7 @@ a{color:var(--acc2)}
 .engine-dot.opencode{color:var(--opencode)}
 .sess-item .si-name{flex:1;min-width:0;font-size:var(--fs-lg);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sess-item .si-sub{flex:1;min-width:0;font-size:var(--fs-xs);color:var(--txt3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono)}
-.sess-item .si-sub.warn{color:var(--warn)}
+.sess-item .si-sub.bad{color:var(--err)}
 /* linked-workspace marker: quiet when synced, tinted when it needs a look */
 .sess-item .si-ws{flex:0 0 auto;font:var(--fs-xs) var(--mono);color:var(--txt3);line-height:1}
 .sess-item .si-ws.warn{color:var(--warn)}
