@@ -887,7 +887,9 @@ with a window of history around it.
   double-click a divider to reset it.
 - **A session in its own window.** Right-click a session's tab and choose
   **Move to new window** to take it out of the workspace into a separate
-  browser window, sized and placed like the pane it leaves. That window holds
+  popup window, sized and placed like the pane it leaves. A browser set to
+  open new windows as tabs opens a tab instead and a notice says so; drag
+  that tab out of the tab bar to give it a window of its own. That window holds
   just the session - its tab, Main and its tasks, the chat and the composer -
   with no sidebar and no other tabs. It is a console of its own, so you can
   open the same session in the main window again at any time. It follows the

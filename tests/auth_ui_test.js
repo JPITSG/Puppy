@@ -11,7 +11,7 @@ const appSource = fs.readFileSync(path.join(__dirname, "../puppy/static/app.js")
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const reply = (data, ok = true) => ({ ok, json: async () => data });
 
-function startConsole(respond, { popout = null, hash = {} } = {}) {
+function startConsole(respond, { popout = null, hash = {}, asTab = false } = {}) {
   const document = new FakeDocument();
   document.body.innerHTML = '<div id="app" class="hidden"></div>';
   const calls = [], steps = [], notices = [], started = [], replaced = [];
@@ -20,7 +20,7 @@ function startConsole(respond, { popout = null, hash = {} } = {}) {
   const context = { document, state, AbortController, setTimeout, clearTimeout,
     $: id => document.getElementById(id), TOAST_LONG: 10000, POPOUT: popout,
     location: { reload: () => { reloads++; }, replace: url => replaced.push(url), pathname: "/" },
-    popoutUrl: id => "/?popout=" + id,
+    popoutUrl: id => "/?popout=" + id, popoutOpenedAsTab: () => asTab,
     findSessionMeta: (bid, sid) => bid ? null : state.sessions.find(s => s.id === sid) || null,
     fetch: async (url, options) => { calls.push({ url, options }); return respond(url); },
     toast: (...args) => notices.push(args),
@@ -182,6 +182,12 @@ async function start(status) {
   assert.equal(window_.state.active, "s:0:7");
   assert(window_.steps.includes("connectUpdates"), "it is a console of its own, with its own updates");
   assert.deepEqual(window_.started, [null], "another session's place is not one it goes back to");
+  assert.equal(window_.notices.length, 0, "a popup has nothing to be told");
+  const tabbed = startConsole(listing([{id:7}]), { popout: own, asTab: true });
+  await tick();
+  assert.deepEqual(Array.from(tabbed.notices, notice => [notice[0], notice[1]]), [[
+    "This browser opened the session in a tab · drag the tab out of the tab bar for a window of its own",
+    "warn"]], "a browser that made a tab of the popup says so once, with the way to a window");
   const back = startConsole(listing([{id:7}]), { popout: own, hash: route("s:0:7") });
   await tick();
   assert.deepEqual(back.started, [route("s:0:7")], "its own session's place is restored on a reload");

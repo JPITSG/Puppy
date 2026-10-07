@@ -4144,6 +4144,9 @@ async function enterApp() {
     state.tabs = [{ id: POPOUT.id, type: "session", bid: POPOUT.bid, sid: POPOUT.sid,
       title: (meta && meta.name) || `Session ${POPOUT.sid}` }];
     state.active = POPOUT.id;
+    if (popoutOpenedAsTab())
+      toast("This browser opened the session in a tab · drag the tab out of the tab bar " +
+        "for a window of its own", "warn", TOAST_LONG);
   } else loadTabs();
   const valid = state.tabs.filter(t => {
     if (t.type === "session")
@@ -10616,8 +10619,14 @@ function moveSessionToWindow(tabId) {
     Math.max(0, window.outerHeight - window.innerHeight) + box.top);
   let opened = null;
   try {
+    /* Every way a page has to ask for a popup rather than a tab: the
+       standard popup token, a size and a place, and the bars a popup goes
+       without, which engines older than the token decide on. A browser set
+       to put new windows in tabs still makes a tab; the window itself says
+       so (popoutOpenedAsTab). */
     opened = window.open(popoutUrl(tabId), `puppy:${LS_NS}:${tabId}`,
-      `popup,width=${width},height=${height},left=${left},top=${top}`);
+      `popup=yes,width=${width},height=${height},left=${left},top=${top},` +
+      "toolbar=no,location=no,menubar=no,status=no");
   } catch (_) { opened = null; }
   if (!opened) {
     toast("Could not open a new window · allow pop-ups for Puppy in this browser",
@@ -10649,6 +10658,18 @@ function openingConsole() {
     return typeof main.consoleWindowKind === "function" &&
       main.consoleWindowKind() === "console" ? main : null;
   } catch (_) { return null; }   // it has moved on to another site
+}
+
+/* A session's own window asks for a popup, but a browser set to put new
+   windows in tabs (or full-screen, or with an extension that does it) opens a
+   tab all the same, and the page can see which it got: a popup shows no
+   toolbar. Only a pointer drags a tab out of the bar, so a touch screen,
+   where every window is a tab, is never told. */
+function popoutOpenedAsTab() {
+  try {
+    return !!(POPOUT && window.opener && window.toolbar &&
+      window.toolbar.visible === true) && precisePointer();
+  } catch (_) { return false; }
 }
 
 /* A conversation this session's window shows: its session, or a task of it. */

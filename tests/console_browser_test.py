@@ -6682,6 +6682,14 @@ async def popout_checks(instance, sid, capture=False):
         assert tab_id not in main["tabs"] and len(main["tabs"]) == before["tabs"] - 1, (before, main)
         assert main["menus"] == 0, main
         assert '"%s"' % tab_id not in main["layout"], ("the main window saved its layout without the tab", main)
+        # A popup by the browser's own account: no toolbar, so nothing to tell
+        # (a mouse stands in for this headless browser's missing pointer).
+        with_mouse = """(() => { const media = window.matchMedia;
+            window.matchMedia = q => q === '(hover:hover) and (pointer:fine)' ? {matches: true} : media.call(window, q);
+            try { return {toolbar: window.toolbar.visible, tab: popoutOpenedAsTab()}; }
+            finally { window.matchMedia = media; } })()"""
+        seen = await evaluate(instance, with_mouse)
+        assert seen == {"toolbar": False, "tab": False}, ("the press opened a popup, not a tab", seen)
 
         for width, height, scale, name in [(1280, 800, 1, "desktop"), (390, 844, 2, "phone")]:
             await instance.call("Emulation.setDeviceMetricsOverride", {
@@ -6734,11 +6742,32 @@ async def popout_checks(instance, sid, capture=False):
         assert instance.page_target == main_target, "the window closed with its tab"
         popup_target = ""
         await until(instance, "location.search === '' && typeof state !== 'undefined' && state.authed")
+
+        # The same window opened as a plain tab - what a browser set to put new
+        # windows in tabs makes of the request - knows it is one.
+        await evaluate(instance, "window.open(%s, '_blank'); true" % json.dumps("/?popout=" + tab_id))
+        end = time.monotonic() + 10
+        while instance.page_target == main_target and time.monotonic() < end:
+            await asyncio.sleep(.05)
+        popup_target = instance.page_target
+        assert popup_target != main_target, "the plain tab opened"
+        await until(instance, "location.search === %s && typeof state !== 'undefined' && state.authed"
+                    % json.dumps("?popout=" + tab_id))
+        seen = await evaluate(instance, with_mouse)
+        assert seen == {"toolbar": True, "tab": True}, ("a tab the browser chose is told apart", seen)
+        await evaluate(instance, "window.close(); true")
+        end = time.monotonic() + 10
+        while instance.page_target in ("", popup_target) and time.monotonic() < end:
+            await asyncio.sleep(.05)
+        assert instance.page_target == main_target, "the plain tab closed"
+        popup_target = ""
+        await until(instance, "location.search === '' && typeof state !== 'undefined' && state.authed")
         print("PASS: a session tab moved to a window of its own - a real right-click and press open a real "
-              "window holding the session alone (its tab, Main and the tasks, the chat and the composer; no "
-              "sidebar, burger or +) on a desktop and a phone in both themes, the tab leaving the main window; "
-              "the window saving no layout, keeping its own history, following the main window's theme and "
-              "closing with its tab", flush=True)
+              "popup (no toolbar, by the browser's own account) holding the session alone (its tab, Main and "
+              "the tasks, the chat and the composer; no sidebar, burger or +) on a desktop and a phone in both "
+              "themes, the tab leaving the main window; the window saving no layout, keeping its own history, "
+              "following the main window's theme and closing with its tab; the same page opened as a plain "
+              "tab knowing it is one", flush=True)
     finally:
         if extra:
             try:

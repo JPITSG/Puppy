@@ -26,7 +26,8 @@ const ORIGIN = "https://nas.test";
 
 /* One console page: the document, the window around it and the slices of
    app.js under test, with everything else they reach for stubbed. */
-function load({ search = "", pathname = "/", opener = null, sessions = [], views = [] } = {}) {
+function load({ search = "", pathname = "/", opener = null, sessions = [], views = [],
+               toolbarVisible = false, fine = true } = {}) {
   const document = new FakeDocument();
   document.documentElement = document.createElement("html");
   const storage = new Map();
@@ -40,7 +41,8 @@ function load({ search = "", pathname = "/", opener = null, sessions = [], views
       return window.blockOpen ? null : { focus() { calls.focus++; } };
     },
     close() { calls.close++; },
-    opener, screenX: 100, screenY: 50, outerWidth: 1600, innerWidth: 1600,
+    opener, toolbar: { visible: toolbarVisible },
+    screenX: 100, screenY: 50, outerWidth: 1600, innerWidth: 1600,
     outerHeight: 1000, innerHeight: 900,
     screen: { availWidth: 1920, availHeight: 1040 },
     blockOpen: false,
@@ -55,6 +57,7 @@ function load({ search = "", pathname = "/", opener = null, sessions = [], views
     },
     TOAST_LONG: 7000,
     toast: (text, tone) => calls.toasts.push([text, tone]),
+    precisePointer: () => fine,
     navigation: { revision: 1, current: null, reconcile() {} },
     navigationRemember() {}, navigationChanged() { calls.history++; },
     /* the workspace: one pane holding every tab, laid out at a known place */
@@ -176,8 +179,10 @@ const rows = document => {
   assert.equal(page.calls.open.length, 1);
   assert.deepEqual(page.calls.open[0], {
     url: "/?popout=s:0:12", name: "puppy::s:0:12",
-    features: "popup,width=900,height=820,left=400,top=192",
-  }, "the pane's size, at its corner on the screen: the window's corner past its frame");
+    features: "popup=yes,width=900,height=820,left=400,top=192," +
+      "toolbar=no,location=no,menubar=no,status=no",
+  }, "a popup in every way a page can ask: the pane's size, at its corner on the screen " +
+     "(the window's corner past its frame), and no bars");
   assert.equal(page.calls.focus, 1, "the new window is brought forward");
   assert.deepEqual(page.state.tabs.map(t => t.id), ["s:0:5"], "the tab has left this window");
   assert.equal(page.calls.close, 0, "a full console never closes itself");
@@ -194,7 +199,8 @@ const rows = document => {
   assert.equal(page.context.moveSessionToWindow("s:0:9"), true);
   assert.deepEqual(page.calls.open[0], {
     url: "/puppy/?popout=s:0:9", name: "puppy:/puppy:s:0:9",
-    features: "popup,width=400,height=520,left=100,top=150",
+    features: "popup=yes,width=400,height=520,left=100,top=150," +
+      "toolbar=no,location=no,menubar=no,status=no",
   }, "under a mount the window keeps the console's path; a narrow pane opens at the least width the screen allows");
 
   const blocked = load({ sessions: [session(9, "Notes")] });
@@ -254,6 +260,23 @@ const rows = document => {
   page.context.closeTab(tab.id);
   assert.equal(page.state.tabs.length, 0);
   assert.equal(page.calls.close, 1, "the window goes with its session");
+}
+
+// ---- a browser that opened the window as a tab anyway ----------------------
+{
+  const opener = { closed: false, location: { origin: ORIGIN, pathname: "/", search: "" },
+    consoleWindowKind: () => "console" };
+  const asTab = options => load({ search: "?popout=s:0:12", opener, ...options })
+    .context.popoutOpenedAsTab();
+  assert.equal(asTab({ toolbarVisible: true }), true,
+    "a window the console opened that shows a toolbar is a tab the browser chose");
+  assert.equal(asTab({ toolbarVisible: false }), false, "a popup shows none");
+  assert.equal(asTab({ toolbarVisible: true, opener: null }), false,
+    "a typed or pasted address was never asked to be a popup");
+  assert.equal(asTab({ toolbarVisible: true, fine: false }), false,
+    "a touch screen, where every window is a tab and none can be dragged out, is never told");
+  assert.equal(load({ toolbarVisible: true, opener }).context.popoutOpenedAsTab(), false,
+    "a full console never asks");
 }
 
 // ---- what a session's window hands to the console it came from --------------
@@ -365,6 +388,7 @@ const rows = document => {
   console.log("PASS: a session tab's own window - the page that is one, the tab's Move to new window " +
     "row, the window it opens over the pane and the tab leaving only once it exists, a blocked " +
     "pop-up keeping it; the window saving no layout, closing with its tab, its bar without the " +
-    "burger or the +, its tab neither dragged nor offering terminals; its own model's screens and " +
+    "burger or the +, its tab neither dragged nor offering terminals, a tab the browser chose " +
+    "told apart from a popup; its own model's screens and " +
     "other sessions' links going to the console it came from, else to a new one");
 })().catch(error => { console.error(error); process.exit(1); });
