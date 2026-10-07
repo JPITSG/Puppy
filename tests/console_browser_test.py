@@ -253,6 +253,16 @@ async def evaluate(instance, expression):
     return result.get("result", {}).get("value")
 
 
+async def evaluate_in(instance, session, expression):
+    """evaluate() on a page other than the one the managed browser shows."""
+    result = await instance.call("Runtime.evaluate", {
+        "expression": expression, "returnByValue": True, "awaitPromise": True,
+        "userGesture": True}, session=session)
+    if result.get("exceptionDetails"):
+        raise AssertionError(result["exceptionDetails"])
+    return result.get("result", {}).get("value")
+
+
 async def until(instance, expression):
     end = time.monotonic() + 10
     while time.monotonic() < end:
@@ -6592,6 +6602,179 @@ async def terminal_io_checks(console):
             await terminal.manager().close(terminal_id, "test finished")
 
 
+async def popout_checks(instance, sid, capture=False):
+    """A session tab moved to a window of its own. A real right-click on the
+    tab offers Move to new window first, and a real click on it opens a real
+    window - the managed browser follows it as it follows any popup - holding
+    the session alone: its one tab, Main and the tasks, the chat and the
+    composer, with no sidebar, burger or +, filling the window on a desktop
+    and a phone in both themes. The tab leaves the main window; the new one
+    saves no layout, keeps a history of its own, follows the main window's
+    theme and closes with its tab, handing the browser back to the main
+    window, where the session is put back where it was."""
+    tab_id = "s:0:%d" % sid
+    tab_js = json.dumps(tab_id)
+    main_target = instance.page_target
+    popup_target, extra, before = "", "", None
+
+    async def press(point, button="left"):
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(
+                point, type=kind, button=button, clickCount=1,
+                buttons=(2 if button == "right" else 1) if kind == "mousePressed" else 0),
+                session=instance.page_session)
+
+    async def centre(script):
+        return await evaluate(instance, """(() => { const b = (%s).getBoundingClientRect();
+            return {x: b.left + b.width / 2, y: b.top + b.height / 2}; })()""" % script)
+
+    menu_rows = """[...document.querySelector('.menu.dyn').children]
+        .map(node => node.classList.contains('menu-sep') ? '-' : node.textContent)"""
+    outer_tab = "document.querySelector('.workspace-pane .tab[data-tab-id=\"%s\"]')" % tab_id
+    shape = """(() => {
+        const shown = node => !!node && getComputedStyle(node).display !== 'none' &&
+            node.getBoundingClientRect().width > 0;
+        const pane = document.querySelector('.workspace-pane');
+        const bar = pane.querySelector(':scope > .tabbar');
+        const tabs = [...bar.querySelectorAll('.tab')];
+        const view = state.views[%s], chat = view.activeView(), r = pane.getBoundingClientRect();
+        return {
+            popout: document.documentElement.classList.contains('popout'),
+            side: shown($('side')), edge: shown($('drawer-edge')), backdrop: shown($('side-backdrop')),
+            panes: document.querySelectorAll('.workspace-pane').length,
+            tabs: tabs.map(t => t.querySelector('.t-title').textContent),
+            draggable: tabs.map(t => t.draggable),
+            burger: !!bar.querySelector('.burger'), add: !!bar.querySelector(':scope > .tab-add-wrap'),
+            fills: Math.abs(r.left) < .5 && Math.abs(r.right - innerWidth) < .5 &&
+                Math.abs(r.bottom - innerHeight) < .5,
+            strip: [...view.root.querySelectorAll('.task-tabbar .tab')]
+                .map(t => t.querySelector('.t-title').textContent),
+            head: shown(chat.root.querySelector('.chat-head')),
+            prompts: chat.root.querySelectorAll('.msg-user').length,
+            composer: shown(chat.composer.box),
+            stateTabs: state.tabs.length, layout: localStorage.getItem('puppy.tabs'),
+        };
+    })()""" % tab_js
+    try:
+        before = await evaluate(instance, """(() => {
+            activateTab(%s);
+            const pane = workspacePaneForTab(%s);
+            return {pane: pane.id, index: pane.tabs.indexOf(%s), tabs: state.tabs.length};
+        })()""" % (tab_js, tab_js, tab_js))
+        await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+        await press(await centre(outer_tab), "right")
+        await until(instance, "!!document.querySelector('.menu.dyn')")
+        rows = await evaluate(instance, menu_rows)
+        assert rows[:2] == ["Move to new window", "-"], rows
+        await press(await centre("document.querySelector('.menu.dyn').children[0]"))
+        end = time.monotonic() + 10
+        while instance.page_target == main_target and time.monotonic() < end:
+            await asyncio.sleep(.05)
+        popup_target = instance.page_target
+        assert popup_target != main_target, "the press opened a real window"
+        await until(instance, "location.search === %s && typeof state !== 'undefined' && "
+                              "state.authed && !!state.views[%s] && state.views[%s].activeView().draftReady"
+                    % (json.dumps("?popout=" + tab_id), tab_js, tab_js))
+        attached = await instance.call("Target.attachToTarget", {"targetId": main_target, "flatten": True})
+        extra = attached["sessionId"]
+        main = await evaluate_in(instance, extra, """({tabs: state.tabs.map(t => t.id),
+            layout: localStorage.getItem('puppy.tabs'), menus: document.querySelectorAll('.menu.dyn').length})""")
+        assert tab_id not in main["tabs"] and len(main["tabs"]) == before["tabs"] - 1, (before, main)
+        assert main["menus"] == 0, main
+        assert '"%s"' % tab_id not in main["layout"], ("the main window saved its layout without the tab", main)
+
+        for width, height, scale, name in [(1280, 800, 1, "desktop"), (390, 844, 2, "phone")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": scale,
+                "mobile": name == "phone"}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                # the main window's switch; this window follows it through storage
+                await evaluate_in(instance, extra, "applyTheme(%s); true" % json.dumps(theme))
+                await until(instance, "document.documentElement.classList.contains('light') === %s"
+                            % json.dumps(theme == "light"))
+                await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+                got = await evaluate(instance, shape)
+                context = (name, theme, got)
+                assert got["popout"] and not got["side"] and not got["edge"] and not got["backdrop"], context
+                assert got["panes"] == 1 and got["tabs"] == ["Harbor dashboard"], context
+                assert got["draggable"] == [False] and not got["burger"] and not got["add"], context
+                assert got["fills"] and got["head"] and got["composer"] and got["prompts"] > 0, context
+                assert got["strip"][0] == "Main" and len(got["strip"]) >= 2, context
+                assert got["stateTabs"] == 1 and got["layout"] == main["layout"], context
+                if capture:
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                               session=instance.page_session)
+                    (BASE / "data" / ("popout-" + name + "-" + theme + ".png")).write_bytes(
+                        base64.b64decode(shot["data"]))
+        await evaluate_in(instance, extra, "applyTheme('dark'); true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1280, "height": 800, "deviceScaleFactor": 1, "mobile": False},
+            session=instance.page_session)
+
+        # Its own history: a task picked from the strip, and Back to Main.
+        await press(await centre("state.views[%s].root.querySelectorAll('.task-tabbar .tab')[1]" % tab_js))
+        await until(instance, "state.views[%s].selected !== %d" % (tab_js, sid))
+        await evaluate(instance, "history.back(); true")
+        await until(instance, "state.views[%s].selected === %d" % (tab_js, sid))
+        assert await evaluate(instance, "localStorage.getItem('puppy.tabs')") == main["layout"], \
+            "nothing in this window ever writes the main window's layout"
+
+        # Its tab's menu is the session's, without the move it already made.
+        await press(await centre(outer_tab), "right")
+        await until(instance, "!!document.querySelector('.menu.dyn')")
+        rows = await evaluate(instance, menu_rows)
+        assert "Move to new window" not in rows and rows[0] == "Rename", rows
+        await evaluate(instance, "closeAllMenus(null); true")
+
+        # Its tab's close closes the window, and the browser goes back to the main one.
+        await press(await centre(outer_tab + ".querySelector('.t-close')"))
+        end = time.monotonic() + 10
+        while instance.page_target in ("", popup_target) and time.monotonic() < end:
+            await asyncio.sleep(.05)
+        assert instance.page_target == main_target, "the window closed with its tab"
+        popup_target = ""
+        await until(instance, "location.search === '' && typeof state !== 'undefined' && state.authed")
+        print("PASS: a session tab moved to a window of its own - a real right-click and press open a real "
+              "window holding the session alone (its tab, Main and the tasks, the chat and the composer; no "
+              "sidebar, burger or +) on a desktop and a phone in both themes, the tab leaving the main window; "
+              "the window saving no layout, keeping its own history, following the main window's theme and "
+              "closing with its tab", flush=True)
+    finally:
+        if extra:
+            try:
+                await instance.call("Target.detachFromTarget", {"sessionId": extra})
+            except Exception:
+                pass
+        if popup_target:
+            try:
+                await instance.call("Target.closeTarget", {"targetId": popup_target})
+            except Exception:
+                pass
+            end = time.monotonic() + 10
+            while instance.page_target != main_target and time.monotonic() < end:
+                await asyncio.sleep(.05)
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+            session=instance.page_session)
+        # the session goes back to its place in the main window, for what follows
+        await evaluate(instance, """(() => {
+            openSessionTab(0, %d, findSessionMeta(0, %d));
+            const id = %s, home = workspacePanes().find(pane => pane.id === %s);
+            const now = workspacePaneForTab(id);
+            if (home && now) {
+                now.tabs.splice(now.tabs.indexOf(id), 1);
+                home.tabs.splice(Math.min(%d, home.tabs.length), 0, id);
+                home.active = id;
+                normalizeWorkspace();
+                activateTab(id);
+            }
+            window.demoView = state.views[id].activeView();
+            return true;
+        })()""" % (sid, sid, tab_js, json.dumps(before and before["pane"]),
+                   before["index"] if before else 0))
+        await until(instance, "!!demoView.sharedDraft && demoView.draftReady")
+
+
 async def engine_terminal_checks(console, sid):
     """The footer's engine names as links to the engine's own CLI, in a real
     browser: the plain text's face to the pixel with the pointer's cursor the
@@ -8576,6 +8759,9 @@ async def main(args):
             if args.model_substitute_only:
                 await model_substitute_checks(instances[0], args.screenshots)
                 return
+            if args.popout_only:
+                await popout_checks(instances[0], sid, args.screenshots)
+                return
             if args.notices_only:
                 await notices_panel_checks(instances[0], args.screenshots)
                 await notice_wrapping_checks(instances[0], args.screenshots)
@@ -8648,6 +8834,7 @@ async def main(args):
             await browser_cursor_checks(instances[0])
             await terminal_io_checks(instances[0])
             await engine_terminal_checks(instances[0], sid)
+            await popout_checks(instances[0], sid)
             await navigation_checks(instances[0], url, sid, args.screenshots)
             if args.screenshots:
                 await screenshots(instances[0])
@@ -8668,6 +8855,7 @@ if __name__ == "__main__":
     parser.add_argument("--navigation-only", action="store_true")
     parser.add_argument("--model-substitute-only", action="store_true")
     parser.add_argument("--notices-only", action="store_true")
+    parser.add_argument("--popout-only", action="store_true")
     parser.add_argument("--chat-filter-only", action="store_true")
     parser.add_argument("--show-focus-only", action="store_true")
     parser.add_argument("--thinking-only", action="store_true")

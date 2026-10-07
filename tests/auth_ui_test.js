@@ -11,20 +11,23 @@ const appSource = fs.readFileSync(path.join(__dirname, "../puppy/static/app.js")
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const reply = (data, ok = true) => ({ ok, json: async () => data });
 
-function startConsole(respond) {
+function startConsole(respond, { popout = null, hash = {} } = {}) {
   const document = new FakeDocument();
   document.body.innerHTML = '<div id="app" class="hidden"></div>';
-  const calls = [], steps = [], notices = [];
+  const calls = [], steps = [], notices = [], started = [], replaced = [];
   const state = { authed: false, tabs: [], sessions: [] };
   let reloads = 0;
   const context = { document, state, AbortController, setTimeout, clearTimeout,
-    $: id => document.getElementById(id), TOAST_LONG: 10000,
-    location: { reload: () => { reloads++; } },
+    $: id => document.getElementById(id), TOAST_LONG: 10000, POPOUT: popout,
+    location: { reload: () => { reloads++; }, replace: url => replaced.push(url), pathname: "/" },
+    popoutUrl: id => "/?popout=" + id,
+    findSessionMeta: (bid, sid) => bid ? null : state.sessions.find(s => s.id === sid) || null,
     fetch: async (url, options) => { calls.push({ url, options }); return respond(url); },
     toast: (...args) => notices.push(args),
     browserInstancesFor: () => false,
     openSessionHash: async () => steps.push("hash"),
-    navigation: { start: () => steps.push("history") }, navigationHash: () => ({}),
+    navigation: { start: route => { steps.push("history"); started.push(route); } },
+    navigationHash: () => hash,
     loadTabs: () => {
       assert.equal(state.instance, "Demo", "state is installed before restoring tabs");
       state.tabs = [{id:"s:0:7", type:"session", bid:0, sid:7},
@@ -41,7 +44,7 @@ function startConsole(respond) {
   vm.runInNewContext(between("function apiPath(", "/* Nothing a progress dialog") +
     between("function showAuth(", "function clearNodeStateRevisions(") +
     between("/* ================= go ================= */", "async function openSessionReference("), context);
-  return { document, state, calls, steps, notices, reloads: () => reloads };
+  return { document, state, calls, steps, notices, started, replaced, reloads: () => reloads };
 }
 
 async function start(status) {
@@ -166,5 +169,29 @@ async function start(status) {
   assert.equal(unavailable.reloads(), 0, "a network failure is not an expired login");
   assert.equal(unavailable.steps.includes("connectUpdates"), false);
   assert.equal(unavailable.notices[0][0], "Could not reach the backend · network error");
-  console.log("Sign-in/setup, errors, submission guard, reload, direct state startup and expired-login recovery passed");
+
+  // A session's own window starts on its one tab, never the saved layout, and
+  // goes back only to its own session's places.
+  const listing = sessions => async () => reply({instance_name:"Demo", sessions, engines:[], backends:[]});
+  const route = tab => ({ tab, task: 0, seq: 12, search: 0, settings: [0, 0, 0] });
+  const own = { bid: 0, sid: 7, id: "s:0:7" };
+  const window_ = startConsole(listing([{id:7, name:"Harbor"}, {id:8}]), { popout: own, hash: route("s:0:8") });
+  await tick();
+  assert.equal(window_.steps.includes("tabs"), false, "a session's window never restores the saved layout");
+  assert.deepEqual(Array.from(window_.state.tabs, t => [t.id, t.title]), [["s:0:7", "Harbor"]]);
+  assert.equal(window_.state.active, "s:0:7");
+  assert(window_.steps.includes("connectUpdates"), "it is a console of its own, with its own updates");
+  assert.deepEqual(window_.started, [null], "another session's place is not one it goes back to");
+  const back = startConsole(listing([{id:7}]), { popout: own, hash: route("s:0:7") });
+  await tick();
+  assert.deepEqual(back.started, [route("s:0:7")], "its own session's place is restored on a reload");
+  const gone = startConsole(listing([{id:8}]), { popout: own });
+  await tick();
+  assert.equal(gone.state.tabs.length, 0, "a deleted session leaves the window empty");
+  const task = startConsole(listing([{id:7}, {id:9, task:{parent:7}}]), { popout: { bid: 0, sid: 9, id: "s:0:9" } });
+  await tick();
+  assert.deepEqual(task.replaced, ["/?popout=s:0:7#view=s%3A0%3A7&task=9&seq=0"],
+    "a task's number opens its Main's window on that task");
+  assert.equal(task.steps.includes("connectUpdates"), false);
+  console.log("Sign-in/setup, errors, submission guard, reload, direct state startup, a session's own window and expired-login recovery passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });

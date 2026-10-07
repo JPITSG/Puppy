@@ -885,6 +885,18 @@ with a window of history around it.
   drag a tab to the edge of a pane to split the workspace. Tab layout is
   remembered per browser. Drag a divider or use its arrow keys to resize panes;
   double-click a divider to reset it.
+- **A session in its own window.** Right-click a session's tab and choose
+  **Move to new window** to take it out of the workspace into a separate
+  browser window, sized and placed like the pane it leaves. That window holds
+  just the session - its tab, Main and its tasks, the chat and the composer -
+  with no sidebar and no other tabs. It is a console of its own, so you can
+  open the same session in the main window again at any time. It follows the
+  console's light or dark theme, never changes the main window's saved tabs,
+  and closes when you close its tab. A link to another session opens in the
+  window it came from, or in a new console tab once that one is closed.
+  Browsers, terminals and VNC screens its agent opens appear in the window it
+  came from. If the browser blocks the pop-up, a notice says so and the tab
+  stays where it was.
 - **Sidebar width.** Drag its right edge to resize it, or double-click to reset
   the width. Its minimum fits every footer button and the CPU reading at 100%,
   including when restoring a saved width or opening the phone drawer. Pull
@@ -1225,11 +1237,12 @@ Node.js to run the JavaScript suites:
 ```sh
 python3 tests/compression_test.py    # startup gzip, cache invalidation and static HTTP behavior
 python3 tests/auth_surface_test.py   # public sign-in isolation and authenticated assets
-node tests/auth_ui_test.js           # sign-in/setup, direct state startup and expired logins
+node tests/auth_ui_test.js           # sign-in/setup, direct state startup, session windows and expired logins
 node tests/lazy_assets_ui_test.js     # optional libraries, retries and closed-view guards
 node tests/sidebar_ui_test.js        # sidebar ordering, pins, reorders, filtering
 python3 tests/session_directories_test.py # directory events, recovery and fallback on both runtimes
 node tests/tab_drag_ui_test.js       # task discovery, saved visibility and tab dragging
+node tests/popout_ui_test.js         # a session tab's own window and what it hands back
 node tests/drag_scroll_ui_test.js    # the lists a reorder drag scrolls, and the drops past their ends
 node tests/menu_dismiss_ui_test.js   # menu dismissal, toggles and open dropdowns
 node tests/navigation_ui_test.js    # browser Back/Forward, dialogs and cancellation ownership

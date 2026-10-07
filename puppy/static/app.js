@@ -1650,6 +1650,28 @@ const lsGet = (k) => localStorage.getItem(lsKey(k));
 const lsSet = (k, v) => localStorage.setItem(lsKey(k), v);
 const lsDel = (k) => localStorage.removeItem(lsKey(k));
 
+/* A session's tab can leave the workspace for a browser window of its own:
+   this same console page with the tab's id in its query
+   (?popout=s:<backend>:<session>). The path stays the console's, so the
+   window shares this browser's storage namespace - theme, drafts, chat
+   filters, the open task tabs - but it never writes the main window's tab
+   layout. It shows that one session, Main and its tasks, and nothing of the
+   console around them. It is a console of its own, not a remote control of
+   the window it left: the session can be open in both at once. */
+const POPOUT_PARAM = "popout";
+function popoutTarget(search) {
+  let value = "";
+  try { value = new URLSearchParams(search).get(POPOUT_PARAM) || ""; }
+  catch (_) { return null; }
+  const match = /^s:(0|[1-9][0-9]{0,8}):([1-9][0-9]{0,15})$/.exec(value);
+  if (!match) return null;
+  const bid = Number(match[1]), sid = Number(match[2]);
+  if (!Number.isSafeInteger(sid)) return null;
+  return { bid, sid, id: `s:${bid}:${sid}` };
+}
+const POPOUT = popoutTarget(location.search);
+if (POPOUT) document.documentElement.classList.add("popout");
+
 function storedStringSet(key) {
   try {
     const values = JSON.parse(lsGet(key) || "[]");
@@ -4010,6 +4032,9 @@ function storedWorkspace(node) {
 }
 
 function saveTabs() {
+  /* the main window's layout is the main window's: a session's own window
+     holds one tab it never saves, and must not replace the saved ones */
+  if (POPOUT) return;
   try {
     lsSet("puppy.tabs", JSON.stringify({
       version: 2,
@@ -4106,7 +4131,20 @@ async function enterApp() {
   $("app").classList.remove("hidden");
   syncSideMinimum();
   await refreshState();
-  loadTabs();
+  if (POPOUT) {
+    /* A session's own window holds its one tab, never the saved layout. A
+       task's number names its Main's window, opened on that task. */
+    const meta = findSessionMeta(POPOUT.bid, POPOUT.sid);
+    if (meta && meta.task) {
+      const parent = `s:${POPOUT.bid}:${meta.task.parent}`;
+      location.replace(popoutUrl(parent) +
+        `#view=${encodeURIComponent(parent)}&task=${POPOUT.sid}&seq=0`);
+      return;
+    }
+    state.tabs = [{ id: POPOUT.id, type: "session", bid: POPOUT.bid, sid: POPOUT.sid,
+      title: (meta && meta.name) || `Session ${POPOUT.sid}` }];
+    state.active = POPOUT.id;
+  } else loadTabs();
   const valid = state.tabs.filter(t => {
     if (t.type === "session")
       return t.bid ? true : state.sessions.some(s => s.id === t.sid);
@@ -4125,7 +4163,9 @@ async function enterApp() {
   connectUpdates();
   startRemotePolling();
   await openSessionHash();
-  navigation.start(navigationHash());
+  /* a session's own window has only its own session to go back to */
+  const route = navigationHash();
+  navigation.start(route && (!POPOUT || route.tab === POPOUT.id) ? route : null);
 }
 
 async function refreshState() {
@@ -7205,7 +7245,7 @@ function refreshGroup(bid) {
   if (bid) pollRemotes().catch(error => console.warn("remote group refresh failed", error));
 }   // local changes arrive via the updates websocket
 
-function sessionContextMenu(ev, bid, s) {
+function sessionContextMenu(ev, bid, s, options = {}) {
   ev.preventDefault();
   ev.stopPropagation();
   /* Mobile WebKit can begin native drag and still deliver contextmenu, but
@@ -7219,6 +7259,12 @@ function sessionContextMenu(ev, bid, s) {
     b.onclick = (e) => { e.stopPropagation(); menu.remove(); fn(); };
     menu.appendChild(b);
   };
+  /* The tab's own verb, ahead of the session's: only a tab moves (a sidebar
+     row has none to take along), and a session's own window is already one. */
+  if (options.tab && !POPOUT) {
+    add("Move to new window", () => moveSessionToWindow(options.tab.id));
+    menu.appendChild(el("div", "menu-sep"));
+  }
   const patch = async (body) => {
     try { await api(bid, `sessions/${s.id}`, { method: "PATCH", body }); refreshGroup(bid); }
     catch (e) { toast(e.message, "bad"); }
@@ -7269,7 +7315,8 @@ function sessionContextMenu(ev, bid, s) {
       () => copyWithToast(sessionWs ? sessionWs.root : s.cwd));
   if (sessionWs) {
     add("Workspace details", () => modalWorkspaceLink(bid, s));
-    const wsLink = linkForSession(bid, s.id);
+    /* a terminal is a tab, and a session's own window holds no other tab */
+    const wsLink = !POPOUT && linkForSession(bid, s.id);
     if (wsLink) add(`Terminal on ${wsLink.ws_name || "workspace backend"}`,
       () => openTermTab(wsLink.ws_backend, "", null, wsLink.root));
   }
@@ -10070,6 +10117,8 @@ function openSessionTab(bid, sid, meta, groupId = null) {
     return;
   }
   const id = `s:${bid}:${sid}`;
+  /* a session's own window opens its own session alone */
+  if (POPOUT && id !== POPOUT.id) return;
   let tab = state.tabs.find(t => t.id === id);
   if (!tab) {
     tab = { id, type: "session", bid, sid, title: (meta && (meta.name || `Session ${sid}`)) || `Session ${sid}` };
@@ -10207,6 +10256,14 @@ function syncSessionBrowserChips() {
    deliver it over both live sockets, so retain a client-side dedupe window.
    Insert it beside the originating chat but leave that chat focused. */
 function handleBrowserActivity(bid, sid, turnId, browserId = "") {
+  /* A session's own window holds no other tab: a browser its model opened
+     joins the console the window came from, which drops a repeat of one it
+     already heard about itself. */
+  if (POPOUT) {
+    const main = popoutOwns(bid, sid) && openingConsole();
+    if (main) try { main.handleBrowserActivity(bid, sid, turnId, browserId); } catch (_) {}
+    return;
+  }
   bid = Number(bid) || 0;
   sid = Number(sid) || 0;
   const token = String(turnId || "");
@@ -10234,6 +10291,11 @@ function handleBrowserActivity(bid, sid, turnId, browserId = "") {
    as Browser: beside its originating chat, visible to the user, without
    stealing focus or disturbing the composer. */
 function handleTerminalActivity(bid, sid, turnId, terminalId = "") {
+  if (POPOUT) {   // as handleBrowserActivity: the console it came from shows it
+    const main = popoutOwns(bid, sid) && openingConsole();
+    if (main) try { main.handleTerminalActivity(bid, sid, turnId, terminalId); } catch (_) {}
+    return;
+  }
   bid = Number(bid) || 0;
   sid = Number(sid) || 0;
   const token = String(turnId || "");
@@ -10257,6 +10319,11 @@ function handleTerminalActivity(bid, sid, turnId, terminalId = "") {
    insertion Browser and Terminal use, so the user can watch it work without
    the chat losing focus. */
 function handleVncActivity(bid, sid, turnId, vncId = "") {
+  if (POPOUT) {   // as handleBrowserActivity: the console it came from shows it
+    const main = popoutOwns(bid, sid) && openingConsole();
+    if (main) try { main.handleVncActivity(bid, sid, turnId, vncId); } catch (_) {}
+    return;
+  }
   bid = Number(bid) || 0;
   sid = Number(sid) || 0;
   const token = String(turnId || "");
@@ -10343,6 +10410,8 @@ function navigationCapture() {
 }
 
 function navigationApply(route, memory) {
+  /* a session's own window has no other view to go to */
+  if (POPOUT && route.tab !== POPOUT.id) route = { ...route, tab: POPOUT.id, task: 0, seq: 0 };
   let tab = state.tabs.find(item => item.id === route.tab);
   if (!tab && route.tab === "settings") openSettingsTab();
   else if (!tab && route.tab === "search") openSearchTab();
@@ -10504,6 +10573,91 @@ function closeTab(id, recordHistory = true) {
   renderSidebar();
   if (closing.type === "browser" || closing.type === "term") syncSessionBrowserChips();
   if (recordHistory) navigationChanged(); else navigation.reconcile();
+  /* A session's own window is there for its session: closing the tab, or
+     the session being deleted, closes the window as well. A window the
+     browser opened rather than the console cannot be closed by its page and
+     keeps the empty workspace's hint instead. */
+  if (POPOUT && !state.tabs.length) {
+    try { window.close(); } catch (_) {}
+  }
+}
+
+/* A session tab's own window: this console's page naming the session, the
+   size of the pane the tab leaves and over the place it held, so the tab
+   seems to lift out of the workspace. One window per session - moving the
+   same session again reloads that window rather than opening a second. The
+   tab leaves only once the window exists, so a blocked pop-up changes
+   nothing. Nothing ties the two windows together afterwards: the session can
+   be opened here again while its own window stays open. */
+const POPOUT_MIN_WIDTH = 420;
+const POPOUT_MIN_HEIGHT = 520;
+
+function popoutUrl(tabId) {
+  return `${location.pathname}?${POPOUT_PARAM}=${tabId}`;
+}
+
+function moveSessionToWindow(tabId) {
+  const tab = state.tabs.find(item => item.id === tabId);
+  if (POPOUT || !tab || tab.type !== "session") return false;
+  const pane = workspacePaneForTab(tabId);
+  const node = pane && [...document.querySelectorAll(".workspace-pane")]
+    .find(item => item.dataset.paneId === pane.id);
+  const box = node ? node.getBoundingClientRect() :
+    { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+  const display = window.screen || {};
+  const width = Math.round(Math.min(display.availWidth || box.width,
+    Math.max(POPOUT_MIN_WIDTH, box.width)));
+  const height = Math.round(Math.min(display.availHeight || box.height,
+    Math.max(POPOUT_MIN_HEIGHT, box.height)));
+  /* the pane's corner on the screen: the window's, past its frame */
+  const left = Math.round((window.screenX || 0) +
+    Math.max(0, (window.outerWidth - window.innerWidth) / 2) + box.left);
+  const top = Math.round((window.screenY || 0) +
+    Math.max(0, window.outerHeight - window.innerHeight) + box.top);
+  let opened = null;
+  try {
+    opened = window.open(popoutUrl(tabId), `puppy:${LS_NS}:${tabId}`,
+      `popup,width=${width},height=${height},left=${left},top=${top}`);
+  } catch (_) { opened = null; }
+  if (!opened) {
+    toast("Could not open a new window · allow pop-ups for Puppy in this browser",
+      "bad", TOAST_LONG);
+    return false;
+  }
+  try { opened.focus(); } catch (_) {}
+  closeTab(tabId);
+  return true;
+}
+
+/* Which kind of console this page is, asked across windows: a full console,
+   or one session's own window. */
+function consoleWindowKind() {
+  return POPOUT ? "session" : "console";
+}
+
+/* The console a session's own window came from, while it still is one: the
+   window that opened it, on this origin and mount, a full console rather
+   than another session's window. What a session's window has no place for -
+   another session, or a browser, terminal or VNC screen the model opened -
+   goes there. */
+function openingConsole() {
+  try {
+    const main = window.opener;
+    if (!main || main.closed || main === window) return null;
+    if (main.location.origin !== location.origin ||
+        main.location.pathname !== location.pathname) return null;
+    return typeof main.consoleWindowKind === "function" &&
+      main.consoleWindowKind() === "console" ? main : null;
+  } catch (_) { return null; }   // it has moved on to another site
+}
+
+/* A conversation this session's window shows: its session, or a task of it. */
+function popoutOwns(bid, sid) {
+  if (!POPOUT || (Number(bid) || 0) !== POPOUT.bid) return false;
+  sid = Number(sid) || 0;
+  if (sid === POPOUT.sid || sessionViewFor(POPOUT.bid, sid)) return true;
+  const meta = findSessionMeta(POPOUT.bid, sid);
+  return !!(meta && meta.task && meta.task.parent === POPOUT.sid);
 }
 
 function isTabVisible(id) {
@@ -10681,7 +10835,8 @@ function wireTabDrag(tab, tabsRoot, identity) {
 function renderTabNode(t, pane, tabsRoot) {
   const tab = el("div", "tab" + (pane.active === t.id ? " active" : ""));
   tab.dataset.tabId = t.id;
-  wireTabDrag(tab, tabsRoot, { id: t.id, sourcePaneId: pane.id });
+  /* a session's own window has its one tab and no pane to move it to */
+  if (!POPOUT) wireTabDrag(tab, tabsRoot, { id: t.id, sourcePaneId: pane.id });
 
   let dotCls = "settings", dotColor = "";
   if (t.type === "session") {
@@ -10712,7 +10867,7 @@ function renderTabNode(t, pane, tabsRoot) {
     suppressContextGestureActivation(tab);
     tab.addEventListener("contextmenu", (event) => {
       const meta = findSessionMeta(t.bid, t.sid);
-      if (meta) sessionContextMenu(event, t.bid, meta);
+      if (meta) sessionContextMenu(event, t.bid, meta, { tab: t });
     });
   }
   const close = el("button", "t-close");
@@ -11176,7 +11331,9 @@ function renderWorkspacePane(pane) {
      split, and first is the left half of a row and the top half of a column, so
      its head is the top-left pane whatever the layout. */
   const leading = workspacePanes()[0];
-  if (leading && leading.id === pane.id) tabbar.appendChild(burgerButton());
+  /* A session's own window has no session list to open and no tab to add:
+     its bar holds the one tab. */
+  if (!POPOUT && leading && leading.id === pane.id) tabbar.appendChild(burgerButton());
   const tabScroll = el("div", "tab-scroll edge-scroll-viewport");
   const tabsRoot = el("div", "tabs");
   tabsRoot.dataset.paneId = pane.id;
@@ -11186,14 +11343,16 @@ function renderWorkspacePane(pane) {
   }
   tabScroll.appendChild(tabsRoot);
   tabbar.appendChild(tabScroll);
-  const addWrap = el("div", "tab-add-wrap");
-  const add = el("button", "icon-btn");
-  add.type = "button";
-  add.setAttribute("aria-label", "New tab");
-  add.appendChild(plusIcon(14));
-  add.onclick = event => showTabAddMenu(pane.id, add, event);
-  addWrap.appendChild(add);
-  tabbar.appendChild(addWrap);
+  if (!POPOUT) {
+    const addWrap = el("div", "tab-add-wrap");
+    const add = el("button", "icon-btn");
+    add.type = "button";
+    add.setAttribute("aria-label", "New tab");
+    add.appendChild(plusIcon(14));
+    add.onclick = event => showTabAddMenu(pane.id, add, event);
+    addWrap.appendChild(add);
+    tabbar.appendChild(addWrap);
+  }
   wireTabScrolling(tabsRoot, pane.id);
   wireTabbar(tabbar, tabsRoot, pane);
   root.appendChild(tabbar);
@@ -11303,7 +11462,12 @@ function renderTabs(focusTabId = null) {
   if (!panes.some(pane => pane.active)) {
     const host = tree.querySelector(".pane-views");
     hint.classList.remove("hidden");
-    hint.querySelector("p").innerHTML = state.tabs.length ?
+    /* a session's own window that has lost it - deleted, or closed where
+       the browser would not let the page close its window - has no list on
+       its left to point at */
+    hint.querySelector("p").innerHTML = POPOUT ?
+      "No session in this window.<br>Open sessions from Puppy's main window." :
+      state.tabs.length ?
       "Choose a tab above or open a session from the left." :
       "No tabs open.<br>Create a session or open one from the left.";
     if (host) host.appendChild(hint);
@@ -11593,6 +11757,13 @@ function applyTheme(t) {
 $("btn-theme").onclick = () =>
   applyTheme(document.documentElement.classList.contains("light") ? "dark" : "light");
 applyTheme(lsGet("puppy.theme") || "dark");
+/* A session's own window has no footer and so no switch: it follows the
+   theme the console keeps in this browser's storage. */
+if (POPOUT) window.addEventListener("storage", event => {
+  if (event.key === lsKey("puppy.theme") &&
+      (event.newValue === "light" || event.newValue === "dark") &&
+      event.newValue !== currentTheme()) applyTheme(event.newValue);
+});
 
 /* generated titles: what the console keeps of the controller's settings -
    whether they name new sessions at all, and who does the naming */
@@ -30365,7 +30536,8 @@ function modalWorkspaceLink(bid, session) {
     }
     noLink.classList.toggle("hidden", !!link);
     syncBtn.classList.toggle("hidden", !link);
-    const canShell = link && (link.ws_backend === 0 || backendHasCapability(
+    /* a terminal is a tab, and a session's own window holds no other tab */
+    const canShell = !POPOUT && link && (link.ws_backend === 0 || backendHasCapability(
       state.backends.find(b => b.id === link.ws_backend), "terminal"));
     termBtn.classList.toggle("hidden", !canShell);
     if (link) termBtn.textContent = "Terminal on " + link.ws_name;
@@ -30794,6 +30966,11 @@ async function openSessionReference(ref, seq = 0, adoptHistory = false) {
     if (!row) throw new Error("That session is deleted or its backend is unavailable");
     const payload = await api(row.bid, `sessions/${row.id}`);
     if (request !== sessionReferenceSequence || revision !== navigation.revision) return;
+    const parent = payload.session.task ? payload.session.task.parent : row.id;
+    if (POPOUT && `s:${row.bid}:${parent}` !== POPOUT.id) {
+      showSessionInConsole(ref, seq);
+      return;
+    }
     if (adoptHistory && navigation.current) {
       const session = payload.session;
       const rows = sessionsFor(row.bid);
@@ -30802,6 +30979,17 @@ async function openSessionReference(ref, seq = 0, adoptHistory = false) {
         task: row.id, seq, search: 0, settings: [0, 0, 0] });
     } else openSessionLocation(row.bid, row.id, payload.session, seq);
   } catch (error) { toast(error.message, "bad"); }
+}
+
+/* Another session belongs to a full console, never to one session's own
+   window: the console the window came from, else a new one opened at it. */
+function showSessionInConsole(ref, seq) {
+  const main = openingConsole();
+  try {
+    if (main) { main.openSessionReference(ref, seq); main.focus(); return; }
+  } catch (_) { /* it went away mid-call; open a console below instead */ }
+  if (!window.open(`${location.pathname}#session=${ref}&seq=${seq}`, "_blank"))
+    toast("Could not open Puppy · allow pop-ups for Puppy in this browser", "bad", TOAST_LONG);
 }
 
 function openSessionLocation(bid, sid, session, seq) {

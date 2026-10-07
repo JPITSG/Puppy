@@ -51,7 +51,7 @@ function harness(bid = 0, namespace = "") {
   const icon = () => document.createElement("svg");
   const context = vm.createContext({
   navigation: { layer: () => () => {} }, navigationRemember: () => {}, navigationChanged: () => {},
-    document, state, SessionView, Element: FakeElement,
+    document, state, SessionView, Element: FakeElement, POPOUT: null,
     lsKey: key => namespace + key,
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) },
     window: { matchMedia: () => ({ matches: reduced }) },

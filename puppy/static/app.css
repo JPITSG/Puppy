@@ -195,6 +195,13 @@ a{color:var(--acc2)}
 /* ---------- layout ---------- */
 .app{display:flex;height:100vh;height:100dvh;position:relative;z-index:1}
 .main{flex:1;display:flex;flex-direction:column;min-width:0}
+/* A session's own window (?popout=): its one session, Main and the tasks,
+   with none of the console around them - no sidebar, drawer or drawer edge -
+   and the backdrop grid reaching the left edge where the list would stand. */
+html.popout .app .side,
+html.popout .app .side-backdrop,
+html.popout .app .drawer-edge{display:none}
+html.popout body::after{--side-w:0px}
 
 /* ---------- sidebar ---------- */
 /* side / tabbar / chat-head share the transparent body backdrop (no tint seams);
