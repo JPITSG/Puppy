@@ -149,6 +149,13 @@ SESSION_PROMPT_HISTORY_CAPABILITY = "session-prompt-history"
 # session's prompt ``total``. The console's prompt gutter numbers and lists
 # prompts from it; a node without it is read through kind=user event pages.
 SESSION_PROMPT_INDEX_CAPABILITY = "session-prompt-index"
+# The prompt index's rows go on as [seq, ts, steered, excerpt, answer_seq,
+# outcome]: where the prompt's turn left its final answer (the last assistant
+# message before its result, else the result, interruption or error it ended
+# on; 0 for none and for a steered prompt) and how it ended - "ok", "bad",
+# "stopped", or "" while it has not. The prompt list marks every prompt with it
+# and jumps to that answer; only the newest prompt's row can still change.
+SESSION_PROMPT_ANSWERS_CAPABILITY = "session-prompt-answers"
 # POST /api/sessions/{sid}/tool runs one engine-native maintenance action:
 # "compact" summarizes the native context in place (queued behind pending work
 # as an additive runnable {kind:"tool"} row) and "undo" drops the last prompt
@@ -360,6 +367,7 @@ BASE_CAPABILITIES = (
     SESSION_EVENT_WINDOW_CAPABILITY,
     SESSION_PROMPT_HISTORY_CAPABILITY,
     SESSION_PROMPT_INDEX_CAPABILITY,
+    SESSION_PROMPT_ANSWERS_CAPABILITY,
     SESSION_TOOLS_CAPABILITY,
     SESSION_FAST_MODE_CAPABILITY,
     SESSION_AGENT_NOTES_CAPABILITY,

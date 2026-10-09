@@ -1220,7 +1220,10 @@ async def h_session_prompts(request: web.Request):
     if not 1 <= limit <= prompt_index.PAGE_LIMIT:
         return web.json_response(
             {"error": "prompt limit must be between 1 and {}".format(prompt_index.PAGE_LIMIT)}, status=400)
-    return web.json_response(prompt_index.read(s["id"], after_seq, limit))
+    # a whole index walks the session's turns: off the loop, like a search
+    index = await asyncio.get_running_loop().run_in_executor(
+        None, prompt_index.read, s["id"], after_seq, limit)
+    return web.json_response(index)
 
 
 # ---- fs helpers (cwd picker) ----

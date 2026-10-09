@@ -18,7 +18,11 @@
    never draws more than it shows, the prompt being read lit and in view,
    the list's own scroll, the filter by text or number, the keys and the
    pointer, a pick landing like a step, a new index under an open list, and
-   every way it closes. No browser, engine, network or quota. */
+   every way it closes. Then each prompt's answer: the mark beside its number
+   for each way a turn ends, the jump to the answer by the mark or Shift+Enter
+   beside the number's and Enter's to the prompt, and the newest turn's row
+   read again when a turn ends or a new prompt closes it. No browser, engine,
+   network or quota. */
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -166,7 +170,7 @@ const key = (node, name) => {
 
   /* ---- the index: compact rows, after what it holds, whole when it stops adding up ---- */
   {
-    const view = makeView(0, 7);
+    const view = makeView(5, 7);    // a node with the index and without its answers
     const gutter = new api.PromptGutter(view);
     assert.ok(view.scroll.querySelector(".prompt-pins") && view.root.querySelector(".prompt-plates"),
               "the pins scroll with the transcript, the plates stand over it");
@@ -482,6 +486,7 @@ const key = (node, name) => {
     assert.equal(document.activeElement, filter, "the filter takes the keys");
     assert.equal(filter.getAttribute("aria-controls"), rows.id);
     assert.equal(panel.querySelector(".prompt-list-count").textContent, "577", "the numbered prompts, the one on the page too");
+    assert.ok(!panel.querySelector(".prompt-list-pair, .prompt-list-mark"), "no answers named: the number alone");
     const space = panel.querySelector(".prompt-list-space");
     const total = gutter.index.size;
     assert.equal(parseFloat(space.style.height), total * api.PROMPT_LIST_ROW, "room for every row");
@@ -603,4 +608,123 @@ const key = (node, name) => {
               "prompt being read lit and centred, steers on a rail from their own prompt and from no other, its own " +
               "scroll, the filter by text or number, the keys and the " +
               "pointer, picks landing like a step, a new index under it, and every way it closes");
+
+  /* ---- each prompt's answer: a mark beside its number, the newest turn read again ---- */
+  {
+    const view = makeView(0, 14);
+    view.status = "idle";
+    view.answers = [];
+    view.jumpToAnswer = function (seq) { this.answers.push(seq); };
+    const gutter = new api.PromptGutter(view);
+    const turn = (seq, answer, outcome, steering = false) =>
+      [seq, 1000 + seq, steering ? 1 : 0, "prompt " + seq, answer, outcome];
+    requests.length = 0;
+    routes["sessions/14/prompts?after_seq=0"] = {prompts: [turn(2, 4, "ok"), turn(6, 9, "bad"), turn(7, 0, "", true),
+      turn(11, 13, "stopped"), turn(15, 18, "ok"), turn(20, 21, "weird"), turn(22, 25, "")], total: 7, more: false};
+    await gutter.refreshIndex();
+    assert.ok(gutter.answers, "this node names each turn's answer");
+    assert.deepEqual([2, 6, 7, 11, 15, 20, 22].map(seq => [gutter.index.get(seq).answer, gutter.index.get(seq).outcome]),
+      [[4, "ok"], [9, "bad"], [0, ""], [13, "stopped"], [18, "ok"], [21, ""], [25, ""]],
+      "an outcome it does not know is none");
+    // only the newest turn can still end: its row is read again, a steer after it with it
+    requests.length = 0;
+    routes["sessions/14/prompts?after_seq=21"] = {prompts: [turn(22, 27, "ok"), turn(23, 0, "", true)], total: 8, more: false};
+    await gutter.refreshIndex();
+    assert.deepEqual(requests.map(r => r[1]), ["sessions/14/prompts?after_seq=21"]);
+    assert.deepEqual([gutter.index.get(22).answer, gutter.index.get(22).outcome], [27, "ok"]);
+    assert.equal(gutter.indexSeq, 23);
+    requests.length = 0;
+    await gutter.refreshIndex();
+    assert.deepEqual(requests.map(r => r[1]), ["sessions/14/prompts?after_seq=21"], "a steer is never the open turn");
+
+    // the marks: tick, cross, dash; none for a steer or a turn with no end to show
+    bubble(view, 22, 900, {text: "prompt 22"});
+    gutter.render();
+    const button = view.root.querySelector(".prompt-list-button");
+    button.onclick();
+    let panel = document.body.querySelector(".prompt-list");
+    const rowOf = seq => [...document.body.querySelectorAll(".prompt-list-row")].find(node => node._seq === seq);
+    const markOf = seq => rowOf(seq).querySelector(".prompt-list-mark");
+    const marks = () => [2, 6, 7, 11, 15, 20, 22].map(seq => {
+      const mark = markOf(seq);
+      return mark ? mark.className.split(" ").filter(name => name !== "prompt-list-mark").join(" ") : null;
+    });
+    assert.deepEqual(marks(), ["ok", "bad", null, "stopped", "ok", null, "ok"]);
+    const pair = rowOf(2).querySelector(".prompt-list-pair");
+    assert.deepEqual(pair && [...pair.children].map(node => node.className), ["prompt-list-num", "prompt-list-mark ok"],
+                     "the number and its mark stand as a pair");
+    assert.equal(rowOf(2).querySelector(".prompt-list-num").title, "Prompt #1");
+    assert.ok(rowOf(20).querySelector(".prompt-list-pair") && !markOf(20), "an unmarked number keeps its column");
+    assert.ok(!rowOf(7).querySelector(".prompt-list-pair"), "a steer is its bead alone");
+    assert.deepEqual([2, 6, 11].map(seq => markOf(seq).getAttribute("aria-label")),
+      ["Final answer to #1", "#2 failed · jump to where it ended", "#3 was stopped · jump to where it ended"]);
+    assert.equal(markOf(6).title, markOf(6).getAttribute("aria-label"));
+    assert.ok(markOf(2).querySelector("svg"), "a drawn mark");
+    // a mark lands its answer; the number, the row and Enter its prompt
+    markOf(6).dispatchEvent(new FakeEvent("click", {bubbles: true}));
+    assert.deepEqual(view.answers, [9]);
+    assert.ok(!panel.isConnected && document.activeElement === button, "and hands the keys back");
+    button.onclick();
+    rowOf(11).querySelector(".prompt-list-num").dispatchEvent(new FakeEvent("click", {bubbles: true}));
+    assert.deepEqual(view.jumps, [11]);
+    button.onclick();
+    rowOf(15).querySelector(".prompt-list-text").dispatchEvent(new FakeEvent("pointermove", {bubbles: true}));
+    const shifted = key => { const event = new FakeEvent("keydown", {bubbles: true}); event.key = "Enter";
+      event.shiftKey = key; document.body.querySelector(".prompt-list-filter").dispatchEvent(event); return event; };
+    shifted(true);
+    assert.deepEqual(view.answers, [9, 18], "Shift+Enter lands the active row's answer");
+    button.onclick();
+    rowOf(20).querySelector(".prompt-list-text").dispatchEvent(new FakeEvent("pointermove", {bubbles: true}));
+    shifted(true);
+    assert.ok(document.body.querySelector(".prompt-list") && view.answers.length === 2,
+              "a row with no answer to land keeps the list");
+    shifted(false);
+    assert.deepEqual(view.jumps, [11, 20], "Enter is still the prompt");
+
+    // a new prompt closes the turn before it: read again under an open list
+    button.onclick();
+    requests.length = 0;
+    routes["sessions/14/prompts?after_seq=21"] = {prompts: [turn(22, 27, "ok"), turn(23, 0, "", true), turn(30, 0, "")],
+      total: 9, more: false};
+    bubble(view, 30, 1400, {text: "prompt 30"});
+    view.status = "running";
+    gutter.render();
+    await settle();
+    assert.deepEqual(requests.map(r => r[1]), ["sessions/14/prompts?after_seq=21"]);
+    flush();
+    assert.ok(markOf(30) && markOf(30).classList.contains("busy") && markOf(30).querySelector(".prompt-list-spin"),
+              "the newest turn works: a spinner");
+    assert.equal(markOf(30).getAttribute("aria-label"), "Still working");
+    assert.ok(markOf(22).classList.contains("ok"), "the turn before it keeps its tick");
+    markOf(30).dispatchEvent(new FakeEvent("click", {bubbles: true}));
+    assert.ok(document.body.querySelector(".prompt-list") && view.answers.length === 2, "a spinner lands nothing");
+    // the session stops working: the spinner goes with it, until the row says how it ended
+    view.status = "idle";
+    gutter.runChanged();
+    assert.equal(markOf(30), null);
+    view.status = "running";
+    gutter.runChanged();
+    assert.ok(markOf(30).classList.contains("busy"));
+    gutter.index.get(30).outcome = "ok";
+    gutter.index.get(30).answer = 33;
+    gutter.runChanged();
+    assert.ok(markOf(30).classList.contains("ok"), "an answered turn under a session tool's work keeps its tick");
+    view.status = "idle";
+    // a turn that ends under a closed list is read again when it opens
+    key(document.body.querySelector(".prompt-list-filter"), "Escape");
+    assert.ok(!document.body.querySelector(".prompt-list"));
+    requests.length = 0;
+    gutter.answersMoved();
+    assert.equal(requests.length, 0, "nothing is read for a closed list");
+    routes["sessions/14/prompts?after_seq=29"] = {prompts: [turn(30, 33, "bad")], total: 9, more: false};
+    button.onclick();
+    await settle();
+    assert.deepEqual(requests.map(r => r[1]), ["sessions/14/prompts?after_seq=29"]);
+    flush();
+    assert.ok(markOf(30).classList.contains("bad"));
+    gutter.destroy();
+  }
+  console.log("PASS: each prompt's answer - a tick, cross or dash beside its number, a spinner while the newest " +
+              "turn works, none for a steer; the mark and Shift+Enter land the answer, the number and Enter the " +
+              "prompt; the newest turn's row read again when a turn ends or a new prompt closes it");
 })().catch(error => { console.error(error); process.exit(1); });

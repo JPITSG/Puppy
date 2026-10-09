@@ -198,7 +198,7 @@ function header(sid = 1, bid = 0) {
   v.sendBtn = document.createElement("button");
   v.queueBtn = document.createElement("button");
   v.composer = {syncUploadButton() {}};
-  v.promptGutter = {refreshIndex() {}, schedule() {}};
+  v.promptGutter = {refreshIndex() {}, schedule() {}, runChanged() {}, answersMoved() {}};
   v.steering = v.sideQuestion = {};
   v.scrollBottom = v.syncHeadOverflow = v.updateSteerControl = v.renderStatus =
     v.updateApprovalControl = v.setSteeringState = v.setSideQuestionState =

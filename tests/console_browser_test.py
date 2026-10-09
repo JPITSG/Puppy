@@ -2025,7 +2025,12 @@ async def prompt_gutter_checks(instance):
     rows in view with the prompt being read lit; a real wheel takes it to the
     first prompt; typed text and a number filter it; Enter lands a prompt the
     page did not hold under the list button, and a real click on a row lands
-    another."""
+    another. Beside every number its turn's mark - a tick, the cross of a
+    failed turn, the dash of a stopped one, none for a steer, whose bead and
+    rail stay under the capsules - in the tone colours, one pair 4px apart and
+    centred; under a real hover the number and the mark light on their own and
+    the lit capsule deepens; Shift+Enter lands a final answer the page did not
+    hold and a real click on a cross where its turn failed."""
     page = instance.page_session
     sid = db.create_session("Prompt history", "claude", "/home/mira/projects/harbor", "", "", "", "default")
     steered = {7, 19, 28}
@@ -2236,18 +2241,31 @@ async def prompt_gutter_checks(instance):
           "to the newest message; a narrow pane making room, a phone and a filtered transcript "
           "showing none; the prompt list over four hundred prompts read from the node's compact index, opened by a "
           "real click beside the gutter, drawing only the rows in view in capsules of one width, scrolled by a real wheel, filtered by text "
-          "and number, Enter and a real click landing prompts the page did not hold, in both themes", flush=True)
+          "and number, Enter and a real click landing prompts the page did not hold, each turn's mark beside its number "
+          "lighting on its own under a real hover, Shift+Enter and a real click on a mark landing a final answer or "
+          "where a turn failed, in both themes", flush=True)
 
 
 async def prompt_list_checks(instance, landing):
     page = instance.page_session
     sid = db.create_session("Long project", "claude", "/home/mira/projects/harbor", "", "", "", "default")
     topics = ["the checkout flow", "the coupon field", "a flaky test", "the release notes", "the German strings"]
+    ends = {}
     for turn in range(1, 401):
         db.add_event(sid, "user", {"text": "Prompt %d: look at %s again and tell me what changed"
                                            % (turn, topics[turn % len(topics)])})
-        db.add_event(sid, "assistant", {"text": "Looked at it; answer %d." % turn})
-        db.add_event(sid, "result", {"ok": True, "duration_ms": 1000})
+        if turn == 398:
+            db.add_event(sid, "user", {"text": "Keep the old wording too", "steering": True,
+                                       "request_id": "steer-398", "turn_id": "turn-398"})
+        answer = db.add_event(sid, "assistant", {"text": "Looked at it; answer %d." % turn})["seq"]
+        # how a turn ends, as its mark says: answered, failed at its result, stopped by the person
+        if turn == 395:
+            ends[turn] = db.add_event(sid, "result", {"ok": False, "error": "overloaded", "duration_ms": 1000})["seq"]
+        elif turn == 396:
+            ends[turn] = db.add_event(sid, "info", {"subtype": "interrupted", "text": "Turn interrupted by user"})["seq"]
+        else:
+            ends[turn] = answer
+            db.add_event(sid, "result", {"ok": True, "duration_ms": 1000})
     runner.broadcast_sessions()
     view = "sessionViewFor(0,%d)" % sid
     # a desktop's precise pointer, which headless Chromium does not report: the list's filter takes the keys
@@ -2257,7 +2275,7 @@ async def prompt_list_checks(instance, landing):
         await until(instance, "!!findSessionMeta(0,%d)" % sid)
         await evaluate(instance, "performance.clearResourceTimings(); openSessionTab(0,%d,findSessionMeta(0,%d)); true"
                        % (sid, sid))
-        await until(instance, "!!%s && %s.draftReady && %s.promptGutter.index.size === 400 && "
+        await until(instance, "!!%s && %s.draftReady && %s.promptGutter.index.size === 401 && "
                               "%s.promptGutter.active" % (view, view, view, view))
         reads = await evaluate(instance, """performance.getEntriesByType('resource').map(e => new URL(e.name))
             .filter(u => u.pathname.includes('/sessions/%d/')).map(u => u.pathname.split('/').pop() + u.search)""" % sid)
@@ -2280,7 +2298,8 @@ async def prompt_list_checks(instance, landing):
                     buttonTop: button.top, vw: innerWidth, vh: innerHeight, drawn: drawn.length,
                     visible: visible.map(n => n.querySelector('.prompt-list-num').textContent),
                     // every capsule one width, its number inside it, every first line in one column
-                    capsules: [...new Set(visible.map(n => r(n.querySelector('.prompt-list-num')).width))],
+                    capsules: [...new Set(visible.filter(n => !n.classList.contains('steer'))
+                        .map(n => r(n.querySelector('.prompt-list-num')).width))],
                     fits: visible.every(n => { const c = n.querySelector('.prompt-list-num');
                         return c.scrollWidth <= c.clientWidth; }),
                     texts: [...new Set(visible.map(n => r(n.querySelector('.prompt-list-text')).left))],
@@ -2302,6 +2321,63 @@ async def prompt_list_checks(instance, landing):
                 await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1),
                                     session=page)
 
+        async def mouse_to(point):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type="mouseMoved"), session=page)
+
+        # every visible row named by its number, the pair measured against its capsule and the text after it
+        pair_measure = """(() => {
+            const panel = document.querySelector('.prompt-list'), r = n => n.getBoundingClientRect();
+            const shown = r(panel.querySelector('.prompt-list-rows'));
+            const rows = [...panel.querySelectorAll('.prompt-list-row')]
+                .filter(n => r(n).bottom > shown.top + 1 && r(n).top < shown.bottom - 1);
+            const numbered = rows.filter(n => !n.classList.contains('steer'));
+            for (const n of numbered) n.dataset.n = n.querySelector('.prompt-list-num').textContent;
+            const marks = {}, tones = {};
+            const round = v => Math.round(v * 2) / 2;
+            const gaps = new Set(), sizes = new Set(), textGaps = new Set();
+            let centred = true;
+            for (const n of numbered) {
+                const mark = n.querySelector('.prompt-list-mark'), cap = r(n.querySelector('.prompt-list-num'));
+                if (!mark) continue;
+                const state = ['ok', 'bad', 'stopped', 'busy'].find(c => mark.classList.contains(c));
+                marks[n.dataset.n] = state;
+                tones[state] = getComputedStyle(mark).color;
+                const box = r(mark);
+                gaps.add(round(box.left - cap.right));
+                sizes.add(Math.round(box.width) + 'x' + Math.round(box.height));
+                textGaps.add(round(r(n.querySelector('.prompt-list-text')).left - box.right));
+                centred = centred && Math.abs((box.top + box.bottom) / 2 - (cap.top + cap.bottom) / 2) < 0.6;
+            }
+            delete tones.busy;
+            const want = {};
+            for (const name of ['ok', 'err', 'warn', 'acc']) {
+                const probe = panel.appendChild(document.createElement('span'));
+                probe.style.color = 'var(--' + name + ')';
+                want[name] = getComputedStyle(probe).color;
+                probe.remove();
+            }
+            const steer = rows.find(n => n.classList.contains('steer'));
+            const cap = r(numbered[0].querySelector('.prompt-list-num')), middle = (cap.left + cap.right) / 2;
+            const bead = r(steer.querySelector('.prompt-list-num'));
+            const rail = r(steer).left + parseFloat(getComputedStyle(steer, '::before').left) + 1;
+            const current = panel.querySelector('.prompt-list-row.current .prompt-list-num');
+            return {marks, tones, want, gaps: [...gaps], sizes: [...sizes], textGaps: [...textGaps], centred,
+                    currentFill: current ? getComputedStyle(current).backgroundColor : '',
+                    steerMark: !!steer.querySelector('.prompt-list-mark'),
+                    bead: Math.abs((bead.left + bead.right) / 2 - middle), rail: Math.abs(rail - middle)};
+        })()"""
+
+        # the capsule's and the mark's fills once the hover's fade has finished
+        async def settled_hover(number, part="num"):
+            script = """(() => { const row = document.querySelector('.prompt-list-row[data-n="%s"]');
+                const fill = n => n ? getComputedStyle(n).backgroundColor : '';
+                const num = row.querySelector('.prompt-list-num'), mark = row.querySelector('.prompt-list-mark');
+                return {num: fill(num), mark: fill(mark), hovered: (%s).matches(':hover')}; })()""" % (
+                number, "num" if part != "mark" else "mark")
+            await until(instance, "(%s).hovered" % script)
+            await evaluate(instance, "new Promise(r => setTimeout(r, 400))")
+            return await evaluate(instance, script)
+
         async def centre(script):
             return await evaluate(instance, """(() => { const b = (%s).getBoundingClientRect();
                 return {x: b.left + b.width / 2, y: b.top + b.height / 2}; })()""" % script)
@@ -2317,6 +2393,27 @@ async def prompt_list_checks(instance, landing):
                 return {offset: node.getBoundingClientRect().top - v.scroll.getBoundingClientRect().top,
                         flashed: node.classList.contains('search-flash')}; })()""" % view)
 
+        async def answered(seq):
+            await until(instance, "!!%s.inner.querySelector('[data-seq=\"%d\"].search-flash')" % (view, seq))
+            return await evaluate(instance, """(() => { const v = %s, node = v.inner.querySelector('[data-seq="%d"]');
+                return {offset: node.getBoundingClientRect().top - v.scroll.getBoundingClientRect().top,
+                        text: node.textContent.trim(), result: node.classList.contains('result-line'),
+                        open: !!document.querySelector('.prompt-list')}; })()""" % (view, seq))
+
+        # this headless Chromium reports no hover (hover:none): the list's own (hover:hover) rules are laid over it
+        borrowed = await evaluate(instance, """(() => {
+            const rules = [];
+            for (const sheet of document.styleSheets) for (const rule of sheet.cssRules)
+                if (rule.type === CSSRule.MEDIA_RULE && rule.conditionText.replace(/\\s/g, '') === '(hover:hover)')
+                    for (const inner of rule.cssRules)
+                        if (/\\.prompt-list-(pair|mark)/.test(inner.cssText)) rules.push(inner.cssText);
+            const style = document.createElement('style');
+            style.id = 'prompt-list-hover-test';
+            style.textContent = rules.join('\\n');
+            document.head.appendChild(style);
+            return rules.length;
+        })()""")
+        assert borrowed == 2, borrowed   # the number's and the mark's fill, the lit capsule's deepening
         for theme in ("dark", "light"):
             await evaluate(instance, "applyTheme(%s); %s.scrollBottom(true); true" % (json.dumps(theme), view))
             await click_at(await centre("%s.promptGutter.listButton" % view))
@@ -2332,6 +2429,26 @@ async def prompt_list_checks(instance, landing):
                 ("three digits in capsules of one width, the first lines in one column", theme, g)
             assert not g["overflow"] and g["clipped"] and abs(g["timeRight"] - g["rowRight"] + 8) < 1, \
                 ("one line a row, its time at the end", theme, g)
+            m = await evaluate(instance, pair_measure)
+            assert len(m["marks"]) > 10 and m["marks"].pop("395") == "bad" and m["marks"].pop("396") == "stopped" and \
+                set(m["marks"].values()) == {"ok"} and not m["steerMark"], ("each turn's mark", theme, m)
+            assert m["gaps"] == [4] and m["sizes"] == ["20x20"] and m["centred"] and m["textGaps"] == [10], \
+                ("the number and its mark one pair, the first lines after it", theme, m)
+            assert m["tones"] == {"ok": m["want"]["ok"], "bad": m["want"]["err"], "stopped": m["want"]["warn"]}, \
+                ("tick, cross and dash in the tone vocabulary", theme, m)
+            assert m["bead"] < 0.6 and m["rail"] < 0.6, ("the steer's bead and rail under the capsules", theme, m)
+            # under the pointer the number and the mark light on their own
+            await mouse_to(await centre("document.querySelector('.prompt-list-row[data-n=\"394\"] .prompt-list-num')"))
+            lit = await settled_hover("394")
+            assert lit["num"] == m["want"]["acc"] and lit["mark"] != m["want"]["acc"], ("the number alone", theme, lit)
+            await mouse_to(await centre("document.querySelector('.prompt-list-row[data-n=\"394\"] .prompt-list-mark')"))
+            lit = await settled_hover("394", "mark")
+            assert lit["mark"] == m["want"]["acc"] and lit["num"] != m["want"]["acc"], ("the mark alone", theme, lit)
+            await mouse_to(await centre("document.querySelector('.prompt-list-row.current .prompt-list-num')"))
+            lit = await settled_hover("400")
+            assert m["currentFill"] == m["want"]["acc"] and lit["num"] != m["want"]["acc"], \
+                ("the lit capsule deepens", theme, m["currentFill"], lit)
+            await mouse_to({"x": 2, "y": 2})
             # a real wheel takes the list to the first prompt
             point = await centre("document.querySelector('.prompt-list-rows')")
             for _ in range(40):
@@ -2379,13 +2496,28 @@ async def prompt_list_checks(instance, landing):
         await click_at(await centre("document.querySelector('.prompt-list-row')"))
         landed = await lands(7)
         assert abs(landed["offset"] - landing) < 2, landed
+        # Shift+Enter lands a prompt's final answer the page did not hold, a real click on a mark where a turn failed
+        await click_at(await centre("%s.promptGutter.listButton" % view))
+        await until(instance, "!!document.querySelector('.prompt-list')")
+        await instance.call("Input.insertText", {"text": "#123"}, session=page)
+        for kind in ("keyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Enter", "code": "Enter",
+                                                           "windowsVirtualKeyCode": 13, "modifiers": 8}, session=page)
+        landed = await answered(ends[123])
+        assert abs(landed["offset"] - landing) < 2 and landed["text"] == "Looked at it; answer 123.", landed
+        await click_at(await centre("%s.promptGutter.listButton" % view))
+        await until(instance, "!!document.querySelector('.prompt-list')")
+        await instance.call("Input.insertText", {"text": "#395"}, session=page)
+        await click_at(await centre("document.querySelector('.prompt-list-row .prompt-list-mark.bad')"))
+        landed = await answered(ends[395])
+        assert landed["result"] and not landed["open"], ("where the turn failed, the list closed", landed)
         # the button closes its own open list
         await click_at(await centre("%s.promptGutter.listButton" % view))
         await until(instance, "!!document.querySelector('.prompt-list')")
         await click_at(await centre("%s.promptGutter.listButton" % view))
         await until(instance, "!document.querySelector('.prompt-list')")
     finally:
-        await evaluate(instance, "document.querySelectorAll('.prompt-list').forEach(n => n.remove()); "
+        await evaluate(instance, "document.querySelectorAll('.prompt-list, #prompt-list-hover-test').forEach(n => n.remove()); "
                                  "if (window.promptListMedia) { window.matchMedia = promptListMedia; delete window.promptListMedia; } "
                                  "applyTheme('dark'); if (%s) closeTab('s:0:%d'); true" % (view, sid))
         runner.drop_hub(sid)

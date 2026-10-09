@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The prompt index through both authenticated runtimes: one bounded line per
-prompt, paged, after a cursor, with the session's total - no engine, network
-or quota."""
+prompt, paged, after a cursor, with the session's total, and where each
+prompt's turn left its final answer and how it ended - no engine, network or
+quota."""
 from __future__ import annotations
 
 import asyncio
@@ -99,6 +100,96 @@ def reads(sid, expected):
     print("read: every prompt in pages, the line from SQLite or from Python alike")
 
 
+def turns():
+    """Each prompt's turn: its final answer and how it ended, whatever ran in it."""
+    sid = db.create_session("Turns", "claude", str(ROOT), "", "", "", "ask")
+    add = lambda kind, data=None: db.add_event(sid, kind, data or {})["seq"]
+    want = {}
+
+    def prompt(name, **data):
+        seq = add("user", dict(text=name, **data))
+        return seq
+
+    a = prompt("answered")
+    add("assistant", {"text": "looking"})
+    add("tool_use", {"tool": "Read", "tool_use_id": "t1"})
+    add("tool_result", {"tool_use_id": "t1", "text": "file"})
+    want[a] = (add("assistant", {"text": "the answer"}), "ok")
+    add("result", {"ok": True, "usage": {}})
+
+    b = prompt("steered, then compacted")
+    add("assistant", {"text": "first"})
+    s1 = prompt("a steer", steering=True)
+    want[s1] = (0, "")
+    want[b] = (add("assistant", {"text": "after the steer"}), "ok")
+    add("result", {"ok": True})
+    add("info", {"subtype": "compact", "text": "Context compacted"})
+    add("result", {"ok": False, "tool": "compact"})
+
+    c = prompt("engine died")
+    add("assistant", {"text": "partway"})
+    want[c] = (add("error", {"text": "Engine exited without a result"}), "bad")
+
+    d = prompt("failed result")
+    add("assistant", {"text": "partway"})
+    want[d] = (add("result", {"ok": False, "error": "overloaded"}), "bad")
+
+    e = prompt("stopped")
+    add("assistant", {"text": "partway"})
+    want[e] = (add("info", {"subtype": "interrupted", "text": "Turn interrupted by user"}), "stopped")
+
+    f = prompt("tools alone")
+    add("tool_use", {"tool": "Bash", "tool_use_id": "t2"})
+    want[f] = (add("result", {"ok": True}), "ok")
+
+    g = prompt("retried")
+    add("error", {"text": "server_error", "subtype": "engine_api_error"})
+    add("info", {"subtype": "engine_retry", "text": "retrying in 30s"})
+    want[g] = (add("assistant", {"text": "second time lucky"}), "ok")
+    add("result", {"ok": True})
+
+    h = prompt("background wait stopped")
+    want[h] = (add("assistant", {"text": "done, tasks pending"}), "ok")
+    add("info", {"subtype": "interrupted", "text": "Stopped waiting for background tasks"})
+    add("result", {"ok": True})
+    add("info", {"subtype": "interrupted", "text": "Turn interrupted by user"})
+
+    j = prompt("two steers across a page")
+    want[prompt("steer one", steering=True)] = (0, "")
+    want[prompt("steer two", steering=True)] = (0, "")
+    want[j] = (add("assistant", {"text": "after both"}), "ok")
+    add("result", {"ok": True})
+
+    k = prompt("still running")
+    want[k] = (add("assistant", {"text": "so far"}), "")
+    add("tool_use", {"tool": "Bash", "tool_use_id": "t3"})
+
+    for json1 in (None, False):
+        prompt_index._json1 = json1
+        try:
+            rows = prompt_index.read(sid)["prompts"]
+            assert {r[0]: (r[4], r[5]) for r in rows} == want, rows
+            # a page that ends on a prompt whose steers start the next one
+            page = prompt_index.read(sid, j - 1, 1)
+            assert page["more"] and [r[0] for r in page["prompts"]] == [j]
+            assert tuple(page["prompts"][0][4:]) == want[j], page
+            assert tuple(prompt_index.read(sid, k - 1)["prompts"][0][4:]) == want[k]
+        finally:
+            prompt_index._json1 = None
+    # the newest turn ends: its row says so when it is read again
+    want[k] = (add("assistant", {"text": "the end"}), "ok")
+    add("result", {"ok": True})
+    assert tuple(prompt_index.read(sid, k - 1)["prompts"][0][4:]) == want[k]
+    # and a prompt after an unfinished one closes it where it stood
+    stalled = prompt("stalled")
+    left = add("assistant", {"text": "left hanging"})
+    after = prompt("after the stall")
+    rows = {r[0]: r for r in prompt_index.read(sid, stalled - 1)["prompts"]}
+    assert rows[stalled][4:] == [left, ""] and rows[after][4:] == [0, ""]
+    print("turns: each prompt's final answer and outcome - answered, steered, compacted, failed, "
+          "stopped, retried, across a page - from SQLite or from Python alike")
+
+
 async def exercise(builder, sid, other, expected):
     app = builder()
     app.on_startup.clear()  # HTTP/storage only: no CLI, network or periodic probes
@@ -118,6 +209,7 @@ async def exercise(builder, sid, other, expected):
         await get(route="/api/sessions/999999/prompts", status=404)
         ping = await get(route="/api/ping")
         assert protocol.SESSION_PROMPT_INDEX_CAPABILITY in ping["capabilities"]
+        assert protocol.SESSION_PROMPT_ANSWERS_CAPABILITY in ping["capabilities"]
         for query in ("after_seq=-1", "after_seq=nope", "limit=0", "limit=-1",
                       "limit={}".format(prompt_index.PAGE_LIMIT + 1), "limit=nope"):
             await get("?" + query, status=400)
@@ -142,6 +234,7 @@ async def exercise(builder, sid, other, expected):
         assert (await get("?after_seq={}".format(expected[-1][0])))["prompts"] == []
         row = (await get("?limit=1"))["prompts"][0]
         assert isinstance(row[1], float) and row[1] > 0, "the time the prompt was sent"
+        assert row[4] == row[0] + 1 and row[5] == "", "its reply, in a turn that never wrote a result"
         assert (await get(route="/api/sessions/{}/prompts".format(other)))["prompts"][0][3] == \
             "must stay in the other session"
     print("{}: auth, refusals, pages after a cursor, the total, bounded lines and session isolation passed".format(
@@ -155,6 +248,7 @@ async def main():
         excerpts()
         sid, other, expected = seed()
         reads(sid, expected)
+        turns()
         for builder in (build_app, build_backend_app):
             await exercise(builder, sid, other, expected)
     finally:

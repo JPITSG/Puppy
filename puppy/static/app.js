@@ -18806,7 +18806,11 @@ class SharedDraft {
    number, first line, stamp - windowed so only the rows in view exist, with a
    filter for the thousands a long project collects; a steer is a bead on a
    rail hanging from the prompt it was steered into, and a pick lands like a
-   step.
+   step. Beside each number, where the node names it (session-prompt-answers),
+   a mark says how the prompt's turn ended - its final answer, a failure, a
+   stop, or still working - and lands that answer the way a step lands its
+   prompt; only the newest prompt's turn can still change, so its row is read
+   again whenever a turn ends or a new prompt closes it.
    The index of prompts is the node's: one compact row per prompt
    (session-prompt-index, read after the last prompt it holds and whole again
    when its count no longer adds up), or kind=user event pages from a node
@@ -18848,6 +18852,32 @@ function promptExcerpt(text) {
   return bounded(names.join(", "));
 }
 
+/* A prompt's mark in the list: how its turn ended, drawn on the 12 grid. */
+function promptAnswerIcon(state) {
+  if (state === "busy") return el("span", "prompt-list-spin");
+  const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
+  const size = state === "ok" ? 11 : 10;
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("aria-hidden", "true");
+  const paths = state === "ok" ? ["M3 6.2 5.1 8.3 9 3.9"]
+    : state === "bad" ? ["M3.8 3.8 8.2 8.2", "M8.2 3.8 3.8 8.2"] : ["M3.6 6h4.8"];
+  for (const d of paths) {
+    const path = document.createElementNS(ns, "path");
+    path.setAttribute("d", d);
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "1.6");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(path);
+  }
+  return svg;
+}
+
+const PROMPT_OUTCOMES = new Set(["ok", "bad", "stopped"]);
+
 function promptListIcon(size = 14) {
   const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
   svg.setAttribute("width", size);
@@ -18875,8 +18905,10 @@ let promptListSerial = 0;
 class PromptGutter {
   constructor(view) {
     this.view = view;
-    this.index = new Map();        // seq -> {seq, at, steering, text}, the whole session's
+    this.index = new Map();        // seq -> {seq, at, steering, text, answer, outcome}, the whole session's
     this.indexSeq = 0;             // the newest prompt the node's compact index answered for
+    this.answers = false;          // whether the node names each turn's final answer
+    this.answersStale = false;     // a turn ended while the list was closed
     this.indexGeneration = 0;
     this.order = null;             // the index in order with its numbers, until it changes
     this.pins = new Map();         // seq -> pin, for the prompts on the page
@@ -18952,12 +18984,13 @@ class PromptGutter {
     if (!this.order) {
       const list = [...this.index.values()].sort((a, b) => a.seq - b.seq);
       const numbers = new Map(), places = new Map();
-      let count = 0;
+      let count = 0, last = null;
       list.forEach((prompt, at) => {
         numbers.set(prompt.seq, prompt.steering ? 0 : ++count);
         places.set(prompt.seq, at);
+        if (!prompt.steering) last = prompt.seq;
       });
-      this.order = { list, numbers, places, count };
+      this.order = { list, numbers, places, count, last };
     }
     return this.order;
   }
@@ -18969,6 +19002,8 @@ class PromptGutter {
     const { bid, sid } = this.view.tab;
     const generation = ++this.indexGeneration;
     const backend = bid ? state.backends.find(b => b.id === Number(bid)) : null;
+    this.answers = !bid || backendHasCapability(backend, "session-prompt-answers");
+    this.answersStale = false;
     try {
       if (!bid || backendHasCapability(backend, "session-prompt-index"))
         await this.readPromptIndex(bid, sid, generation);
@@ -18978,11 +19013,15 @@ class PromptGutter {
   }
 
   /* One compact row per prompt, after the newest prompt this gutter already
-     holds; the node's total says whether the copy still adds up, and when it
-     does not the index is read whole once more. */
+     holds - or from the newest prompt the node answered for, whose turn is
+     the one that can still end, where the node names answers; the node's
+     total says whether the copy still adds up, and when it does not the
+     index is read whole once more. */
   async readPromptIndex(bid, sid, generation) {
     for (let whole = this.indexSeq === 0; ; whole = true) {
       let after = whole ? 0 : this.indexSeq;
+      const open = !whole && this.answers ? this.openTurn() : null;
+      if (open !== null) after = open - 1;
       const found = new Map();
       let total = 0;
       for (;;) {
@@ -18993,7 +19032,9 @@ class PromptGutter {
         for (const row of rows) {
           if (!Array.isArray(row) || !Number.isSafeInteger(row[0]) || row[0] <= after) continue;
           found.set(row[0], { seq: row[0], at: Number(row[1]) || 0, steering: !!row[2],
-            text: typeof row[3] === "string" ? row[3] : "" });
+            text: typeof row[3] === "string" ? row[3] : "",
+            answer: Number.isSafeInteger(row[4]) && row[4] > 0 ? row[4] : 0,
+            outcome: PROMPT_OUTCOMES.has(row[5]) ? row[5] : "" });
           after = row[0];
           advanced = true;
         }
@@ -19014,6 +19055,39 @@ class PromptGutter {
       this.schedule();
       return;
     }
+  }
+
+  /* The newest prompt the node answered for that was not steered: the one
+     turn whose end its row may not have known yet. */
+  openTurn() {
+    const { list } = this.ordered();
+    for (let at = this.placeAfter(this.indexSeq) - 1; at >= 0; at--)
+      if (!list[at].steering) return list[at].seq;
+    return null;
+  }
+
+  /* A turn ended, or a new prompt closed the one before it: the open turn's
+     row is read again - now, under an open list, else when the list opens. */
+  answersMoved() {
+    if (!this.answers) return;
+    if (this.liveList()) this.refreshIndex();
+    else this.answersStale = true;
+  }
+
+  /* The session started or stopped working: the newest prompt's mark is a
+     spinner only while it does. */
+  runChanged() {
+    if (this.answers && this.liveList()) this.list.redraw();
+  }
+
+  /* How a prompt's turn ended as its mark says it - "ok", "bad", "stopped",
+     "busy" while the newest prompt's turn works - or null for no mark: a
+     steer, a node that does not say, or a turn with no end to show. */
+  answerState(prompt) {
+    if (!this.answers || !prompt || prompt.steering) return null;
+    if (this.view.status === "running" && prompt.seq === this.ordered().last && prompt.outcome !== "ok")
+      return "busy";
+    return prompt.answer && PROMPT_OUTCOMES.has(prompt.outcome) ? prompt.outcome : null;
   }
 
   /* An older node's kind=user event pages, newest first, read whole. */
@@ -19054,9 +19128,11 @@ class PromptGutter {
     for (const node of bubbles) {
       const seq = Number(node.dataset.seq);
       if (this.index.has(seq)) continue;
-      this.index.set(seq, { seq, at: Number(node.dataset.at) || 0, steering: node.dataset.steering === "1",
-        text: node.dataset.excerpt || "" });
+      const steering = node.dataset.steering === "1";
+      this.index.set(seq, { seq, at: Number(node.dataset.at) || 0, steering,
+        text: node.dataset.excerpt || "", answer: 0, outcome: "" });
       this.order = null;
+      if (!steering && this.indexSeq && seq > this.indexSeq) this.answersMoved();
     }
     /* A hidden transcript (a tab switched away from) measures nothing, which
        is not a width: it keeps the gutter it had, so coming back on screen
@@ -19285,21 +19361,30 @@ class PromptGutter {
     const empty = panel.appendChild(el("div", "prompt-list-empty hidden", "No prompt matches"));
     const list = {
       panel, filter, rows, space, count, empty,
-      matches: [], activeAt: -1, row: PROMPT_LIST_ROW, digits: 0, drawn: new Map(), frame: 0, query: null,
-      /* one row's height, read from a row of the list's own font, and the
-         number column as wide as the capsule of the session's largest number,
-         so every capsule and every first line stand in one column - measured
-         again only when the largest number gains a digit */
+      matches: [], activeAt: -1, row: PROMPT_LIST_ROW, shape: "", drawn: new Map(), frame: 0, query: null,
+      /* one row's height, read from a row of the list's own font, every
+         capsule as wide as the session's largest number's and the number
+         column as wide as that capsule and its answer mark, so every capsule
+         and every first line stand in one column - measured again only when
+         the largest number gains a digit or the marks come or go */
       fit() {
         const largest = Math.max(1, gutter.ordered().count);
-        if (String(largest).length === this.digits) return;
-        this.digits = String(largest).length;
-        const probe = space.appendChild(this.rowNode({ seq: 0, text: "Probe", at: 0, steering: false }, largest));
+        const shape = String(largest).length + (gutter.answers ? "+" : "");
+        if (shape === this.shape) return;
+        this.shape = shape;
+        const probe = space.appendChild(this.rowNode(
+          { seq: 0, text: "Probe", at: 0, steering: false, answer: 1, outcome: "ok" }, largest));
         this.row = probe.offsetHeight || PROMPT_LIST_ROW;
         const number = probe.querySelector(".prompt-list-num");
         number.style.width = "max-content";
         const width = Math.ceil(number.getBoundingClientRect().width);
-        if (width) panel.style.setProperty("--prompt-list-num", width + "px");
+        if (width) {
+          panel.style.setProperty("--prompt-list-cap", width + "px");
+          number.style.width = "";
+          const pair = probe.querySelector(".prompt-list-pair");
+          const lead = pair ? Math.ceil(pair.getBoundingClientRect().width) : width;
+          panel.style.setProperty("--prompt-list-num", (lead || width) + "px");
+        }
         probe.remove();
       },
       /* the prompts the filter keeps: their text, or their number */
@@ -19370,7 +19455,24 @@ class PromptGutter {
         node.id = `${id}-${prompt.seq}`;
         node.setAttribute("role", "option");
         node._seq = prompt.seq;
-        node.appendChild(el("span", "prompt-list-num", prompt.steering ? "" : String(number)));
+        const capsule = el("span", "prompt-list-num", prompt.steering ? "" : String(number));
+        if (gutter.answers && !prompt.steering) {
+          // the number lands the prompt, the mark beside it the turn's answer
+          const pair = node.appendChild(el("span", "prompt-list-pair"));
+          pair.appendChild(capsule);
+          capsule.title = `Prompt #${number}`;
+          const state = prompt.seq ? gutter.answerState(prompt) : "ok";
+          if (state) {
+            const mark = pair.appendChild(el("span", "prompt-list-mark " + state));
+            const label = state === "busy" ? "Still working"
+              : state === "ok" ? `Final answer to #${number}`
+              : `#${number} ${state === "bad" ? "failed" : "was stopped"} · jump to where it ended`;
+            mark.setAttribute("role", "img");
+            mark.setAttribute("aria-label", label);
+            mark.title = label;
+            mark.appendChild(promptAnswerIcon(state));
+          }
+        } else node.appendChild(capsule);
         node.appendChild(el("span", "prompt-list-text", prompt.text || "(no text)"));
         // a list that spans days says the day as well: the console's one stamp
         node.appendChild(el("span", "prompt-list-time", prompt.at ? fmtStamp(prompt.at) : ""));
@@ -19400,6 +19502,20 @@ class PromptGutter {
         gutter.closeList(true);
         gutter.view.jumpToPrompt(prompt.seq);
       },
+      /* the row's turn's final answer, or where it ended; nothing while it works */
+      answer(at) {
+        const prompt = this.matches[at];
+        const state = gutter.answerState(prompt);
+        if (!state || state === "busy") return;
+        gutter.closeList(true);
+        gutter.view.jumpToAnswer(prompt.answer);
+      },
+      /* every row drawn again: a mark that changed with the session's work */
+      redraw() {
+        for (const node of this.drawn.values()) node.remove();
+        this.drawn.clear();
+        this.paint();
+      },
       /* a new index, or the transcript moving under an open list */
       sync() { this.fit(); this.match(); this.paint(); },
       markCurrent() {
@@ -19414,6 +19530,7 @@ class PromptGutter {
       else if (event.key === "ArrowUp") list.move(list.activeAt - 1);
       else if (event.key === "PageDown") list.move(list.activeAt + page);
       else if (event.key === "PageUp") list.move(list.activeAt - page);
+      else if (event.key === "Enter" && event.shiftKey) list.answer(list.activeAt);
       else if (event.key === "Enter") list.pick(list.activeAt);
       else if (event.key === "Escape") {
         if (filter.value) { filter.value = ""; list.match(); list.reveal(list.activeAt, true); list.paint(); }
@@ -19429,7 +19546,10 @@ class PromptGutter {
     });
     rows.addEventListener("click", event => {
       const node = event.target.closest && event.target.closest(".prompt-list-row");
-      if (node) list.pick(node._at);
+      if (!node) return;
+      // a mark is the answer's way in; a spinner's turn has none yet
+      if (event.target.closest(".prompt-list-mark")) list.answer(node._at);
+      else list.pick(node._at);
     });
     this.list = list;
     this.listButton.setAttribute("aria-expanded", "true");
@@ -19440,6 +19560,7 @@ class PromptGutter {
     list.reveal(list.activeAt, true);
     list.paint();
     if (focusOnShow()) filter.focus({ preventScroll: true });
+    if (this.answersStale) this.refreshIndex();
   }
 
   /* beside the gutter, from the list button down, inside the window */
@@ -20406,6 +20527,7 @@ class SessionView {
       case "turn_done":
         this.toolClockEndSeq = Math.max(this.toolClockEndSeq || 0, this.newestSeq || 0);
         refreshToolStates(this);
+        this.promptGutter.answersMoved();
         this.setBackgroundTasks(null);
         /* The node reports whether this turn continued into queued work. */
         const queueWaiting = d.queue_waiting === true;
@@ -20681,6 +20803,7 @@ class SessionView {
     this.updateSteerControl();
     if (!running) this.setStatus("");
     else this.syncLiveStatus();
+    if (this.promptGutter) this.promptGutter.runChanged();
   }
 
   setSteeringState(value) {
@@ -21049,10 +21172,6 @@ class SessionView {
     if (!this.inLoadedRange(seq)) await this.loadWindowAround(seq, current);
   }
 
-  /* A prompt gutter step: the prompt brought into the transcript when it is
-     not loaded (the paging or window a message jump uses), then set under
-     the gutter's top plate. It moves the reader as a scroll does, so it
-     records no navigation entry. */
   /* The newest message, from the prompt gutter's bottom plate: the foot of
      the transcript, or the tail read again when a window of older history is
      on the page. A step still loading lands nowhere. Like a step, it moves
@@ -21065,7 +21184,18 @@ class SessionView {
     this.scroll.scrollTo({ top: this.scroll.scrollHeight, behavior: reduce ? "auto" : "smooth" });
   }
 
-  async jumpToPrompt(seq) {
+  /* A prompt gutter step: the prompt brought into the transcript when it is
+     not loaded (the paging or window a message jump uses), then set under
+     the gutter's top plate. It moves the reader as a scroll does, so it
+     records no navigation entry. */
+  jumpToPrompt(seq) { return this.gutterStep(seq, true); }
+
+  /* A prompt list's answer mark: the turn's final answer, or where it ended,
+     landed the same way - the message the node named, or the nearest one
+     before it on the page, shown even under a filter that hides it. */
+  jumpToAnswer(seq) { return this.gutterStep(seq, false); }
+
+  async gutterStep(seq, prompt) {
     seq = Number(seq);
     if (!Number.isSafeInteger(seq) || seq < 1 || !this.session) return;
     this.cancelNavigationWindow();
@@ -21075,7 +21205,9 @@ class SessionView {
       await this.loadAround(seq, current);
       if (!current()) return;
       const target = this.findEventNode(seq);
-      if (target && Number(target.dataset.seq) === seq) this.promptGutter.land(target);
+      if (!target || (prompt && Number(target.dataset.seq) !== seq)) return;
+      if (!prompt) this.revealChatEvent(target);
+      this.promptGutter.land(target);
     } catch (error) {
       toast(error.message, "bad");
     }

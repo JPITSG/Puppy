@@ -284,6 +284,19 @@ up. A console without the capability on a node reads its kind=user event
 pages instead. Nothing is persisted and the read is never counted as a
 mutation.
 
+Additive `session-prompt-answers` extends each row to `[seq, ts, steered,
+excerpt, answer_seq, outcome]`. A prompt's turn runs to the next prompt that
+was not steered into it and ends at its first `result` that is not a session
+tool's (compaction, undo): `outcome` is `"ok"` or `"bad"` from that result's
+`ok`, and `answer_seq` the last `assistant` event before an ok result - the
+result itself when there is none, and always for a failed one. A turn with no
+result ended at its last interruption (`"stopped"`) or error (`"bad"`), which
+`answer_seq` names; one with neither says `""`, with its last `assistant`
+event or 0. A steered prompt says 0 and `""`. Only the newest prompt's turn
+can still change, so a console reads the index again from that prompt (the
+cursor one below it) and trusts every earlier row; older consoles read the
+first four fields alone.
+
 The sheet's actions are additive `session-git-actions`: both execution
 runtimes serve `POST /api/sessions/{sid}/git/push` (the checked-out branch's
 commits sent to its upstream, or to the one remote - `remote.pushDefault`

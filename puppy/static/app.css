@@ -1436,11 +1436,12 @@ select.choice-native{display:none!important}
 /* The prompt list: one of the shared floats in its own shape - a head with
    the count, the filter, and a window of one-line rows (number, first line,
    time) that only draws what is in view. Every number's capsule is as wide as
-   the session's largest (--prompt-list-num, measured once), so the first
-   lines stand in one column; a steered prompt is a violet bead in that column,
-   hanging on a faint violet rail from the row above when that row is the
-   prompt before it. The prompt being read is lit, the row the keys or the
-   pointer are on takes the menus' hover. */
+   the session's largest (--prompt-list-cap, measured once) and the column
+   holding it (--prompt-list-num) as wide as the capsule and its answer mark,
+   so the first lines stand in one column; a steered prompt is a violet bead
+   under the capsules, hanging on a faint violet rail from the row above when
+   that row is the prompt before it. The prompt being read is lit, the row the
+   keys or the pointer are on takes the menus' hover. */
 .choice-menu.prompt-list{
   width:min(460px,calc(100vw - 16px));max-width:none;max-height:none;padding:0;
   display:flex;flex-direction:column;overflow:hidden;
@@ -1464,10 +1465,36 @@ select.choice-native{display:none!important}
   background:linear-gradient(var(--acc-dim),var(--acc-dim)),var(--bg);
 }
 .prompt-list-row.current .prompt-list-num{background:var(--acc);color:var(--bg);border-color:var(--acc)}
-.prompt-list-row.steer .prompt-list-num{justify-self:center;min-width:0;width:8px;height:8px;padding:0;border:0;background:var(--viz-7)}
+.prompt-list-row.steer .prompt-list-num{justify-self:start;margin-left:calc(var(--prompt-list-cap,22px) / 2 - 4px);
+  min-width:0;width:8px;height:8px;padding:0;border:0;background:var(--viz-7)}
 .prompt-list-row.steer.current .prompt-list-num{box-shadow:0 0 0 3px color-mix(in srgb,var(--viz-7) 30%,transparent)}
+/* A node that names each turn's final answer (session-prompt-answers) pairs
+   the number with the turn's mark: a tick for its answer, a cross where it
+   failed, a dash where it was stopped, a spinner while it works. The number
+   lands the prompt and the mark its answer, and each lights on its own under
+   the pointer - the current row's filled capsule by deepening. */
+.prompt-list-pair{display:flex;align-items:center;gap:4px;justify-self:start}
+.prompt-list-pair .prompt-list-num{flex:none;width:var(--prompt-list-cap,22px);
+  transition:background var(--t-fast) var(--ease),border-color var(--t-fast) var(--ease),color var(--t-fast) var(--ease)}
+.prompt-list-mark{
+  flex:none;width:20px;height:20px;display:grid;place-items:center;border-radius:50%;
+  border:1px solid var(--line2);background:var(--bg);color:var(--ok);
+  transition:background var(--t-fast) var(--ease),border-color var(--t-fast) var(--ease),color var(--t-fast) var(--ease);
+}
+.prompt-list-mark.bad{color:var(--err)}
+.prompt-list-mark.stopped{color:var(--warn)}
+.prompt-list-mark.busy{color:var(--acc2);cursor:default}
+.prompt-list-mark svg{display:block}
+.prompt-list-spin{width:10px;height:10px;border-radius:50%;border:1.6px solid color-mix(in srgb,currentColor 30%,transparent);
+  border-top-color:currentColor;animation:spin .8s linear infinite}
+@media (hover:hover){
+  .prompt-list-pair .prompt-list-num:hover,.prompt-list-mark:not(.busy):hover{background:var(--acc);border-color:var(--acc);color:#fff}
+  .prompt-list-row.current .prompt-list-pair .prompt-list-num:hover{
+    background:color-mix(in srgb,var(--bg) 22%,var(--acc));border-color:color-mix(in srgb,var(--bg) 22%,var(--acc));color:#fff}
+}
+@media (prefers-reduced-motion:reduce){.prompt-list-pair .prompt-list-num,.prompt-list-mark{transition:none}}
 .prompt-list-row.rail-up::before,.prompt-list-row.rail-down::after{
-  content:"";position:absolute;left:calc(8px + var(--prompt-list-num,22px) / 2 - 1px);width:2px;
+  content:"";position:absolute;left:calc(8px + var(--prompt-list-cap,22px) / 2 - 1px);width:2px;
   background:color-mix(in srgb,var(--viz-7) 38%,transparent);
 }
 .prompt-list-row.rail-up::before{top:0;bottom:50%}

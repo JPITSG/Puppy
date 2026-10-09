@@ -173,15 +173,22 @@ reading anywhere further up is never pulled away from it.
   its number, first line and when it was sent - with the one you are reading
   lit. Its numbers stand in capsules of one width, so the lines start in one
   column however many prompts a session has, and a steered prompt hangs as a
-  violet dot from the prompt it was steered into. Type in its filter to
-  narrow thousands of prompts by their words or their number, then pick one
-  with the arrow keys and Enter or a click.
+  violet dot from the prompt it was steered into. Beside each number a small
+  mark says how that prompt's turn ended - a tick for its final answer, a
+  cross where it failed, a dash where it was stopped, a spinner while it is
+  still working - and a click on the mark (or Shift+Enter) goes straight to
+  that final answer, or to where the turn ended, while a click on the number
+  or the line goes to the prompt; the number and the mark each light up under
+  the pointer. Type in its filter to narrow thousands of prompts by their
+  words or their number, then pick one with the arrow keys and Enter or a
+  click.
   Numbers count from the session's first prompt, and the buttons and the list
   reach prompts in older history that is not loaded yet; a backend reads its
   prompt list as one short line per prompt and sends only the prompts that
-  are new since the last read (one from before that falls back to reading
-  prompts in full, and one without the prompt-history read covers only the
-  prompts on the page). The gutter uses the column's own margin and takes
+  are new since the last read, with the newest prompt's turn read again as it
+  ends (one from before the turn marks lists its prompts without them, one
+  from before the short lines falls back to reading prompts in full, and one
+  without the prompt-history read covers only the prompts on the page). The gutter uses the column's own margin and takes
   room only from a narrow pane; it is not shown on a phone or while the chat
   log hides Questions. Stepping between prompts adds no browser history entry.
 - **Three workspaces to choose from.** Point a session at a project directory,
@@ -1262,8 +1269,8 @@ node tests/tool_result_ui_test.js    # tool results folded into their call's car
 python3 tests/tool_images_test.py    # tool pictures: the reader, each driver, storage, both runtimes
 node tests/image_viewer_ui_test.js   # the image viewer, and the pictures on tool cards
 node tests/session_request_ui_test.js # the session request and workflow sheet
-node tests/prompt_gutter_ui_test.js   # the prompt gutter: pins, numbers, plates, steps and the prompt list
-python3 tests/prompt_index_test.py   # the prompt index: one line per prompt, paged, on both runtimes
+node tests/prompt_gutter_ui_test.js   # the prompt gutter: pins, numbers, plates, steps, the prompt list and its answer marks
+python3 tests/prompt_index_test.py   # the prompt index: one line per prompt and its turn's end, paged, on both runtimes
 node tests/toast_ui_test.js          # notice grammar, tones, lives, folded repeats, the dismiss strip and their reports
 node tests/notices_ui_test.js        # the notification box: its slide, rows, live arrivals, its clear
 python3 tests/engine_messages_test.py # native notices, safe fallbacks, both runtimes' session sockets

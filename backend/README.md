@@ -1110,7 +1110,13 @@ characters, or its files' names - after an optional `after_seq` cursor, up to
 JSON functions exist, so a session of hundreds of long prompts answers a line
 per prompt. A console reads only what follows the last prompt it holds and
 reads the index whole again when `total` says its copy no longer adds up;
-older nodes are read through the kind=user event pages above.
+older nodes are read through the kind=user event pages above. With the
+additive `session-prompt-answers` capability each row goes on with
+`answer_seq` and `outcome`: where the prompt's turn left its final answer
+(the last assistant message before its result, else the result, interruption
+or error it ended on) and how it ended - `"ok"`, `"bad"`, `"stopped"`, or
+`""` while it has not - which the prompt list marks beside each number and
+jumps to; the console reads the newest prompt's row again as its turn ends.
 
 The additive `session-draft-presence` capability adds `draft_presence:
 {version:1,count:N}` to the socket's initial snapshot. Clients send
