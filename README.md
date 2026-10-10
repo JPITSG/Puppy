@@ -177,7 +177,8 @@ reading anywhere further up is never pulled away from it.
   mark says how that prompt's turn ended - a tick for its final answer, a
   cross where it failed, a dash where it was stopped, a spinner while it is
   still working - and a click on the mark (or Shift+Enter) goes straight to
-  that final answer, or to where the turn ended, while a click on the number
+  that final answer, or to where the turn ended, or, on a spinner, to the
+  newest message at the bottom of the transcript, while a click on the number
   or the line goes to the prompt; the number and the mark each light up under
   the pointer. Type in its filter to narrow thousands of prompts by their
   words or their number, then pick one with the arrow keys and Enter or a

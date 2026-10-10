@@ -2030,7 +2030,9 @@ async def prompt_gutter_checks(instance):
     rail stay under the capsules - in the tone colours, one pair 4px apart and
     centred; under a real hover the number and the mark light on their own and
     the lit capsule deepens; Shift+Enter lands a final answer the page did not
-    hold and a real click on a cross where its turn failed."""
+    hold, a real click on a working turn's spinner takes that window of history
+    back to the newest message at the foot, and one on a cross lands where its
+    turn failed."""
     page = instance.page_session
     sid = db.create_session("Prompt history", "claude", "/home/mira/projects/harbor", "", "", "", "default")
     steered = {7, 19, 28}
@@ -2243,7 +2245,7 @@ async def prompt_gutter_checks(instance):
           "real click beside the gutter, drawing only the rows in view in capsules of one width, scrolled by a real wheel, filtered by text "
           "and number, Enter and a real click landing prompts the page did not hold, each turn's mark beside its number "
           "lighting on its own under a real hover, Shift+Enter and a real click on a mark landing a final answer or "
-          "where a turn failed, in both themes", flush=True)
+          "where a turn failed and a working turn's spinner the newest message, in both themes", flush=True)
 
 
 async def prompt_list_checks(instance, landing):
@@ -2505,6 +2507,28 @@ async def prompt_list_checks(instance, landing):
                                                            "windowsVirtualKeyCode": 13, "modifiers": 8}, session=page)
         landed = await answered(ends[123])
         assert abs(landed["offset"] - landing) < 2 and landed["text"] == "Looked at it; answer 123.", landed
+        # while the newest turn works its mark is a spinner, and a real click on it takes the transcript -
+        # a window of older history just now - back to the newest message at its foot
+        await until(instance, "%s.detached" % view)
+        await evaluate(instance, "(() => { const v = %s, g = v.promptGutter; v.status = 'running'; "
+                                 "g.index.get(g.ordered().last).outcome = ''; return true; })()" % view)
+        try:
+            await click_at(await centre("%s.promptGutter.listButton" % view))
+            await until(instance, "!!document.querySelector('.prompt-list')")
+            await instance.call("Input.insertText", {"text": "#400"}, session=page)
+            await until(instance, "!!document.querySelector('.prompt-list .prompt-list-mark.busy')")
+            busy = await evaluate(instance, """(() => { const m = document.querySelector('.prompt-list-mark.busy');
+                return {cursor: getComputedStyle(m).cursor, label: m.getAttribute('aria-label'),
+                        number: m.closest('.prompt-list-row').querySelector('.prompt-list-num').textContent}; })()""")
+            assert busy == {"cursor": "pointer", "label": "Still working · jump to the newest message",
+                            "number": "400"}, busy
+            await click_at(await centre("document.querySelector('.prompt-list-mark.busy')"))
+            await until(instance, """(() => { const v = %s, s = v.scroll;
+                return !document.querySelector('.prompt-list') && !v.detached &&
+                       s.scrollHeight - s.scrollTop - s.clientHeight < 2; })()""" % view)
+        finally:
+            await evaluate(instance, "(() => { const v = %s, g = v.promptGutter; v.status = 'idle'; "
+                                     "g.index.get(g.ordered().last).outcome = 'ok'; return true; })()" % view)
         await click_at(await centre("%s.promptGutter.listButton" % view))
         await until(instance, "!!document.querySelector('.prompt-list')")
         await instance.call("Input.insertText", {"text": "#395"}, session=page)

@@ -18809,8 +18809,9 @@ class SharedDraft {
    step. Beside each number, where the node names it (session-prompt-answers),
    a mark says how the prompt's turn ended - its final answer, a failure, a
    stop, or still working - and lands that answer the way a step lands its
-   prompt; only the newest prompt's turn can still change, so its row is read
-   again whenever a turn ends or a new prompt closes it.
+   prompt, or, while the turn works, goes to the newest message; only the
+   newest prompt's turn can still change, so its row is read again whenever a
+   turn ends or a new prompt closes it.
    The index of prompts is the node's: one compact row per prompt
    (session-prompt-index, read after the last prompt it holds and whole again
    when its count no longer adds up), or kind=user event pages from a node
@@ -19464,7 +19465,7 @@ class PromptGutter {
           const state = prompt.seq ? gutter.answerState(prompt) : "ok";
           if (state) {
             const mark = pair.appendChild(el("span", "prompt-list-mark " + state));
-            const label = state === "busy" ? "Still working"
+            const label = state === "busy" ? "Still working · jump to the newest message"
               : state === "ok" ? `Final answer to #${number}`
               : `#${number} ${state === "bad" ? "failed" : "was stopped"} · jump to where it ended`;
             mark.setAttribute("role", "img");
@@ -19502,13 +19503,15 @@ class PromptGutter {
         gutter.closeList(true);
         gutter.view.jumpToPrompt(prompt.seq);
       },
-      /* the row's turn's final answer, or where it ended; nothing while it works */
+      /* the row's turn's final answer, or where it ended - or, while it
+         works, the newest message at the foot of the transcript */
       answer(at) {
         const prompt = this.matches[at];
         const state = gutter.answerState(prompt);
-        if (!state || state === "busy") return;
+        if (!state) return;
         gutter.closeList(true);
-        gutter.view.jumpToAnswer(prompt.answer);
+        if (state === "busy") gutter.view.goToNewest();
+        else gutter.view.jumpToAnswer(prompt.answer);
       },
       /* every row drawn again: a mark that changed with the session's work */
       redraw() {
@@ -19547,7 +19550,7 @@ class PromptGutter {
     rows.addEventListener("click", event => {
       const node = event.target.closest && event.target.closest(".prompt-list-row");
       if (!node) return;
-      // a mark is the answer's way in; a spinner's turn has none yet
+      // a mark is the answer's way in, a spinner the way to the newest message
       if (event.target.closest(".prompt-list-mark")) list.answer(node._at);
       else list.pick(node._at);
     });

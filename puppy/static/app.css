@@ -1471,8 +1471,9 @@ select.choice-native{display:none!important}
 /* A node that names each turn's final answer (session-prompt-answers) pairs
    the number with the turn's mark: a tick for its answer, a cross where it
    failed, a dash where it was stopped, a spinner while it works. The number
-   lands the prompt and the mark its answer, and each lights on its own under
-   the pointer - the current row's filled capsule by deepening. */
+   lands the prompt and the mark its answer - the spinner the newest message -
+   and each lights on its own under the pointer, the current row's filled
+   capsule by deepening. */
 .prompt-list-pair{display:flex;align-items:center;gap:4px;justify-self:start}
 .prompt-list-pair .prompt-list-num{flex:none;width:var(--prompt-list-cap,22px);
   transition:background var(--t-fast) var(--ease),border-color var(--t-fast) var(--ease),color var(--t-fast) var(--ease)}
@@ -1483,12 +1484,12 @@ select.choice-native{display:none!important}
 }
 .prompt-list-mark.bad{color:var(--err)}
 .prompt-list-mark.stopped{color:var(--warn)}
-.prompt-list-mark.busy{color:var(--acc2);cursor:default}
+.prompt-list-mark.busy{color:var(--acc2)}
 .prompt-list-mark svg{display:block}
 .prompt-list-spin{width:10px;height:10px;border-radius:50%;border:1.6px solid color-mix(in srgb,currentColor 30%,transparent);
   border-top-color:currentColor;animation:spin .8s linear infinite}
 @media (hover:hover){
-  .prompt-list-pair .prompt-list-num:hover,.prompt-list-mark:not(.busy):hover{background:var(--acc);border-color:var(--acc);color:#fff}
+  .prompt-list-pair .prompt-list-num:hover,.prompt-list-mark:hover{background:var(--acc);border-color:var(--acc);color:#fff}
   .prompt-list-row.current .prompt-list-pair .prompt-list-num:hover{
     background:color-mix(in srgb,var(--bg) 22%,var(--acc));border-color:color-mix(in srgb,var(--bg) 22%,var(--acc));color:#fff}
 }

@@ -20,7 +20,8 @@
    pointer, a pick landing like a step, a new index under an open list, and
    every way it closes. Then each prompt's answer: the mark beside its number
    for each way a turn ends, the jump to the answer by the mark or Shift+Enter
-   beside the number's and Enter's to the prompt, and the newest turn's row
+   (a working turn's spinner to the newest message) beside the number's and
+   Enter's to the prompt, and the newest turn's row
    read again when a turn ends or a new prompt closes it. No browser, engine,
    network or quota. */
 "use strict";
@@ -694,10 +695,19 @@ const key = (node, name) => {
     flush();
     assert.ok(markOf(30) && markOf(30).classList.contains("busy") && markOf(30).querySelector(".prompt-list-spin"),
               "the newest turn works: a spinner");
-    assert.equal(markOf(30).getAttribute("aria-label"), "Still working");
+    assert.equal(markOf(30).getAttribute("aria-label"), "Still working · jump to the newest message");
     assert.ok(markOf(22).classList.contains("ok"), "the turn before it keeps its tick");
+    // a spinner goes to the newest message at the foot of the transcript, by the pointer or Shift+Enter
+    view.newest = 0;
     markOf(30).dispatchEvent(new FakeEvent("click", {bubbles: true}));
-    assert.ok(document.body.querySelector(".prompt-list") && view.answers.length === 2, "a spinner lands nothing");
+    assert.ok(!document.body.querySelector(".prompt-list") && document.activeElement === button &&
+              view.newest === 1 && view.answers.length === 2 && view.jumps.length === 2,
+              "a spinner goes to the newest message, never to an answer or a prompt");
+    button.onclick();
+    rowOf(30).querySelector(".prompt-list-text").dispatchEvent(new FakeEvent("pointermove", {bubbles: true}));
+    shifted(true);
+    assert.ok(!document.body.querySelector(".prompt-list") && view.newest === 2, "Shift+Enter on a working turn too");
+    button.onclick();
     // the session stops working: the spinner goes with it, until the row says how it ended
     view.status = "idle";
     gutter.runChanged();
@@ -725,6 +735,7 @@ const key = (node, name) => {
     gutter.destroy();
   }
   console.log("PASS: each prompt's answer - a tick, cross or dash beside its number, a spinner while the newest " +
-              "turn works, none for a steer; the mark and Shift+Enter land the answer, the number and Enter the " +
-              "prompt; the newest turn's row read again when a turn ends or a new prompt closes it");
+              "turn works, none for a steer; the mark and Shift+Enter land the answer (the spinner the newest " +
+              "message), the number and Enter the prompt; the newest turn's row read again when a turn ends or a " +
+              "new prompt closes it");
 })().catch(error => { console.error(error); process.exit(1); });
