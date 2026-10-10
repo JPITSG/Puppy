@@ -28633,6 +28633,8 @@ class SettingsView {
         <label>Copies to keep<input type="number" id="backup-keep" min="1" step="1" required disabled></label>
         <label class="full">Save to directory<input type="text" id="backup-directory" class="backup-directory"
           autocomplete="off" spellcheck="false" required disabled></label>
+        <label>Archive limit <span class="field-optional">(MiB)</span><input type="number" id="backup-limit"
+          min="1" step="1" required disabled></label>
         <p class="help full" id="backup-help">Loading backup settings…</p>
         <p class="form-error full hidden" role="alert"></p>
         <div class="settings-actions full">
@@ -28659,6 +28661,7 @@ class SettingsView {
       </section>`;
     const enabled = c5.querySelector("#backup-enabled"), at = c5.querySelector("#backup-at");
     const directory = c5.querySelector("#backup-directory"), keep = c5.querySelector("#backup-keep");
+    const limit = c5.querySelector("#backup-limit");
     const save = c5.querySelector("#backup-save"), run = c5.querySelector("#backup-run");
     const retry = c5.querySelector("#backup-retry"), note = c5.querySelector("#backup-note");
     const status = c5.querySelector("#backup-status"), history = c5.querySelector("#backup-history");
@@ -28666,7 +28669,7 @@ class SettingsView {
     let payload = null, saved = "", busy = false, serial = 0, timer = null, retired = false, reading = false, readError = false;
     const current = () => !retired && generation === this.renderGeneration && c5.isConnected;
     const values = () => ({ enabled: enabled.checked, at: parseClockSetting(at.value),
-      directory: directory.value.trim(), keep: Number(keep.value) });
+      directory: directory.value.trim(), keep: Number(keep.value), archive_limit_mib: Number(limit.value) });
     const signature = () => JSON.stringify(values());
     const dirty = () => !!payload && signature() !== saved;
     const showError = text => {
@@ -28677,11 +28680,14 @@ class SettingsView {
       const cfg = payload.settings;
       enabled.checked = cfg.enabled; at.value = fmtClockSetting(cfg.at);
       directory.value = cfg.directory; keep.value = String(cfg.keep);
-      keep.max = String(payload.keep_max); saved = signature();
+      keep.max = String(payload.keep_max);
+      limit.value = String(payload.archive_limit_mib);
+      limit.min = String(payload.archive_limit.min); limit.max = String(payload.archive_limit.max);
+      saved = signature();
     };
     const paint = () => {
       const running = !!payload && payload.status === "running";
-      for (const control of [enabled, at, directory, keep]) control.disabled = !payload || busy || running;
+      for (const control of [enabled, at, directory, keep, limit]) control.disabled = !payload || busy || running;
       save.disabled = !payload || busy || running || !dirty();
       run.disabled = !payload || busy || payload.status !== "idle" || dirty();
       exportButton.disabled = importButton.disabled = busy || running;
@@ -28692,7 +28698,11 @@ class SettingsView {
       if (!payload) return;
       help.textContent = `Daily time uses this instance's clock (${payload.timezone}). ` +
         "Save applies these settings. Run now uses the saved directory, even with scheduling off. " +
-        "Older copies rotate after a successful backup.";
+        "Older copies rotate after a successful backup. " +
+        `The archive limit (${payload.archive_limit.min}–${payload.archive_limit.max} MiB, ` +
+        `${payload.archive_limit.default} by default) applies to every backup, export and import; ` +
+        "a file inside may be up to twice it and the unpacked contents up to four times it " +
+        "(at least 1 GiB and 2 GiB).";
       status.textContent = running ? "Saving backup…" : payload.status === "waiting" ?
         "Waiting for idle time" + (payload.waiting ? ` · ${payload.waiting}` : "") :
         payload.settings.enabled ? `Next backup · ${fmtStamp(payload.next_at)}` : "Scheduled backups are off";

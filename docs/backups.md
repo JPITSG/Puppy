@@ -10,7 +10,7 @@ Scheduling starts **off**. Choose **Daily at**, an absolute **Save to directory*
 path on the instance's machine, and **Copies to keep** (1–100, initially 7).
 The initial time is 03:00 and the initial directory is `backups/` inside the
 instance's data directory. Set **Scheduled** and press **Save**; the switch and
-all three fields take effect together. The time uses the instance's local clock,
+all four fields take effect together. The time uses the instance's local clock,
 with the same 12/24-hour presentation as the other time settings.
 
 **Run now** queues a backup using the saved directory and retention count. It
@@ -68,21 +68,43 @@ sign-ins, and external engine credentials/native histories are excluded.
 Import validates the entire archive and requires the instance to be idle. It
 then replaces live state atomically, rolling back if installation fails. Export
 preparation and import upload/validation can be cancelled; once restore starts
-replacing live state, it finishes or rolls back. Existing limits apply: 512 MiB
-compressed, 2 GiB extracted, 1 GiB per file and 50,000 archive entries. Only the
-current database, configuration and archive shapes are accepted.
+replacing live state, it finishes or rolls back. Only the current database,
+configuration and archive shapes are accepted.
+
+## Archive limit
+
+**Archive limit (MiB)** in the same form bounds every archive: Export backup,
+Run now and scheduled backups, and Import backup (16–16384 MiB, 512 MiB by
+default). Any one file inside may be up to twice the limit and the unpacked
+contents up to four times it, never less than the 1 GiB and 2 GiB they always
+allowed, with at most 50,000 archive entries. An archive past the limit is
+refused with its own size ("snapshot archive is 540 MiB, over the 512 MiB
+archive limit"), an import by its declared length before any byte is stored
+or as soon as the upload passes it. Each backup or import reads the limit once
+when it starts. Lowering it never invalidates copies already saved: they stay
+listed and downloadable, though importing one needs a limit it fits.
+
+The limit is its own optional `backup_limit` meta record, `{format: 1,
+archive_mib}`, written by **Save** in the same transaction as the schedule. No
+record means the default, so a database or archive from before the setting is
+current as it is; any other shape is refused at startup and in a restored
+archive, never repaired. The record travels with the database like the
+schedule, so a restore brings back the limit it was backed up with.
 
 ## Implementation
 
 `puppy/backup_schedule.py` owns one daily worker in the full runtime, plus the
-strict, versioned `backup_schedule` meta record. There is no new database table
-or configuration migration. Startup and snapshot validation reject malformed
+strict, versioned `backup_schedule` meta record and the optional `backup_limit`
+record beside it; `snapshots.limits()` turns the limit into the archive, file and
+unpacked bounds. There is no new database table or configuration migration. Startup and snapshot validation reject malformed
 records. The headless backend does not run this controller-only worker.
 
 Routes, all authenticated and uncached:
 
 - `GET /api/snapshot/backups`: settings, current status, outcomes and saved copies.
-- `PUT /api/snapshot/backups`: replace the four settings together.
+- `PUT /api/snapshot/backups`: replace the four settings and `archive_limit_mib`
+  together; `GET` answers `archive_limit_mib` and its `archive_limit` range
+  (`min`, `max`, `default`).
 - `POST /api/snapshot/backups/run`: enqueue one saved backup; returns 202.
 - `GET /api/snapshot/saved/{id}`: download one retained file.
 

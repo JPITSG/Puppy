@@ -46,6 +46,8 @@ async def main():
     headers = {"X-Puppy-Token": config.get("auth.api_token")}
     folder = ROOT / "saved"
     settings = {"enabled": False, "at": "03:00", "directory": str(folder), "keep": 2}
+    # what Save sends: the schedule's four settings and the archive limit beside them
+    body = lambda **changes: {**settings, "archive_limit_mib": 512, **changes}
     try:
         async with ClientSession() as http:
             async def request(method, route, body=None, status=200):
@@ -58,6 +60,9 @@ async def main():
                 assert response.status in (302, 401)
             fresh = await request("GET", "backups")
             assert not fresh["settings"]["enabled"] and fresh["settings"]["keep"] == 7
+            assert fresh["archive_limit_mib"] == 512 and \
+                fresh["archive_limit"] == {"min": 16, "max": 16384, "default": 512}
+            assert db.meta_get(backups.LIMIT_KEY) is None, "no record until a limit is saved"
             assert not fresh["files"] and not fresh["history"]
             app["puppy_snapshot_busy"] = "restore"
             await request("GET", "backups", status=503)
@@ -67,8 +72,9 @@ async def main():
             for changes in ({"at": "24:00"}, {"keep": True}, {"keep": 0}, {"keep": 101},
                             {"enabled": 1}, {"directory": "relative/path"}, {"unknown": 1},
                             {"directory": str(Path(config.DATA_DIR) / "uploads" / "nested")}):
-                await request("PUT", "backups", {**settings, **changes}, 400)
-            await request("PUT", "backups", settings)
+                await request("PUT", "backups", body(**changes), 400)
+            await request("PUT", "backups", settings, 400)   # the limit is part of every save
+            await request("PUT", "backups", body())
             folder.mkdir()
             unrelated = folder / "other-backup.tar.gz"
             unrelated.write_bytes(b"never rotate this")
@@ -171,7 +177,7 @@ async def main():
             print("PASS: busy waits, failures keep good copies, replaced files are refused and journalled publication resumes after restart", flush=True)
 
             settings["enabled"] = True
-            scheduler.settings(settings)
+            scheduler.settings(body())
             now = time.time()
             current = backups._load()
             current["next_at"] = now - 3 * 86400
@@ -208,9 +214,145 @@ async def main():
             with patch.object(snapshots, "blockers", return_value=["busy"]):
                 await scheduler.tick(now)
             settings["enabled"] = False
-            scheduler.settings(settings)
+            scheduler.settings(body())
             assert backups._load()["pending"] is None and backups._load()["next_at"] == 0
             print("PASS: daily scheduling, missed-day coalescing, DST/calendar boundaries, disable and restart-safe attempts", flush=True)
+
+            # The archive limit: refused outside its range, saved with the
+            # schedule, and holding every backup and import to it.
+            for limit in (None, 15, 16385, True, "512", 512.5):
+                await request("PUT", "backups", body(archive_limit_mib=limit), 400)
+            await request("PUT", "backups", {k: v for k, v in body().items() if k != "archive_limit_mib"}, 400)
+            assert snapshots.limits(512) == {"archive": 512 * snapshots.MIB, "member": snapshots.GIB,
+                                             "extracted": 2 * snapshots.GIB}, "the default keeps every old bound"
+            assert snapshots.limits(16)["member"] == snapshots.GIB and \
+                snapshots.limits(16)["extracted"] == 2 * snapshots.GIB, "never below the floors"
+            assert snapshots.limits(1024) == {"archive": snapshots.GIB, "member": 2 * snapshots.GIB,
+                                              "extracted": 4 * snapshots.GIB}, "a file twice it, contents four times"
+            blob = Path(config.DATA_DIR) / "uploads" / "limit-test"
+            blob.mkdir(parents=True)
+            (blob / "noise.bin").write_bytes(os.urandom(17 * snapshots.MIB))   # nothing to compress
+            small = await request("PUT", "backups", body(archive_limit_mib=16))
+            assert small["archive_limit_mib"] == 16
+            assert db.meta_get(backups.LIMIT_KEY) == {"format": 1, "archive_mib": 16}
+            assert backups._load()["settings"] == settings, "the schedule record keeps its own shape"
+            try:
+                snapshots.create_archive({})
+                raise AssertionError("an archive over the limit was made")
+            except snapshots.SnapshotError as exc:
+                assert str(exc) == "snapshot archive is 18 MiB, over the 16 MiB archive limit", str(exc)
+            await request("POST", "backups/run", {}, 202)
+            await scheduler.tick()
+            failed = backups._load()["history"][-1]
+            assert failed["tone"] == "bad" and failed["message"] == \
+                "Could not save backup · snapshot archive is 18 MiB, over the 16 MiB archive limit", failed
+            await request("PUT", "backups", body(archive_limit_mib=32))
+            await request("POST", "backups/run", {}, 202)
+            await scheduler.tick()
+            assert backups._load()["history"][-1]["tone"] == "ok", "a raised limit saves it"
+            big = backups._load()["files"][-1]
+            assert big["size"] > 16 * snapshots.MIB
+            # lowering the limit again never turns the saved copy into an unreadable record
+            await request("PUT", "backups", body(archive_limit_mib=16))
+            assert backups._load()["files"][-1] == big
+            listed = await request("GET", "backups")
+            assert listed["files"][0]["id"] == big["id"] and listed["files"][0]["available"]
+            # an import over the limit is refused before it is staged: by its length, or as it streams
+            archive_bytes = (folder / big["filename"]).read_bytes()
+            refused(lambda: snapshots.stage_import(str(folder / big["filename"])))
+            async with http.post(url + "import", data=archive_bytes,
+                                 headers={**headers, "Content-Type": "application/gzip"}) as response:
+                answer = await response.json()
+                assert response.status == 413 and answer["error"] == \
+                    "snapshot archive is 18 MiB, over the 16 MiB archive limit", answer
+
+            async def stream():
+                for start in range(0, len(archive_bytes), snapshots.MIB):
+                    yield archive_bytes[start:start + snapshots.MIB]
+
+            async with http.post(url + "import", data=stream(),
+                                 headers={**headers, "Content-Type": "application/gzip"}) as response:
+                answer = await response.json()
+                assert response.status == 413 and answer["error"] == \
+                    "snapshot archive exceeds the 16 MiB archive limit", answer
+            await request("PUT", "backups", body(archive_limit_mib=32))
+            staged = snapshots.stage_import(str(folder / big["filename"]))
+            snapshots.discard_staged(staged)
+            # single files and unpacked contents follow the limit (floors lowered so they show)
+            (blob / "noise.bin").unlink()
+            with patch.object(snapshots, "MEMBER_FLOOR_BYTES", 8 * snapshots.MIB), \
+                    patch.object(snapshots, "EXTRACTED_FLOOR_BYTES", 8 * snapshots.MIB):
+                for number in range(3):   # zeros: large inside, nothing in the archive
+                    (blob / "zeros-{}.bin".format(number)).write_bytes(bytes(30 * snapshots.MIB))
+                await request("PUT", "backups", body(archive_limit_mib=16))
+                try:
+                    snapshots.create_archive({})
+                    raise AssertionError("contents past four times the limit were archived")
+                except snapshots.SnapshotError as exc:
+                    assert str(exc) == "snapshot contents are too large · at most 32 MiB per file and " \
+                        "64 MiB in all", str(exc)
+                await request("PUT", "backups", body(archive_limit_mib=32))
+                packed = snapshots.create_archive({})
+                assert packed["size"] < 16 * snapshots.MIB
+                await request("PUT", "backups", body(archive_limit_mib=16))
+                try:
+                    snapshots.stage_import(packed["path"])
+                    raise AssertionError("an archive expanding past four times the limit was staged")
+                except snapshots.SnapshotError as exc:
+                    assert str(exc) == "snapshot expands beyond the 64 MiB limit", str(exc)
+                snapshots.discard_export(packed)
+                for number in range(3):
+                    (blob / "zeros-{}.bin".format(number)).unlink()
+                (blob / "zeros-big.bin").write_bytes(bytes(40 * snapshots.MIB))
+                await request("PUT", "backups", body(archive_limit_mib=32))
+                packed = snapshots.create_archive({})
+                await request("PUT", "backups", body(archive_limit_mib=16))
+                try:
+                    snapshots.create_archive({})
+                    raise AssertionError("a file past twice the limit was archived")
+                except snapshots.SnapshotError as exc:
+                    assert "at most 32 MiB per file" in str(exc), str(exc)
+                try:
+                    snapshots.stage_import(packed["path"])
+                    raise AssertionError("a file past twice the limit was staged")
+                except snapshots.SnapshotError as exc:
+                    assert str(exc) == "snapshot member is larger than the 32 MiB per-file limit", str(exc)
+                snapshots.discard_export(packed)
+            await request("PUT", "backups", body(archive_limit_mib=32))
+            shutil.rmtree(str(blob))
+            # the record carries through a backup and comes back with it
+            archive = snapshots.create_archive({})
+            staged = snapshots.stage_import(archive["path"])
+            db.meta_set(backups.LIMIT_KEY, {"format": 1, "archive_mib": 64})
+            snapshots.commit_import(staged)
+            snapshots.discard_staged(staged)
+            snapshots.discard_export(archive)
+            assert backups.archive_limit_mib() == 32, "the limit comes back as backed up"
+            # an archive from before the setting carries no record: the default, still current
+            db.meta_del(backups.LIMIT_KEY)
+            archive = snapshots.create_archive({})
+            db.meta_set(backups.LIMIT_KEY, {"format": 1, "archive_mib": 64})
+            staged = snapshots.stage_import(archive["path"])
+            snapshots.commit_import(staged)
+            snapshots.discard_staged(staged)
+            snapshots.discard_export(archive)
+            assert db.meta_get(backups.LIMIT_KEY) is None and backups.archive_limit_mib() == 512
+            # any other shape is refused, never read: at startup, by an export and in an archive
+            for wrong in ({"format": 1, "archive_mib": 15}, {"format": 2, "archive_mib": 512},
+                          {"format": 1, "archive_mib": 512, "extra": 1}, {"archive_mib": 512},
+                          {"format": 1, "archive_mib": "512"}, 512):
+                db.meta_set(backups.LIMIT_KEY, wrong)
+                refused(lambda: backups.validate_limit_persisted(db.connect()))
+                refused(lambda: snapshots.create_archive({}))
+                copy = ROOT / "limit-check.db"
+                db.backup_to(str(copy))
+                refused(lambda: snapshots._validate_database(copy))
+                copy.unlink()
+            db.meta_del(backups.LIMIT_KEY)
+            print("PASS: the archive limit - its range, saved beside the schedule, an export, a saved backup and "
+                  "an import (by length and streamed) held to it, file and unpacked bounds following it, a lowered "
+                  "limit keeping saved copies, the record through a backup, archives from before it, and every "
+                  "other shape refused", flush=True)
 
             saved = backups._load()
             db.meta_set(backups.META_KEY, {**saved, "format": 0})
@@ -245,7 +387,7 @@ async def main():
             with patch.object(backups, "publish_archive", publish):
                 assert scheduler.running
                 await request("POST", "export", {"ui": {}}, 409)
-                await request("PUT", "backups", settings, 400)
+                await request("PUT", "backups", body(), 400)
                 stopping = asyncio.create_task(scheduler.stop(app))
                 await asyncio.sleep(0)
                 assert not stopping.done()

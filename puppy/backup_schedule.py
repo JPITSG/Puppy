@@ -5,6 +5,11 @@ so snapshots carry them without changing the database or configuration schema.
 Archive files themselves are outside snapshot coverage. Publication is journalled:
 a completed private temporary file is recorded before it becomes downloadable.
 Only catalogue-owned files with matching identities may be downloaded or rotated.
+
+The archive limit every backup and restore is held to sits beside it in its own
+optional, exact-shape `backup_limit` record (`{format, archive_mib}`): absent is
+the 512 MiB default, so a database or archive from before the setting is still
+current, and a schedule record never changes shape to carry it.
 """
 from __future__ import annotations
 
@@ -35,6 +40,12 @@ AT_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]\Z")
 ID_RE = re.compile(r"[a-f0-9]{32}\Z")
 FILE_KEYS = {"id", "at", "directory", "filename", "size", "device", "inode", "protection"}
 HEADERS = {"Cache-Control": "private, no-store"}
+LIMIT_KEY = "backup_limit"
+LIMIT_FORMAT = 1
+LIMIT_DEFAULT_MIB = 512
+LIMIT_MIN_MIB = 16
+LIMIT_MAX_MIB = 16384
+MIB = 1024 * 1024
 
 
 class BackupError(ValueError):
@@ -60,12 +71,44 @@ def validate_settings(value):
     return dict(value)
 
 
+def validate_limit(value):
+    if type(value) is not int or not LIMIT_MIN_MIB <= value <= LIMIT_MAX_MIB:
+        raise BackupError("Use an archive limit of {}–{} MiB".format(LIMIT_MIN_MIB, LIMIT_MAX_MIB))
+    return value
+
+
+def _load_limit(connection=None):
+    """The archive limit in MiB: the default while no record exists, else the
+    record's own value; a record of any other shape is refused, never read."""
+    sql = "SELECT value FROM meta WHERE key=?"
+    row = connection.execute(sql, (LIMIT_KEY,)).fetchone() if connection is not None else \
+        db.query_one(sql, (LIMIT_KEY,))
+    if row is None:
+        return LIMIT_DEFAULT_MIB
+    try:
+        value = json.loads(row[0])
+        if not isinstance(value, dict) or set(value) != {"format", "archive_mib"} or \
+                type(value["format"]) is not int or value["format"] != LIMIT_FORMAT:
+            raise ValueError("invalid shape")
+        return validate_limit(value["archive_mib"])
+    except (ValueError, TypeError) as exc:
+        raise BackupError("backup archive limit has an unsupported persisted shape") from exc
+
+
+def archive_limit_mib():
+    return _load_limit()
+
+
+def validate_limit_persisted(connection):
+    _load_limit(connection)
+
+
 def _valid_file(value):
     return isinstance(value, dict) and set(value) == FILE_KEYS and \
         isinstance(value["id"], str) and bool(ID_RE.fullmatch(value["id"])) and \
         _stamp(value["at"]) and _directory(value["directory"]) and \
         value["filename"] == "puppy-backup-{}.tar.gz".format(value["id"]) and \
-        type(value["size"]) is int and 0 < value["size"] <= snapshots.MAX_ARCHIVE_BYTES and \
+        type(value["size"]) is int and 0 < value["size"] <= LIMIT_MAX_MIB * MIB and \
         all(type(value[key]) is int and value[key] >= 0 for key in ("device", "inode")) and \
         value["protection"] == "none"
 
@@ -301,6 +344,11 @@ class Scheduler:
         if self.running or self.app.get("puppy_snapshot_busy"):
             raise BackupError("Wait for the current backup or restore to finish")
         current = _load()
+        if not isinstance(value, dict) or "archive_limit_mib" not in value:
+            raise BackupError("Use a daily time, an absolute directory, 1–{} copies and an archive limit".format(
+                KEEP_MAX))
+        value = dict(value)
+        limit = validate_limit(value.pop("archive_limit_mib"))
         cfg = validate_settings(value)
         validate_destination(cfg["directory"])
         if current["pending"] and current["pending"]["file"]:
@@ -314,7 +362,7 @@ class Scheduler:
         if current["pending"]:
             raise BackupError("Wait for the queued backup before changing its settings")
         current["settings"] = cfg
-        _save(current)
+        db.meta_apply({META_KEY: current, LIMIT_KEY: {"format": LIMIT_FORMAT, "archive_mib": limit}})
         self.wake.set()
 
     def queue(self):
@@ -347,6 +395,8 @@ class Scheduler:
                           "download": "/api/snapshot/saved/" + entry["id"] if available else None})
         return {"settings": current["settings"], "next_at": current["next_at"],
                 "timezone": time.strftime("%Z"), "keep_max": KEEP_MAX,
+                "archive_limit_mib": _load_limit(),
+                "archive_limit": {"min": LIMIT_MIN_MIB, "max": LIMIT_MAX_MIB, "default": LIMIT_DEFAULT_MIB},
                 "status": "running" if self.running else "waiting" if current["pending"] else "idle",
                 "waiting": self.waiting if current["pending"] else "",
                 "files": files, "history": list(reversed(current["history"]))}
@@ -421,6 +471,7 @@ class Scheduler:
 
     async def start(self, _app):
         validate_persisted(db.connect())
+        validate_limit_persisted(db.connect())
         self.task = asyncio.create_task(self.loop())
 
     async def stop(self, _app):

@@ -19,7 +19,8 @@ vm.runInContext(between("function fmtClockSetting(", "/* One stamp for"), contex
 vm.runInContext(`class View { ${between("  backupSettingsCard(", "  async render() {")} }; this.View=View;`,context);
 const tick = async () => {for(let i=0;i<8;i++)await Promise.resolve();};
 const payload = changes => ({settings:{enabled:false,at:"03:00",directory:"/home/mira/backups",keep:7},
-  next_at:0,timezone:"CEST",keep_max:100,status:"idle",waiting:"",files:[],history:[],...changes});
+  next_at:0,timezone:"CEST",keep_max:100,archive_limit_mib:512,archive_limit:{min:16,max:16384,default:512},
+  status:"idle",waiting:"",files:[],history:[],...changes});
 const reply = (route,data) => {const n=requests.findIndex(r=>r.route===route); assert.ok(n>=0,route); requests.splice(n,1)[0].resolve(data);};
 const same = (a,b) => assert.equal(JSON.stringify(a),JSON.stringify(b));
 
@@ -37,24 +38,29 @@ const same = (a,b) => assert.equal(JSON.stringify(a),JSON.stringify(b));
   $("#backup-retry").onclick(); reply("snapshot/backups",payload()); await tick();
   assert.equal(error.textContent,""); assert.equal(run.disabled,false); assert.equal(save.disabled,true);
   assert.equal(at.value,"03:00"); assert.equal(keep.max,"100");
+  const limit=$("#backup-limit");
+  assert.equal(limit.value,"512"); assert.equal(limit.min,"16"); assert.equal(limit.max,"16384");
+  assert.match($("#backup-help").textContent,/archive limit \(16–16384 MiB, 512 by default\)/);
 
   // A poll that finishes during typing updates history but preserves every edit.
   const reading=view.backupRefresh();
-  dir.value="/home/mira/archive"; at.value="04:15"; keep.value="3"; enabled.checked=true; form.oninput();
+  dir.value="/home/mira/archive"; at.value="04:15"; keep.value="3"; limit.value="1024"; enabled.checked=true; form.oninput();
   assert.equal(run.disabled,true); assert.equal(save.disabled,false);
   reply("snapshot/backups",payload()); await reading;
   assert.equal(dir.value,"/home/mira/archive"); assert.equal(at.value,"04:15");
-  assert.equal(enabled.checked,true); assert.equal(keep.value,"3");
+  assert.equal(enabled.checked,true); assert.equal(keep.value,"3"); assert.equal(limit.value,"1024");
   assert.equal($("#backup-note").textContent,"Unsaved changes");
 
   // Saving invalidates a pending read even if the old response arrives last.
   const stale=view.backupRefresh(); const old=requests.shift();
   let saving=form.onsubmit(new FakeEvent("submit"));
   let request=requests.shift(); assert.equal(request.options.method,"PUT");
-  const cfg={enabled:true,at:"04:15",directory:"/home/mira/archive",keep:3}; same(request.options.body,cfg);
-  request.resolve(payload({settings:cfg,next_at:500})); await saving;
+  const cfg={enabled:true,at:"04:15",directory:"/home/mira/archive",keep:3};
+  same(request.options.body,{...cfg,archive_limit_mib:1024});
+  request.resolve(payload({settings:cfg,next_at:500,archive_limit_mib:1024})); await saving;
   old.resolve(payload()); await stale;
-  assert.equal(dir.value,cfg.directory); assert.equal(save.disabled,true); assert.equal(run.disabled,false);
+  assert.equal(dir.value,cfg.directory); assert.equal(limit.value,"1024");
+  assert.equal(save.disabled,true); assert.equal(run.disabled,false);
   assert.equal($("#backup-status").textContent,"Next backup · stamp 500");
 
   // Failures stay inline without losing edits; time conversion follows the host.
@@ -65,7 +71,7 @@ const same = (a,b) => assert.equal(JSON.stringify(a),JSON.stringify(b));
   assert.equal(request.options.body.at,"17:45"); request.reject(new Error("Read-only directory")); await saving;
   assert.equal(error.textContent,"Read-only directory"); assert.equal(at.value,"5:45 PM");
   saving=form.onsubmit(new FakeEvent("submit")); request=requests.shift();
-  request.resolve(payload({settings:{...cfg,enabled:false,at:"17:45"}})); await saving;
+  request.resolve(payload({settings:{...cfg,enabled:false,at:"17:45"},archive_limit_mib:1024})); await saving;
   assert.equal(at.value,"5:45 PM"); assert.equal(run.disabled,false);
 
   // Run now queues once while disabled, with no stale form values in its body.
@@ -91,6 +97,7 @@ const same = (a,b) => assert.equal(JSON.stringify(a),JSON.stringify(b));
   assert.equal($(".backup-download"),link); assert.equal(document.activeElement,link);
   read=view.backupRefresh(); reply("snapshot/backups",payload({status:"running"})); await read;
   assert.equal(save.disabled,true); assert.equal(run.disabled,true); assert.equal(dir.disabled,true);
+  assert.equal(limit.disabled,true);
   assert.equal($("#snapshot-import").disabled,true); assert.equal($("#snapshot-export").disabled,true);
 
   // Hidden pages do not poll; retired cards cannot consume a late response.
@@ -99,5 +106,5 @@ const same = (a,b) => assert.equal(JSON.stringify(a),JSON.stringify(b));
   view.backupRetire(); assert.equal(timers.size,0);
   request.resolve(payload()); await read; assert.equal(dir.value,oldDirectory);
   await view.backupRefresh(); assert.equal(requests.length,0);
-  console.log("PASS: backup settings, saved-only Run now, local-clock parsing, inline failures, edit/read races, stable downloads and polling lifecycle");
+  console.log("PASS: backup settings and the archive limit, saved-only Run now, local-clock parsing, inline failures, edit/read races, stable downloads and polling lifecycle");
 })().catch(error=>{console.error(error);process.exitCode=1;});

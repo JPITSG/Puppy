@@ -32,9 +32,13 @@ log = logging.getLogger("puppy.snapshots")
 FORMAT_VERSION = 3
 PRODUCT = "puppy-state"
 ARCHIVE_ROOT = "puppy-snapshot"
-MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
-MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
-MAX_MEMBER_BYTES = 1024 * 1024 * 1024
+MIB = 1024 * 1024
+GIB = 1024 * MIB
+# The archive itself is held to the configured limit (backup_schedule's
+# backup_limit, 512 MiB unless set); any one file may be twice that and the
+# unpacked contents four times, never less than these floors.
+MEMBER_FLOOR_BYTES = GIB
+EXTRACTED_FLOOR_BYTES = 2 * GIB
 MAX_MEMBERS = 50_000
 MAX_UI_BYTES = 2 * 1024 * 1024
 MAX_MANIFEST_BYTES = 32 * 1024 * 1024
@@ -48,6 +52,33 @@ _last_work_cleanup = 0.0
 
 class SnapshotError(RuntimeError):
     pass
+
+
+def limits(archive_mib=None) -> dict:
+    """The size bounds of one backup or restore, read once when it starts:
+    the compressed archive, any one file in it and everything unpacked."""
+    if archive_mib is None:
+        from puppy import backup_schedule
+        archive_mib = backup_schedule.archive_limit_mib()
+    archive = archive_mib * MIB
+    return {"archive": archive, "member": max(MEMBER_FLOOR_BYTES, 2 * archive),
+            "extracted": max(EXTRACTED_FLOOR_BYTES, 4 * archive)}
+
+
+def size_text(count: int) -> str:
+    """A bound in the unit the setting uses: whole GiB where it is one, else MiB."""
+    if count >= GIB and count % GIB == 0:
+        return "{} GiB".format(count // GIB)
+    return "{} MiB".format(-(-count // MIB))
+
+
+def over_archive_limit(limit: int, size=None) -> str:
+    """The refusal of an archive past the limit, naming its size when known
+    (rounded up, so it never reads as the limit itself)."""
+    if size is None:
+        return "snapshot archive exceeds the {} MiB archive limit".format(limit // MIB)
+    return "snapshot archive is {} MiB, over the {} MiB archive limit".format(
+        -(-size // MIB), limit // MIB)
 
 
 class SnapshotBusy(SnapshotError):
@@ -262,7 +293,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _inventory(root: Path) -> dict:
+def _inventory(root: Path, bounds: dict) -> dict:
     entries = {}
     total = 0
     count = 0
@@ -280,8 +311,8 @@ def _inventory(root: Path) -> dict:
             }
         elif stat.S_ISREG(info.st_mode):
             total += info.st_size
-            if info.st_size > MAX_MEMBER_BYTES or total > MAX_EXTRACTED_BYTES:
-                raise SnapshotError("snapshot contents are too large")
+            if info.st_size > bounds["member"] or total > bounds["extracted"]:
+                raise SnapshotError(_too_large(bounds))
             entries[relative.as_posix()] = {
                 "type": "file", "size": info.st_size, "sha256": _sha256(path),
                 "mode": stat.S_IMODE(info.st_mode) & 0o777,
@@ -293,6 +324,11 @@ def _inventory(root: Path) -> dict:
         else:
             raise SnapshotError("unsupported file type in snapshot: {}".format(relative))
     return entries
+
+
+def _too_large(bounds: dict) -> str:
+    return "snapshot contents are too large · at most {} per file and {} in all".format(
+        size_text(bounds["member"]), size_text(bounds["extracted"]))
 
 
 def _copy_source_tree(source: Path, destination: Path, namespace: str,
@@ -336,9 +372,9 @@ def _copy_source_tree(source: Path, destination: Path, namespace: str,
                         stack.append((Path(child.path), relative))
                     elif stat.S_ISREG(info.st_mode):
                         budget["bytes"] += info.st_size
-                        if info.st_size > MAX_MEMBER_BYTES or \
-                                budget["bytes"] > MAX_EXTRACTED_BYTES:
-                            raise SnapshotError("snapshot contents are too large")
+                        if info.st_size > budget["limits"]["member"] or \
+                                budget["bytes"] > budget["limits"]["extracted"]:
+                            raise SnapshotError(_too_large(budget["limits"]))
                     elif stat.S_ISLNK(info.st_mode):
                         try:
                             target = os.readlink(child.path)
@@ -370,6 +406,7 @@ def _tar_filter(info: tarfile.TarInfo) -> tarfile.TarInfo:
 def create_archive(ui_state: dict) -> dict:
     """Build a private archive and return its path plus non-secret metadata."""
     ui_state = validate_ui_state(ui_state)
+    bounds = limits()
     root = work_root()
     temporary = Path(tempfile.mkdtemp(prefix="export-", dir=str(root)))
     stage = temporary / ARCHIVE_ROOT
@@ -380,7 +417,7 @@ def create_archive(ui_state: dict) -> dict:
         (stage / "uploads").mkdir(mode=0o700)
         (stage / "scratch").mkdir(mode=0o700)
         (stage / "keeps").mkdir(mode=0o700)
-        source_budget = {"members": 0, "bytes": 0}
+        source_budget = {"members": 0, "bytes": 0, "limits": bounds}
 
         db.backup_to(str(stage / "puppy.db"), progress=operations.checkpoint)
         from puppy import backup_schedule
@@ -435,7 +472,7 @@ def create_archive(ui_state: dict) -> dict:
             "sessions": len(sessions),
             "scratch_saved": scratch_saved,
             "scratch_missing": scratch_missing,
-            "files": _inventory(stage),
+            "files": _inventory(stage, bounds),
         }
         (stage / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -448,8 +485,8 @@ def create_archive(ui_state: dict) -> dict:
                 archive.add(str(stage), arcname=ARCHIVE_ROOT, recursive=True,
                             filter=_tar_filter)
         size = archive_tmp.stat().st_size
-        if size > MAX_ARCHIVE_BYTES:
-            raise SnapshotError("snapshot archive exceeds the 512 MiB limit")
+        if size > bounds["archive"]:
+            raise SnapshotError(over_archive_limit(bounds["archive"], size))
         operations.checkpoint()
         os.replace(str(archive_tmp), str(archive_path))
         archive_path.chmod(0o600)
@@ -535,7 +572,7 @@ def _member_relative(name: str) -> PurePosixPath:
     return PurePosixPath(*path.parts[1:])
 
 
-def _extract_archive(archive_path: Path, destination: Path) -> Path:
+def _extract_archive(archive_path: Path, destination: Path, bounds: dict) -> Path:
     raw = archive_path.open("rb")
     try:
         archive = tarfile.open(fileobj=operations.CheckedIO(raw), mode="r:gz")
@@ -567,11 +604,13 @@ def _extract_archive(archive_path: Path, destination: Path) -> Path:
                 kind = "dir"
             elif member.isreg():
                 kind = "file"
-                if member.size < 0 or member.size > MAX_MEMBER_BYTES:
-                    raise SnapshotError("snapshot member is too large")
+                if member.size < 0 or member.size > bounds["member"]:
+                    raise SnapshotError("snapshot member is larger than the {} per-file limit".format(
+                        size_text(bounds["member"])))
                 total += member.size
-                if total > MAX_EXTRACTED_BYTES:
-                    raise SnapshotError("snapshot expands beyond the 2 GiB limit")
+                if total > bounds["extracted"]:
+                    raise SnapshotError("snapshot expands beyond the {} limit".format(
+                        size_text(bounds["extracted"])))
             elif member.issym():
                 kind = "link"
                 _safe_link_target(relative, member.linkname)
@@ -746,6 +785,10 @@ def _validate_database(path: Path):
             backup_schedule.validate_persisted(connection)
         except ValueError as exc:
             raise SnapshotError("snapshot database contains an invalid backup schedule") from exc
+        try:
+            backup_schedule.validate_limit_persisted(connection)
+        except ValueError as exc:
+            raise SnapshotError("snapshot database contains an invalid backup archive limit") from exc
         orphan = connection.execute(
             "SELECT 1 FROM events e LEFT JOIN sessions s ON s.id=e.session_id "
             "WHERE s.id IS NULL LIMIT 1").fetchone()
@@ -762,7 +805,7 @@ def _validate_database(path: Path):
             connection.close()
 
 
-def _verify_manifest(root: Path, manifest: dict) -> None:
+def _verify_manifest(root: Path, manifest: dict, bounds: dict) -> None:
     required_manifest = {
         "format", "product", "source_version", "created_at", "source_data_dir",
         "sessions", "scratch_saved", "scratch_missing", "files",
@@ -781,7 +824,7 @@ def _verify_manifest(root: Path, manifest: dict) -> None:
     except ValueError as exc:
         raise SnapshotError("snapshot has an invalid Puppy version") from exc
     expected = manifest.get("files")
-    if not isinstance(expected, dict) or expected != _inventory(root):
+    if not isinstance(expected, dict) or expected != _inventory(root, bounds):
         raise SnapshotError("snapshot contents do not match its manifest")
     sessions = manifest.get("sessions")
     if not isinstance(sessions, int) or isinstance(sessions, bool) or sessions < 0:
@@ -959,15 +1002,18 @@ def _prepare_mirrors(candidate_db: Path, temporary: Path,
 def stage_import(archive_path: str) -> dict:
     """Extract, validate, and prepare a restore without touching live state."""
     archive = Path(archive_path)
-    if not archive.is_file() or archive.stat().st_size > MAX_ARCHIVE_BYTES:
-        raise SnapshotError("snapshot archive exceeds the 512 MiB limit")
+    bounds = limits()
+    if not archive.is_file():
+        raise SnapshotError("snapshot archive is missing")
+    if archive.stat().st_size > bounds["archive"]:
+        raise SnapshotError(over_archive_limit(bounds["archive"], archive.stat().st_size))
     temporary = Path(tempfile.mkdtemp(prefix="import-", dir=str(work_root())))
     created_scratch = []
     try:
-        root = _extract_archive(archive, temporary / "extracted")
+        root = _extract_archive(archive, temporary / "extracted", bounds)
         manifest = _load_json(
             root / "manifest.json", "snapshot manifest", MAX_MANIFEST_BYTES)
-        _verify_manifest(root, manifest)
+        _verify_manifest(root, manifest, bounds)
         try:
             cfg = config.normalize_import(_load_json(root / "config.json", "snapshot config"))
         except ValueError as exc:

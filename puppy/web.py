@@ -1602,8 +1602,10 @@ async def h_snapshot_import(request: web.Request):
         declared = int(request.headers.get("Content-Length", "0") or 0)
     except ValueError:
         declared = 0
-    if declared > snapshots.MAX_ARCHIVE_BYTES:
-        return web.json_response({"error": "snapshot archive exceeds the 512 MiB limit"},
+    # the archive limit this instance holds backups to, read once per upload
+    limit = snapshots.limits()["archive"]
+    if declared > limit:
+        return web.json_response({"error": snapshots.over_archive_limit(limit, declared)},
                                  status=413)
 
     descriptor, upload_name = tempfile.mkstemp(prefix="upload-", suffix=".tar.gz",
@@ -1621,9 +1623,9 @@ async def h_snapshot_import(request: web.Request):
                     break
                 operations.checkpoint()
                 size += len(chunk)
-                if size > snapshots.MAX_ARCHIVE_BYTES:
+                if size > limit:
                     return web.json_response(
-                        {"error": "snapshot archive exceeds the 512 MiB limit"}, status=413)
+                        {"error": snapshots.over_archive_limit(limit)}, status=413)
                 output.write(chunk)
         if not size:
             return web.json_response({"error": "snapshot archive is empty"}, status=400)

@@ -1024,14 +1024,18 @@ with a window of history around it.
   conflict copies, plus the exporting browser's Puppy tabs and drafts. It
   excludes remote backend data, ordinary project directories, managed-browser
   profiles and shared sign-ins, and engine credentials and native histories;
-  back those up separately if needed. Limits are 512 MiB compressed, 2 GiB
-  extracted, 1 GiB per file and 50,000 archive entries. Restore requires the
+  back those up separately if needed. The compressed archive is held to the
+  card's **Archive limit** (16–16384 MiB, 512 MiB by default) for every export,
+  saved backup and import; any one file inside may be twice that and the
+  unpacked contents four times, never less than 1 GiB and 2 GiB, in at most
+  50,000 archive entries. A backup past the limit names its own size, so the
+  limit can be raised to fit. Restore requires the
   current database, configuration and archive shapes; older shapes are refused
   without automatic migration.
   The same card can save compressed backups on the instance's machine, daily
   at a chosen local time or with **Run now**, even when scheduling is off.
   Set an absolute destination directory and 1–100 retained copies; the switch,
-  time, path and count take effect with **Save**. Scheduling starts off, at
+  time, path, count and archive limit take effect with **Save**. Scheduling starts off, at
   03:00 with 7 copies in the data directory's `backups/` folder. Busy work makes
   a backup wait for idle time; a missed daily run is coalesced into one attempt.
   Rotation removes only this feature's older copies after a successful backup.
@@ -1285,8 +1289,8 @@ node tests/host_panel_ui_test.js     # the host box: charts, latency rows, proce
 python3 tests/host_metrics_test.py   # CPU history, the process tree and backend latency
 python3 tests/backend_test.py        # headless package, auth, protocol, capabilities
 python3 tests/snapshot_test.py       # backup export/import and rollback
-python3 tests/backup_schedule_test.py # daily backups, rotation, downloads and recovery
-node tests/backup_schedule_ui_test.js # backup settings, status polling and edits
+python3 tests/backup_schedule_test.py # daily backups, rotation, downloads, recovery and the archive limit
+node tests/backup_schedule_ui_test.js # backup settings and the archive limit, status polling and edits
 python3 tests/search_test.py         # the search index and query language
 node tests/search_ui_test.js         # the Search tab's results, Show all pages and their cancellation
 python3 tests/spawn_test.py          # spawned agents against a stub engine

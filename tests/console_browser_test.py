@@ -8829,12 +8829,19 @@ async def backup_schedule_checks(instance, app, capture=False):
         await click("#backup-keep")
         await evaluate(instance, "document.querySelector('#backup-keep').select(); true")
         await instance.call("Input.insertText", {"text": "3"}, session=instance.page_session)
+        assert await evaluate(instance, "document.querySelector('#backup-limit').value") == "512"
+        await click("#backup-limit")
+        await evaluate(instance, "document.querySelector('#backup-limit').select(); true")
+        await instance.call("Input.insertText", {"text": "1024"}, session=instance.page_session)
         await click("#backup-enabled + .be-auto-track")
         assert await evaluate(instance, "document.querySelector('#backup-run').disabled")
         await click("#backup-save")
         await until(instance, "document.querySelector('#backup-save').disabled && !document.querySelector('#backup-run').disabled")
         assert backup_schedule._load()["settings"] == {
             "enabled": True, "at": "04:15", "directory": str(folder), "keep": 3}
+        assert db.meta_get(backup_schedule.LIMIT_KEY) == {"format": 1, "archive_mib": 1024}, \
+            "the archive limit saved beside the schedule, in its own record"
+        assert await evaluate(instance, "document.querySelector('#backup-limit').value") == "1024"
         assert backup_schedule._load()["pending"] is None
         # Following history never repeats an action and preserves a form draft.
         await evaluate(instance, """document.querySelector('#backup-at').value='05:20';
@@ -8898,6 +8905,7 @@ async def backup_schedule_checks(instance, app, capture=False):
     finally:
         await evaluate(instance, "closeTab('settings'); closeTab('search'); activateTab('s:0:1'); applyTheme('dark'); delete window.backupView; delete window.backupLink; true")
         db.execute("DELETE FROM meta WHERE key=?", (backup_schedule.META_KEY,))
+        db.execute("DELETE FROM meta WHERE key=?", (backup_schedule.LIMIT_KEY,))
         await instance.call("Emulation.setDeviceMetricsOverride", {
             "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
     print("PASS: Backup & restore card, real save and Run now routes, Back preserves edits, stable downloadable history and shared styles on desktop/phone in both themes", flush=True)
