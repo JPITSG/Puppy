@@ -4309,6 +4309,7 @@ const guardNativeTouchDrag = () => () => false;
 const suppressContextGestureActivation = () => {};
 const xIcon = () => el('span', '');
 const titlePending = () => false;
+const POPOUT = null;   // the full console, never a session's own window
 let meta;
 const findSessionMeta = () => meta;
 %s
@@ -4555,7 +4556,7 @@ def check_flat_session_list(ui_source: str, css_source: str) -> None:
     shared_rows = ui_source[ui_source.index("function sessionRowRows("):
                             ui_source.index("function renderSidebar()")]
     assert "sessionLocationLabel(s, bid));" in shared_rows
-    assert "sessionLocationTitle(s, bid));" in shared_rows
+    assert "sessionLocationTitle(s, bid) +" in shared_rows   # the directory's state follows it
     # the per-node openers moved to the status box beside its disclosures
     foot = ui_source[
         ui_source.index("function renderFootEngines()"):

@@ -471,6 +471,8 @@ context.api = (bid, path, options) => {
   if (options.method === 'POST') return new Promise((resolve, reject) => pendingPosts.push({ resolve, reject }));
   return Promise.resolve({ ok: true });
 };
+// the list of connections already open has its own suite (running_list_ui_test.js)
+context.runningList = () => ({ show() {}, paint() {} });
 vm.runInContext(source.slice(source.indexOf('function modalNewVnc('),
   source.indexOf('/* the "@VNC" shortcut wizard */')), context);
 const nv = id => dialog.m.querySelector(`#nv-${id}`);

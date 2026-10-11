@@ -6758,6 +6758,166 @@ async def terminal_io_checks(console):
             await terminal.manager().close(terminal_id, "test finished")
 
 
+async def running_list_checks(instance, sid, capture=False):
+    """What a backend already runs, recovered in real layout. The node starts
+    a browser and a terminal for a session the way an agent does while no
+    console watches - no tab for either - and this console finds them: the
+    session's chat head shows a chip for each, and a real click on the browser
+    chip opens its tab beside the chat with its screen live. A second agent
+    browser keeps New browser a dialog, which lists it first and the one in a
+    tab after it, on a desktop and a phone in both themes, nothing spilling
+    out of the dialog; a real click on its row shows it. New terminal lists
+    the agent's terminal and a real click attaches a tab to it by its ID, and
+    New VNC connection lists a connection the catalog names."""
+    page = await browser.manager().create(origin="agent", owner_session=sid)
+    second = None
+    shell = await terminal.manager().create(command="", cwd=str(ROOT), origin="agent", owner_session=sid)
+    bid_js = "0"
+
+    async def press(point):
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left",
+                                                                 clickCount=1), session=instance.page_session)
+
+    async def centre(script):
+        return await evaluate(instance, """(() => { const n = %s; n.scrollIntoView({block: 'nearest'});
+            const b = n.getBoundingClientRect(); return {x: b.left + b.width / 2, y: b.top + b.height / 2}; })()""" % script)
+
+    async def menu(act):
+        await press(await centre("document.querySelector('.workspace-pane.focused .tab-add-wrap .icon-btn')"))
+        await until(instance, "!$('tab-add-menu').classList.contains('hidden')")
+        await press(await centre("document.querySelector('#tab-add-menu button[data-act=%s]')" % act))
+
+    rows_js = """[...document.querySelectorAll('.modal .running-item')].map(n => ({
+        name: n.querySelector('.si-name').textContent, word: n.querySelector('.ri-state').textContent,
+        sub: n.querySelector('.ri-sub').textContent}))"""
+    fits_js = """(() => { const box = document.querySelector('.modal .running-box');
+        const dialog = box.closest('.modal').getBoundingClientRect(), list = box.querySelector('.running-list');
+        const rows = [...box.querySelectorAll('.running-item')];
+        return {inside: rows.every(n => { const r = n.getBoundingClientRect();
+                    return r.left >= dialog.left - 0.5 && r.right <= dialog.right + 0.5; }),
+                sideways: list.scrollWidth > list.clientWidth + 1,
+                cut: rows.every(n => { const sub = n.querySelector('.ri-sub');
+                    return sub.scrollWidth <= sub.clientWidth + 1 || getComputedStyle(sub).textOverflow === 'ellipsis'; }),
+                above: box.getBoundingClientRect().bottom <=
+                    box.closest('form').querySelector('.m-btns').getBoundingClientRect().top + 0.5}; })()"""
+    try:
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        # a console opened after the agent made them - another machine's, say
+        await instance.call("Page.reload", session=instance.page_session)
+        await until(instance, "typeof state !== 'undefined' && state.sessions.length > 0")
+        await evaluate(instance, "openSessionTab(0, %d, findSessionMeta(0, %d)); true" % (sid, sid))
+        view = "sessionViewFor(0, %d)" % sid
+        await until(instance, "!!%s && %s.draftReady" % (view, view))
+        chip = lambda kind, ident: ("[...%s.root.querySelectorAll('.chip.%s')].find(n => "
+                                    "n.textContent === '%s %s')" % (view, kind, kind.capitalize(), ident))
+        await until(instance, "!!(%s) && !!(%s)" % (chip("browser", page.browser_id), chip("terminal", shell.terminal_id)))
+        assert await evaluate(instance, "!state.tabs.some(t => t.id === 'b:0:%s')" % page.browser_id), \
+            "the agent's browser has no tab here yet"
+        await press(await centre(chip("browser", page.browser_id)))
+        await until(instance, "state.active === 'b:0:%s' && state.views['b:0:%s'] && "
+                              "state.views['b:0:%s'].screen.classList.contains('live')"
+                    % ((page.browser_id,) * 3))
+        order = await evaluate(instance, """(() => { const pane = workspacePaneForTab('s:0:%d');
+            return pane.tabs.indexOf('b:0:%s') - pane.tabs.indexOf('s:0:%d'); })()"""
+                               % (sid, page.browser_id, sid))
+        assert order == 1, ("the browser opens beside its chat", order)
+        await evaluate(instance, "activateTab('s:0:%d'); true" % sid)
+
+        # New browser lists what the backend holds: the hidden one first
+        second = await browser.manager().create(origin="agent", owner_session=sid)
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width == 390}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                if width == 390:
+                    await evaluate(instance, "openBrowserFromMenu(state.activeGroup); true")
+                else:
+                    await menu("new-browser")
+                await until(instance, "document.querySelectorAll('.modal .running-item').length === 2")
+                rows = await evaluate(instance, rows_js)
+                assert [r["name"] for r in rows] == ["Browser " + second.browser_id, "Browser " + page.browser_id], rows
+                assert rows[1]["word"] == "In a tab here" and rows[0]["word"] in ("Running", "Idle"), rows
+                assert rows[0]["sub"].startswith("Started by an agent · Harbor dashboard"), rows
+                fits = await evaluate(instance, fits_js)
+                assert fits == {"inside": True, "sideways": False, "cut": True, "above": True}, (name, theme, fits)
+                if capture:
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                    (BASE / "data" / ("running-browser-" + name + "-" + theme + ".png")).write_bytes(
+                        base64.b64decode(shot["data"]))
+                await evaluate(instance, "document.querySelector('.modal #nb-cancel').click(); true")
+                await until(instance, "!document.querySelector('.modal .running-box')")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        await evaluate(instance, "applyTheme('dark'); true")
+        await menu("new-browser")
+        await until(instance, "document.querySelectorAll('.modal .running-item').length === 2")
+        await press(await centre("document.querySelector('.modal .running-item')"))
+        await until(instance, "!document.querySelector('.modal') && state.active === 'b:0:%s'" % second.browser_id)
+
+        # New terminal: the agent's terminal, attached by its ID
+        await menu("new-terminal")
+        await until(instance, "[...document.querySelectorAll('.modal .running-item')].some(n => "
+                              "n.querySelector('.si-name').textContent === 'Terminal %s')" % shell.terminal_id)
+        rows = await evaluate(instance, rows_js)
+        mine = next(r for r in rows if r["name"] == "Terminal " + shell.terminal_id)
+        assert mine["word"] == "Running" and mine["sub"].startswith(shell.command + " · Harbor dashboard · "), mine
+        assert (await evaluate(instance, fits_js))["inside"]
+        if capture:
+            shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+            (BASE / "data" / "running-terminal-desktop-dark.png").write_bytes(base64.b64decode(shot["data"]))
+        await press(await centre("[...document.querySelectorAll('.modal .running-item')].find(n => "
+                                 "n.querySelector('.si-name').textContent === 'Terminal %s')" % shell.terminal_id))
+        await until(instance, "state.tabs.some(t => t.type === 'term' && t.terminalId === '%s' && t.id === state.active)"
+                    % shell.terminal_id)
+        await until(instance, "Object.values(state.views).some(v => v.tab && v.tab.terminalId === '%s' && "
+                              "v.ws && v.ws.readyState === 1)" % shell.terminal_id)
+        assert shell.viewer_count() >= 1, "the tab is a viewer of the agent's own terminal"
+        assert await evaluate(instance, "[...%s.root.querySelectorAll('.chip.terminal')].length" % view) == 1, \
+            "one chip, the tab's"
+
+        # New VNC connection lists what the node answers (a connection it holds, as its route says)
+        from puppy import vnc as vnc_module
+        listed = [{"id": "VNC1", "host": "192.168.1.40", "port": 5901, "label": "Lab desk", "origin": "agent",
+                   "connected": True, "view_only": False, "viewers": 0, "width": 1920, "height": 1080,
+                   "name": "lab", "error": "", "created_at": time.time()}]
+        with patch.object(vnc_module.manager(), "instance_payloads", return_value=listed):
+            await menu("new-vnc")
+            await until(instance, "document.querySelectorAll('.modal .running-item').length === 1")
+            rows = await evaluate(instance, rows_js)
+            assert rows[0]["name"] == "Lab desk" and rows[0]["word"] == "Connected" and \
+                rows[0]["sub"].startswith("VNC VNC1 · 192.168.1.40:5901 · Started by an agent"), rows
+            assert (await evaluate(instance, fits_js))["above"]
+            if capture:
+                shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                (BASE / "data" / "running-vnc-desktop-dark.png").write_bytes(base64.b64decode(shot["data"]))
+            await evaluate(instance, "document.querySelector('.modal #nv-cancel').click(); true")
+    finally:
+        await evaluate(instance, """document.querySelectorAll('.modal #nb-cancel, .modal #nt-cancel, .modal #nv-cancel')
+            .forEach(n => n.click());
+            for (const t of [...state.tabs]) if (t.type === 'browser' || (t.type === 'term' && t.terminalId === %s))
+              closeTab(t.id); activateTab('s:0:%d'); applyTheme('dark'); true""" % (json.dumps(shell.terminal_id), sid))
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        for made in (page, second):
+            if made is not None:
+                try:
+                    await browser.manager().close(made.browser_id)
+                except Exception:
+                    pass
+        try:
+            await terminal.manager().close(shell.terminal_id, "test finished")
+        except Exception:
+            pass
+    print("PASS: what a backend already runs - an agent's browser and terminal for a session with no tab here, "
+          "found by the chat head's chips (a real click opening the browser beside its chat, live) and listed by "
+          "New browser, New terminal and New VNC connection on a desktop and a phone in both themes, a real "
+          "click on a row showing that browser or attaching a tab to that terminal", flush=True)
+
+
 async def popout_checks(instance, sid, capture=False):
     """A session tab moved to a window of its own. A real right-click on the
     tab offers Move to new window first, and a real click on it opens a real
@@ -8955,6 +9115,9 @@ async def main(args):
             if args.popout_only:
                 await popout_checks(instances[0], sid, args.screenshots)
                 return
+            if args.running_only:
+                await running_list_checks(instances[0], sid, args.screenshots or bool(os.environ.get("RUNNING_SHOT")))
+                return
             if args.notices_only:
                 await notices_panel_checks(instances[0], args.screenshots)
                 await notice_wrapping_checks(instances[0], args.screenshots)
@@ -9028,6 +9191,7 @@ async def main(args):
             await terminal_io_checks(instances[0])
             await engine_terminal_checks(instances[0], sid)
             await popout_checks(instances[0], sid)
+            await running_list_checks(instances[0], sid)
             await navigation_checks(instances[0], url, sid, args.screenshots)
             if args.screenshots:
                 await screenshots(instances[0])
@@ -9049,6 +9213,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-substitute-only", action="store_true")
     parser.add_argument("--notices-only", action="store_true")
     parser.add_argument("--popout-only", action="store_true")
+    parser.add_argument("--running-only", action="store_true")
     parser.add_argument("--chat-filter-only", action="store_true")
     parser.add_argument("--show-focus-only", action="store_true")
     parser.add_argument("--thinking-only", action="store_true")

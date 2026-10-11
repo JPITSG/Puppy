@@ -100,6 +100,13 @@ passwords, and expire 120 seconds after completion (pruned on new requests),
 with a cap of 512 records; pending attempts are never evicted. Repeated DELETEs
 are harmless. Both runtimes authenticate the route through the execution API.
 
+New VNC connection also lists the connections the chosen backend already
+holds - its catalog, then one fresh `GET /api/vnc/instances` - and a click on
+one opens its tab without dialling anything, so a screen an agent connected
+while no console watched, or one opened from another machine, can be shown
+here (the same list Puppy's New browser and New terminal dialogs keep for
+their kinds).
+
 The connection modal keeps Cancel enabled; its close hook also handles Escape
 and the backdrop. Dismissed attempts cannot open tabs or show success notices.
 Older backends use the existing create route, with a successful late reply

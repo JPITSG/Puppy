@@ -175,6 +175,9 @@ Object.assign(context, {
   tasksIcon: icon, globeIcon: icon, terminalIcon: icon,
   remoteStoppingMessage: () => "", noteSessionActivity() {},
   syncSessionBrowserChips() {}, state: {tabs: []},
+  // the node's own catalogs are tested in running_list_ui_test.js: none here
+  RUNNING_KINDS: {browser: {known: () => null}, terminal: {known: () => null}},
+  refreshRunningCatalogs() {}, POPOUT: null,
 });
 vm.runInContext([
   between("function effectiveQueuedConfig(", "/* One workspace tab owns Main"),

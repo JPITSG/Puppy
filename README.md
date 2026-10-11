@@ -792,6 +792,18 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   avoid this, connect through the VNC tab's dialog and mention only its ID.
   A screen the agent touches opens as a tab beside the chat, so you can
   watch it work and take over at any moment.
+- **Finding what is already running.** Browsers, terminals and VNC
+  connections belong to their backend, not to the console that opened them,
+  so one an agent opened while no console was watching, or one opened from
+  another machine, has no tab in this console. *New browser*, *New terminal*
+  and *New VNC connection* list what the chosen backend already runs of their
+  kind - who started each, the session it serves, what it runs or reaches,
+  and when - with the ones that have no tab here first. A click shows it in a
+  tab, attached to that same browser, terminal or connection rather than a new
+  one. A session's chat head also shows a chip for each browser and running
+  terminal its backend binds to that session, with a tab here or without, and
+  a click opens it beside the chat. *New browser* still opens a browser at once
+  when its one backend holds nothing else to show.
 
 ### Agents that delegate and collaborate
 
@@ -1257,6 +1269,7 @@ node tests/sidebar_ui_test.js        # sidebar ordering, pins, reorders, filteri
 python3 tests/session_directories_test.py # directory events, recovery and fallback on both runtimes
 node tests/tab_drag_ui_test.js       # task discovery, saved visibility and tab dragging
 node tests/popout_ui_test.js         # a session tab's own window and what it hands back
+node tests/running_list_ui_test.js   # what a backend already runs: the New dialogs' lists and the chat head's chips
 node tests/drag_scroll_ui_test.js    # the lists a reorder drag scrolls, and the drops past their ends
 node tests/menu_dismiss_ui_test.js   # menu dismissal, toggles and open dropdowns
 node tests/navigation_ui_test.js    # browser Back/Forward, dialogs and cancellation ownership

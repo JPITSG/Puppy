@@ -20359,6 +20359,7 @@ class SessionView {
       case "snapshot":
         this.session = d.session;
         this.promptGutter.refreshIndex();
+        refreshRunningCatalogs(this.tab.bid);
         if (d.draft_presence && d.draft_presence.version === 1) {
           if (!this.sharedDraft) this.sharedDraft = new SharedDraft(this);
           this.sharedDraft.count = Number.isInteger(d.draft_presence.count) ? Math.max(0, d.draft_presence.count) : 0;
@@ -20637,12 +20638,16 @@ class SessionView {
   /* A browser this session launched lives in its own tab, which can be
      scrolled out of the tabbar or parked in another pane entirely. The header
      says one exists and takes you to it, and stops saying so the moment the
-     browser closes. */
+     browser closes. One the node binds to this session that this console has
+     no tab for - the agent opened it while no console watched, or another
+     machine did - has its chip too, and a press opens its tab beside the
+     chat. */
   syncBrowserChips() {
     const live = state.tabs.filter(t => t.type === "browser" && t.browserId &&
       (t.bid || 0) === (this.tab.bid || 0) && t.sid === this.tab.sid &&
       t.browserGone !== true);
-    const key = live.map(t => t.id).join("\u0000");
+    const untabbed = this.untabbedRunning("browser");
+    const key = live.map(t => t.id).concat(untabbed.map(item => `c:${item.id}`)).join("\u0000");
     if (key === this.browserChipKey) return;
     this.browserChipKey = key;
     const scroll = this.root.querySelector(".chat-meta-scroll");
@@ -20659,13 +20664,48 @@ class SessionView {
       chip.onclick = () => activateTab(t.id);
       scroll.insertBefore(chip, anchor);
     }
+    for (const item of untabbed) {
+      const id = String(item.id).toUpperCase();
+      const chip = el("button", "chip browser");
+      chip.type = "button";
+      chip.appendChild(globeIcon(11));
+      chip.appendChild(el("span", "chip-text", `Browser ${id}`));
+      chip.setAttribute("aria-label", `Show Browser ${id}`);
+      chip.onclick = () => this.showRunning("browser", item);
+      scroll.insertBefore(chip, anchor);
+    }
+  }
+
+  /* What the node binds to this session that this console has no tab for:
+     a running terminal, or a browser (a stopped one starts again when shown).
+     A session's own window holds no such tab - its screens go to the console
+     it came from - so it offers none. */
+  untabbedRunning(kind) {
+    if (POPOUT) return [];
+    const bid = this.tab.bid || 0, spec = RUNNING_KINDS[kind];
+    return (spec.known(bid) || []).filter(item => item &&
+      Number(item.session_id) === this.tab.sid && /^[A-Za-z0-9]{4}$/.test(String(item.id || "")) &&
+      (kind !== "terminal" || item.running === true) &&
+      !spec.tabFor(bid, String(item.id).toUpperCase()));
+  }
+
+  /* A chip's press for one of those: its tab opens beside this chat's own
+     (Main's, for a task) in that pane, and takes the focus it was asked for. */
+  showRunning(kind, item) {
+    const bid = this.tab.bid || 0;
+    const task = this.session && this.session.task;
+    const sessionTabId = `s:${bid}:${task ? task.parent : this.tab.sid}`;
+    const pane = workspacePaneForTab(sessionTabId);
+    RUNNING_KINDS[kind].open(bid, item, pane ? pane.id : null,
+      { afterTabId: sessionTabId, sid: this.tab.sid });
   }
 
   syncTerminalChips() {
     const live = state.tabs.filter(t => t.type === "term" && t.terminalId &&
       (t.bid || 0) === (this.tab.bid || 0) && t.sid === this.tab.sid &&
       t.ended !== true && t.terminalGone !== true);
-    const key = live.map(t => t.id).join("\u0000");
+    const untabbed = this.untabbedRunning("terminal");
+    const key = live.map(t => t.id).concat(untabbed.map(item => `c:${item.id}`)).join("\u0000");
     if (key === this.terminalChipKey) return;
     this.terminalChipKey = key;
     const scroll = this.root.querySelector(".chat-meta-scroll");
@@ -20678,6 +20718,16 @@ class SessionView {
       chip.appendChild(el("span", "chip-text", `Terminal ${t.terminalId}`));
       chip.setAttribute("aria-label", `Show Terminal ${t.terminalId}`);
       chip.onclick = () => activateTab(t.id);
+      scroll.insertBefore(chip, anchor);
+    }
+    for (const item of untabbed) {
+      const id = String(item.id).toUpperCase();
+      const chip = el("button", "chip terminal");
+      chip.type = "button";
+      chip.appendChild(terminalIcon(11));
+      chip.appendChild(el("span", "chip-text", `Terminal ${id}`));
+      chip.setAttribute("aria-label", `Show Terminal ${id}`);
+      chip.onclick = () => this.showRunning("terminal", item);
       scroll.insertBefore(chip, anchor);
     }
   }
@@ -30787,16 +30837,202 @@ function modalWorkspaceLink(bid, session) {
   };
 }
 
+/* ---- what a backend already runs ---- */
+/* A backend's browsers, terminals and VNC screens are its own, and a console
+   shows only the ones it holds tabs for: one an agent opened while no console
+   was watching, or one opened from another machine, has no tab here. Each New
+   dialog lists what the chosen backend already holds of its kind - the ones
+   without a tab here first, newest first - and a press shows that one in a
+   tab, attaching to it rather than starting another. The list paints from the
+   catalog this console already keeps, then from one fresh read of the node,
+   and follows the catalog while the dialog stays open. */
+const RUNNING_KINDS = {
+  browser: {
+    route: "browser/status",
+    caption: "Browsers already on",
+    icon: () => globeIcon(13),
+    known: bid => {
+      const status = bid ? state.remoteBrowserStatus[bid] : state.browserStatus;
+      return status && Array.isArray(status.instances) ? status.instances : null;
+    },
+    tabFor: (bid, id) => state.tabs.find(t => t.id === `b:${bid}:${id}`),
+    open: (bid, item, groupId, extra = {}) => openBrowserTab(bid, item.id, groupId,
+      { ...(Number(item.session_id) > 0 ? { sid: Number(item.session_id) } : {}), ...extra }),
+  },
+  terminal: {
+    route: "terminal/instances",
+    caption: "Terminals already on",
+    icon: () => terminalIcon(13),
+    known: bid => Array.isArray(state.terminalInstances[bid]) ? state.terminalInstances[bid] : null,
+    tabFor: (bid, id) => state.tabs.find(t => t.type === "term" && (t.bid || 0) === bid &&
+      t.terminalId === id),
+    /* the terminal it is, named for the CLI it runs; never its command again */
+    open: (bid, item, groupId, extra = {}) => openTermTab(bid, "", groupId, "", item.id, {
+      ...(Number(item.session_id) > 0 ? { sid: Number(item.session_id) } : {}),
+      ...(item.engine ? { engine: String(item.engine) } : {}), ...extra }),
+  },
+  vnc: {
+    route: "vnc/instances",
+    caption: "Connections already on",
+    icon: () => vncIcon(13),
+    known: bid => vncInstancesFor(bid),
+    tabFor: (bid, id) => state.tabs.find(t => t.id === `v:${bid}:${id}`),
+    open: (bid, item, groupId, extra = {}) => openVncTab(bid, item.id, groupId,
+      { host: item.host, port: item.port, label: item.label, ...extra }),
+  },
+};
+
+/* One instance as a row says it: its name, where it stands, and what it is -
+   who started it, the session it last served, what it runs or reaches, when. */
+function runningEntry(kind, bid, item) {
+  const id = String(item && item.id || "").toUpperCase();
+  const shown = !!RUNNING_KINDS[kind].tabFor(bid, id);
+  const sid = Number(item.session_id) || 0;
+  const owner = sid > 0 ? findSessionMeta(bid, sid) : null;
+  const who = item.origin === "agent" ? "Started by an agent" : "Started from a console";
+  const when = Number(item.created_at) > 0 ? fmtStamp(Number(item.created_at)) : "";
+  const elsewhere = Number(item.viewers) > 0;
+  const parts = [];
+  let name, word;
+  if (kind === "browser") {
+    name = `Browser ${id}`;
+    parts.push({ text: who }, { text: owner && owner.name });
+    word = shown ? "In a tab here" : elsewhere ? "Open elsewhere" : item.running ? "Running" : "Idle";
+  } else if (kind === "terminal") {
+    const cli = item.engine ? terminalCliLabel({ bid, engine: String(item.engine) }) : "";
+    name = `${cli || "Terminal"} ${id}`;
+    if (!cli) parts.push(item.command ? { text: item.command, mono: true } : { text: "Shell" });
+    parts.push({ text: owner && owner.name }, { text: item.cwd, mono: true }, { text: who });
+    word = shown ? "In a tab here" : !item.running ? "Ended" : elsewhere ? "Open elsewhere" : "Running";
+  } else {
+    const port = Number(item.port) || 0;
+    const target = item.host ? (port && port !== 5900 ? `${item.host}:${port}` : String(item.host)) : "";
+    name = item.label || target || `VNC ${id}`;
+    parts.push({ text: `VNC ${id}`, mono: true });
+    if (item.label && target) parts.push({ text: target, mono: true });
+    if (item.view_only) parts.push({ text: "View only" });
+    parts.push({ text: who });
+    word = shown ? "In a tab here" : elsewhere ? "Open elsewhere" : item.connected ? "Connected" :
+      item.error ? "Disconnected" : "Not connected";
+  }
+  if (when) parts.push({ text: when });
+  return { id, name, word, shown, parts: parts.filter(part => part.text),
+    created: Number(item.created_at) || 0 };
+}
+
+/* The rows of one backend's catalog, the hidden ones first, newest first. */
+function runningEntries(kind, bid, items) {
+  return (Array.isArray(items) ? items : [])
+    .filter(item => item && /^[A-Za-z0-9]{4}$/.test(String(item.id || "")))
+    .map(item => ({ item, entry: runningEntry(kind, bid, item) }))
+    .sort((a, b) => (a.entry.shown - b.entry.shown) || (b.entry.created - a.entry.created));
+}
+
+/* Without a live node stream nothing keeps a backend's browser and terminal
+   catalogs in this console, yet the chat head's chips and New browser read
+   them: a session view's socket snapshot reads them again, one read per
+   backend at a time, and what it answers lands only while no stream does. */
+const runningCatalogReads = new Map();
+function refreshRunningCatalogs(bid, timeoutMs = 15000) {
+  bid = Number(bid) || 0;
+  if (nodeStateStreamActive(bid) || (bid && !backendConnectionAllowed(bid))) return Promise.resolve();
+  if (runningCatalogReads.has(bid)) return runningCatalogReads.get(bid);
+  const jobs = [];
+  if (browserEnabledFor(bid) && browserInstancesFor(bid))
+    jobs.push(api(bid, "browser/status", { timeoutMs }).then(answer => {
+      if (!nodeStateStreamActive(bid)) applyBrowserStatusSnapshot(bid, answer);
+    }, () => {}));
+  if (terminalInstancesFor(bid))
+    jobs.push(api(bid, "terminal/instances", { timeoutMs }).then(answer => {
+      if (!nodeStateStreamActive(bid)) applyTerminalInstancesSnapshot(bid, answer);
+    }, () => {}));
+  const read = Promise.all(jobs).then(() => { runningCatalogReads.delete(bid); });
+  runningCatalogReads.set(bid, read);
+  return read;
+}
+
+/* Whether a backend holds anything of this kind the console has no tab for. */
+function runningHidden(kind, bid) {
+  return runningEntries(kind, bid, RUNNING_KINDS[kind].known(bid)).some(row => !row.entry.shown);
+}
+
+/* The New dialogs' list, set into a form ahead of its error line and its
+   buttons: `show(bid)` points it at a backend, a press closes the dialog and
+   shows the instance. It stays out of sight while the backend holds none. */
+function runningList(kind, form, { groupId = null, close, onClose }) {
+  const spec = RUNNING_KINDS[kind];
+  const box = el("section", "running-box hidden");
+  const head = box.appendChild(el("div", "field-lbl running-head"));
+  const list = box.appendChild(el("div", "running-list open-session-list"));
+  form.insertBefore(box, form.querySelector(".form-error") || form.querySelector(".m-btns"));
+  let bid = null, fresh = null, serial = 0, drawn = "";
+  const paint = () => {
+    if (bid === null || !box.isConnected) return;
+    const known = spec.known(bid);
+    /* a live stream's catalog is as new as anything; else the fresh read wins */
+    const items = fresh && !(nodeStateStreamActive(bid) && known) ? fresh : known;
+    const rows = runningEntries(kind, bid, items);
+    /* rows that say what they said stay the nodes they were: a repaint
+       between a press and its release would swallow the click */
+    const signature = JSON.stringify([bid, rows.map(({ entry }) => entry)]);
+    if (signature === drawn) return;
+    drawn = signature;
+    box.classList.toggle("hidden", !rows.length);
+    head.textContent = `${spec.caption} ${backendName(bid)}`;
+    list.replaceChildren();
+    for (const { item, entry } of rows) {
+      const row = list.appendChild(el("button", "sess-item running-item" + (entry.shown ? " shown" : "")));
+      row.type = "button";
+      const top = row.appendChild(el("div", "si-row"));
+      top.appendChild(el("span", "ri-ico")).appendChild(spec.icon());
+      top.appendChild(el("div", "si-name", entry.name));
+      top.appendChild(el("span", "ri-state", entry.word));
+      const sub = row.appendChild(el("div", "si-row sub"));
+      sub.appendChild(el("span", "ri-ico"));
+      const detail = sub.appendChild(el("div", "ri-sub"));
+      entry.parts.forEach((part, at) => {
+        if (at) detail.appendChild(document.createTextNode(" · "));
+        detail.appendChild(el("span", part.mono ? "mono-inline" : "", String(part.text)));
+      });
+      row.setAttribute("aria-label", `Show ${entry.name} · ${entry.word} · ` +
+        entry.parts.map(part => part.text).join(" · "));
+      row.onclick = () => {
+        close();
+        spec.open(bid, item, groupId);
+      };
+    }
+  };
+  const show = async next => {
+    bid = Number(next) || 0;
+    fresh = null;
+    paint();
+    const mine = ++serial;
+    try {
+      const answer = await api(bid, spec.route, { cache: "no-store" });
+      if (mine !== serial || !box.isConnected) return;
+      fresh = answer && Array.isArray(answer.instances) ? answer.instances : null;
+      paint();
+    } catch (_) { /* the catalog already shown stays */ }
+  };
+  nodeStateListeners.add(paint);
+  if (onClose) onClose(() => { serial++; nodeStateListeners.delete(paint); });
+  return { show, paint };
+}
+
 function modalNewTerminal(groupId = null) {
   const beOpts = [{ id: 0, name: backendName(0) }]
     .concat(state.backends.filter(b => backendHasCapability(b, "terminal")));
-  const { m, close } = modal(`<h2>New terminal</h2>
+  const { m, close, onClose } = modal(`<h2>New terminal</h2>
     <form id="nt-form">
     <label>Backend<select id="nt-be">${beOpts.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
     <label>Command <span class="field-optional">(optional)</span><input type="text" id="nt-cmd" placeholder="Default shell, or e.g. ssh user@host"></label>
     <div class="m-btns"><button type="button" class="btn" id="nt-cancel">Cancel</button><button type="submit" class="btn btn-pri" id="nt-go">Open terminal</button></div>
     </form>`, "", () => modalNewTerminal(groupId));
   m.querySelector("#nt-cancel").onclick = close;
+  const running = runningList("terminal", m.querySelector("#nt-form"), { groupId, close, onClose });
+  const picker = m.querySelector("#nt-be");
+  picker.addEventListener("change", () => running.show(picker.value));
+  running.show(picker.value);
   m.querySelector("#nt-form").onsubmit = event => {
     event.preventDefault();
     const bid = parseInt(m.querySelector("#nt-be").value, 10);
@@ -30808,7 +31044,7 @@ function modalNewTerminal(groupId = null) {
 }
 
 /* new isolated browser */
-function openBrowserFromMenu(groupId = null, choose = false) {
+async function openBrowserFromMenu(groupId = null, choose = false) {
   const nodes = [{ id: 0, name: backendName(0) }]
     .concat(state.backends)
     .filter(node => browserEnabledFor(node.id));
@@ -30817,11 +31053,16 @@ function openBrowserFromMenu(groupId = null, choose = false) {
     openSettingsTab(groupId);
     return;
   }
+  /* one backend and nothing on it to show: there is nothing to choose
+     (asked of the node first where no stream keeps its catalog) */
   if (nodes.length === 1 && !choose) {
-    openNewBrowser(nodes[0].id, groupId);
-    return;
+    await refreshRunningCatalogs(nodes[0].id, 5000);
+    if (!runningHidden("browser", nodes[0].id)) {
+      openNewBrowser(nodes[0].id, groupId);
+      return;
+    }
   }
-  const { m, close } = modal(`<h2>New browser</h2>
+  const { m, close, onClose } = modal(`<h2>New browser</h2>
     <form id="nb-form">
     <label>Backend<select id="nb-be">${nodes.map(b =>
       `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select></label>
@@ -30829,6 +31070,10 @@ function openBrowserFromMenu(groupId = null, choose = false) {
     <button type="submit" class="btn btn-pri" id="nb-go">Open browser</button></div>
     </form>`, "", () => openBrowserFromMenu(groupId, true));
   m.querySelector("#nb-cancel").onclick = close;
+  const running = runningList("browser", m.querySelector("#nb-form"), { groupId, close, onClose });
+  const picker = m.querySelector("#nb-be");
+  picker.addEventListener("change", () => running.show(picker.value));
+  running.show(picker.value);
   m.querySelector("#nb-form").onsubmit = event => {
     event.preventDefault();
     const bid = parseInt(m.querySelector("#nb-be").value, 10) || 0;
@@ -30874,6 +31119,10 @@ function modalNewVnc(groupId = null) {
   const host = m.querySelector("#nv-host"), port = m.querySelector("#nv-port");
   const error = m.querySelector(".form-error"), go = m.querySelector("#nv-go");
   form.noValidate = true;
+  const running = runningList("vnc", form, { groupId, close, onClose });
+  const picker = m.querySelector("#nv-be");
+  picker.addEventListener("change", () => running.show(picker.value));
+  running.show(picker.value);
   let busy = false;
   let dismissed = false, attempt = null;
   const cancelAttempt = async current => {

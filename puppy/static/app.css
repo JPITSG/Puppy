@@ -3324,6 +3324,20 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .auto-title .check{margin:0}
 .new-session-color{margin-top:8px}
 .open-session-list{max-height:50vh;overflow-y:auto;margin-top:10px}
+/* The New dialogs' list of what the chosen backend already runs of their kind
+   (runningList in app.js): Open session's rows, an icon where a session has its
+   dot, the row's state at its end and what it is under its name. */
+.running-box{margin:0 0 10px}
+.running-box .running-head{margin-bottom:4px}
+.running-list{margin-top:0;max-height:min(40vh,300px);margin-inline:-9px}
+.running-item{margin-bottom:2px}
+.running-item .ri-ico{flex:0 0 14px;display:grid;place-items:center;color:var(--txt3)}
+.running-item .ri-ico svg{display:block}
+.running-item .si-name{font-size:var(--fs-md)}
+.running-item .ri-state{flex:none;font-size:var(--fs-2xs);color:var(--txt3)}
+.running-item .ri-sub{flex:1;min-width:0;font-size:var(--fs-xs);color:var(--txt3);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.running-item .ri-sub .mono-inline{font-size:inherit}
 
 /* ---------- toasts ---------- */
 .toasts{position:fixed;right:14px;bottom:14px;display:flex;flex-direction:column;gap:8px;z-index:var(--z-toast);max-width:min(384px,90vw)}
