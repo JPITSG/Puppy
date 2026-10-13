@@ -2213,6 +2213,24 @@ async def prompt_gutter_checks(instance):
                 return {gap: s.scrollHeight - s.scrollTop - s.clientHeight,
                         gutter: %s.root.style.getPropertyValue('--prompt-gutter')}; })()""" % (view, view))
             assert back["gap"] < 1 and back["gutter"] == "44px", ("back at the foot after a tab switch", back)
+        # the drawer covers the plates: an open sidebar over the pane is what a
+        # press there reaches, never a plate or the list button laid over it
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 860, "height": 800,
+            "deviceScaleFactor": 1, "mobile": False}, session=page)
+        await evaluate(instance, "%s.promptGutter.render(); true" % view)
+        await until(instance, "!%s.promptGutter.plates.classList.contains('hidden')" % view)
+        covered = """(() => [...%s.promptGutter.plates.children].map(b => {
+            const r = b.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+            return {cls: b.className, plate: b.contains(hit), side: !!(hit && hit.closest('#side, .side-backdrop'))};
+          }))()""" % view
+        before = await evaluate(instance, covered)
+        assert all(b["plate"] for b in before), ("the plates answer with the drawer closed", before)
+        await evaluate(instance, "openDrawer(); true")
+        await evaluate(instance, "new Promise(r => setTimeout(r, 400))")
+        under = await evaluate(instance, covered)
+        assert all(not b["plate"] and b["side"] for b in under), ("the drawer covers the plates", under)
+        await evaluate(instance, "closeDrawer(); true")
         # a phone shows none, and neither does a transcript without its questions
         await instance.call("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844,
             "deviceScaleFactor": 2, "mobile": True}, session=page)

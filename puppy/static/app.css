@@ -45,8 +45,11 @@
   --viz-other:#5d6475;
   /* motion: three durations on the one curve below */
   --t-fast:.12s; --t-slow:.25s;
-  /* layers, from floating chrome up to the tooltip that tops everything */
-  --z-float:100; --z-modal:200; --z-popover:260; --z-toast:400;
+  /* layers, from floating chrome up to the tooltip that tops everything;
+     --z-pane is a control laid over a pane's own content (the prompt
+     gutter's plates): above the drawer's swipe edge (19), under the
+     drawer's backdrop (25) and the sidebar (30) that may cover the pane */
+  --z-pane:22; --z-float:100; --z-modal:200; --z-popover:260; --z-toast:400;
   --z-tip:500; --z-drag:600;
   /* dialog widths: plain confirms and forms, editors, and the review sheet */
   --modal-w:480px; --modal-w-editor:640px; --modal-w-wide:820px;
@@ -1412,7 +1415,7 @@ select.choice-native{display:none!important}
 .prompt-pin.steer.on .prompt-pin-dot{background:var(--viz-7);box-shadow:0 0 0 3px color-mix(in srgb,var(--viz-7) 30%,transparent)}
 .prompt-pin.on .prompt-pin-time{color:var(--txt2)}
 .prompt-pin.tucked{opacity:0;pointer-events:none}
-.prompt-plates{position:absolute;inset:0;pointer-events:none;z-index:var(--z-float)}
+.prompt-plates{position:absolute;inset:0;pointer-events:none;z-index:var(--z-pane)}
 .prompt-plate,.prompt-list-button{
   position:absolute;width:32px;height:32px;padding:0;display:grid;place-items:center;pointer-events:auto;
   border:1px solid var(--line2);border-radius:50%;background:var(--panel);color:var(--txt2);cursor:pointer;
