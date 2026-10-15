@@ -1322,22 +1322,22 @@ select.choice-native{display:none!important}
 .chip.eng .eng-model.substituted{color:var(--warn)}
 .chip.cwd.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-dim)}
 /* Live session activity shares one blue pill, including the count-only
-   background-task indicator. Only browser/terminal pills are controls. */
-.chip.browser,.chip.terminal,.chip.background-tasks{
+   background-task indicator. Only browser/terminal/VNC pills are controls. */
+.chip.browser,.chip.terminal,.chip.vnc,.chip.background-tasks{
   color:var(--acc2);background:var(--acc-dim);border-color:var(--acc-line-soft);
 }
-.chip.browser svg,.chip.terminal svg,.chip.background-tasks svg{flex-shrink:0;opacity:.85}
+.chip.browser svg,.chip.terminal svg,.chip.vnc svg,.chip.background-tasks svg{flex-shrink:0;opacity:.85}
 .chip.background-tasks{font-family:var(--sans)}
-.chip.browser,.chip.terminal{
+.chip.browser,.chip.terminal,.chip.vnc{
   cursor:pointer;-webkit-appearance:none;appearance:none;
   transition:border-color var(--t-base) var(--ease),color var(--t-base) var(--ease),transform var(--t-fast) var(--ease);
 }
 @media (hover:hover){
-  .chip.browser:hover,.chip.terminal:hover{border-color:var(--focus-line);color:var(--txt)}
-  .chip.browser:hover svg,.chip.terminal:hover svg{opacity:1}
+  .chip.browser:hover,.chip.terminal:hover,.chip.vnc:hover{border-color:var(--focus-line);color:var(--txt)}
+  .chip.browser:hover svg,.chip.terminal:hover svg,.chip.vnc:hover svg{opacity:1}
 }
-.chip.browser:active,.chip.terminal:active{transform:scale(.96)}
-.chip.browser:focus-visible,.chip.terminal:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.chip.browser:active,.chip.terminal:active,.chip.vnc:active{transform:scale(.96)}
+.chip.browser:focus-visible,.chip.terminal:focus-visible,.chip.vnc:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 /* the linked-workspace chip is a control too: it opens the link sheet */
 .chip.ws{
   gap:6px;cursor:pointer;color:var(--txt2);

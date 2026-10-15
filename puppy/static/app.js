@@ -11390,12 +11390,16 @@ function openVncTab(bid, vncId, groupId = null, options = {}) {
     if (options.afterTabId) putTabAfter(id, options.afterTabId, groupId);
     else putTabInPane(id, groupId);
   }
+  /* as a browser's: the screen follows the session that last chose it, so
+     that chat can point at it */
+  if (Number(options.sid) > 0) tab.sid = Number(options.sid);
   if (options.activate === false) {
     syncTabOrderFromLayout();
     renderTabs();
   } else {
     activateTab(id);
   }
+  syncSessionBrowserChips();
   return tab;
 }
 
@@ -11406,6 +11410,7 @@ function syncSessionBrowserChips() {
   for (const view of liveViews()) {
     if (view && typeof view.syncBrowserChips === "function") view.syncBrowserChips();
     if (view && typeof view.syncTerminalChips === "function") view.syncTerminalChips();
+    if (view && typeof view.syncVncChips === "function") view.syncVncChips();
     if (view && typeof view.renderBinding === "function") view.renderBinding();
   }
 }
@@ -11500,7 +11505,7 @@ function handleVncActivity(bid, sid, turnId, vncId = "") {
   const known = (vncInstancesFor(bid) || []).find(item =>
     String(item.id || "").toUpperCase() === vncId) || {};
   openVncTab(bid, vncId, sessionPane ? sessionPane.id : null,
-    { activate: false, afterTabId: sessionTabId,
+    { activate: false, afterTabId: sessionTabId, sid,
       host: known.host, port: known.port, label: known.label });
 }
 
@@ -11729,7 +11734,8 @@ function closeTab(id, recordHistory = true) {
   normalizeWorkspace();
   renderTabs(state.active);
   renderSidebar();
-  if (closing.type === "browser" || closing.type === "term") syncSessionBrowserChips();
+  if (closing.type === "browser" || closing.type === "term" || closing.type === "vnc")
+    syncSessionBrowserChips();
   if (recordHistory) navigationChanged(); else navigation.reconcile();
   /* A session's own window is there for its session: closing the tab, or
      the session being deleted, closes the window as well. A window the
@@ -20800,11 +20806,13 @@ class SessionView {
     this.nativeComposerChoices = prefersNativeChoices();
     this.browserChipKey = null;   // set of linked-browser bubbles now rendered
     this.terminalChipKey = null;  // set of linked-terminal bubbles now rendered
+    this.vncChipKey = null;       // set of linked-VNC bubbles now rendered
     this.place = null;            // the reader's place, kept while this view is off screen
     this.onScreen = false;        // shown and landed; a re-show never moves the transcript
     this.buildDom();
     this.syncBrowserChips();      // a restored browser tab has a bubble at once
     this.syncTerminalChips();
+    this.syncVncChips();
     this._onResize = () => { this.syncGutter(); this.syncComposerMeta(); this.syncHeadOverflow(); this.syncQueueFade(); };
     window.addEventListener("resize", this._onResize);
     this.connect();
@@ -21833,7 +21841,8 @@ class SessionView {
   }
 
   /* What the node binds to this session that this console has no tab for:
-     a running terminal, or a browser (a stopped one starts again when shown).
+     a running terminal, a remote screen its agent chose, or a browser (a
+     stopped one starts again when shown).
      A session's own window holds no such tab - its screens go to the console
      it came from - so it offers none. */
   untabbedRunning(kind) {
@@ -21886,6 +21895,33 @@ class SessionView {
       chip.onclick = () => this.showRunning("terminal", item);
       scroll.insertBefore(chip, anchor);
     }
+  }
+
+  /* A remote screen this session's agent chose: the same chip, named by its
+     ID as the "@VNC" mention names it. */
+  syncVncChips() {
+    const live = state.tabs.filter(t => t.type === "vnc" && t.vncId &&
+      (t.bid || 0) === (this.tab.bid || 0) && t.sid === this.tab.sid &&
+      t.vncGone !== true);
+    const untabbed = this.untabbedRunning("vnc");
+    const key = live.map(t => t.id).concat(untabbed.map(item => `c:${item.id}`)).join("\u0000");
+    if (key === this.vncChipKey) return;
+    this.vncChipKey = key;
+    const scroll = this.root.querySelector(".chat-meta-scroll");
+    for (const stale of scroll.querySelectorAll(".chip.vnc")) stale.remove();
+    const anchor = scroll.querySelector(".chip.background-tasks") || scroll.querySelector(".chat-status");
+    const add = (id, open) => {
+      const chip = el("button", "chip vnc");
+      chip.type = "button";
+      chip.appendChild(vncIcon(11));
+      chip.appendChild(el("span", "chip-text", `VNC ${id}`));
+      chip.setAttribute("aria-label", `Show VNC ${id}`);
+      chip.onclick = open;
+      scroll.insertBefore(chip, anchor);
+    };
+    for (const t of live) add(t.vncId, () => activateTab(t.id));
+    for (const item of untabbed)
+      add(String(item.id).toUpperCase(), () => this.showRunning("vnc", item));
   }
 
   syncWorkspaceChip() {
@@ -32057,7 +32093,8 @@ const RUNNING_KINDS = {
     known: bid => vncInstancesFor(bid),
     tabFor: (bid, id) => state.tabs.find(t => t.id === `v:${bid}:${id}`),
     open: (bid, item, groupId, extra = {}) => openVncTab(bid, item.id, groupId,
-      { host: item.host, port: item.port, label: item.label, ...extra }),
+      { ...(Number(item.session_id) > 0 ? { sid: Number(item.session_id) } : {}),
+        host: item.host, port: item.port, label: item.label, ...extra }),
   },
 };
 
@@ -32090,7 +32127,7 @@ function runningEntry(kind, bid, item) {
     parts.push({ text: `VNC ${id}`, mono: true });
     if (item.label && target) parts.push({ text: target, mono: true });
     if (item.view_only) parts.push({ text: "View only" });
-    parts.push({ text: who });
+    parts.push({ text: owner && owner.name }, { text: who });
     word = shown ? "In a tab here" : elsewhere ? "Open elsewhere" : item.connected ? "Connected" :
       item.error ? "Disconnected" : "Not connected";
   }
@@ -32124,6 +32161,10 @@ function refreshRunningCatalogs(bid, timeoutMs = 15000) {
   if (terminalInstancesFor(bid))
     jobs.push(api(bid, "terminal/instances", { timeoutMs }).then(answer => {
       if (!nodeStateStreamActive(bid)) applyTerminalInstancesSnapshot(bid, answer);
+    }, () => {}));
+  if (vncEnabledFor(bid) && vncInstancesFor(bid))
+    jobs.push(api(bid, "vnc/instances", { timeoutMs }).then(answer => {
+      if (!nodeStateStreamActive(bid)) applyVncInstancesSnapshot(bid, answer);
     }, () => {}));
   const read = Promise.all(jobs).then(() => { runningCatalogReads.delete(bid); });
   runningCatalogReads.set(bid, read);

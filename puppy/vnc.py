@@ -748,6 +748,9 @@ class VncInstance:
         self.label = label
         self.origin = origin
         self.created_at = time.time()
+        # The session whose agent last chose this screen, so that chat's head
+        # can point at it from any console. In memory, like the bindings.
+        self.session_id = None
 
         self.viewers = {}
         self.closed = False
@@ -791,6 +794,7 @@ class VncInstance:
             "port": self.port,
             "label": self.label,
             "origin": self.origin,
+            "session_id": self.session_id,
             "connected": self.connected,
             "view_only": self.view_only,
             "viewers": len(self.viewers),
@@ -1978,10 +1982,19 @@ class VncRegistry:
     # ---- agent bindings ----
 
     def bind(self, session_id: int, vnc_id: str) -> None:
-        """Remember which screen a session's agent tools mean by default."""
+        """Remember which screen a session's agent tools mean by default.
+
+        The screen names the session that last chose it in the catalog, the
+        way a browser or a terminal names the session it serves.
+        """
         session_id = int(session_id)
-        if session_id > 0 and vnc_id in self.instances:
-            self.bindings[session_id] = vnc_id
+        instance = self.instances.get(vnc_id)
+        if session_id <= 0 or instance is None:
+            return
+        self.bindings[session_id] = vnc_id
+        if instance.session_id != session_id:
+            instance.session_id = session_id
+            _state_changed()
 
     async def agent_screen(self, session_id: int, requested_id=None) -> VncInstance:
         """The screen one agent tool call addresses, dialled if it dropped.

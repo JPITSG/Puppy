@@ -1657,6 +1657,12 @@ async def check_agent_bridge(session_id: int) -> None:
         vnc_id = opened["text"].split(" ")[1]
         assert vnc.VNC_ID_RE.fullmatch(vnc_id), opened["text"]
         assert registry.bindings[session_id] == vnc_id
+        # The catalog names the session, so its chat head can point at it.
+        assert [item["session_id"] for item in registry.instance_payloads()] == [session_id]
+        await wait_for(lambda: any(
+            item.get("type") == "vnc_instances" and
+            [entry.get("session_id") for entry in item.get("instances", [])] == [session_id]
+            for item in updates_capture.messages))
         assert opened["image"]["mime_type"] == "image/png"
         assert "Image is the whole 8x4 screen at 1:1." in opened["text"], opened
         assert "Lab" in opened["text"]

@@ -6992,6 +6992,54 @@ async def terminal_io_checks(console):
             await terminal.manager().close(terminal_id, "test finished")
 
 
+async def start_stub_rfb(width=320, height=200):
+    """The least of an RFB 3.8 server on loopback: no security, one Raw frame
+    for each full request, nothing for an incremental one (a still screen)."""
+    import struct
+
+    async def serve(reader, writer):
+        try:
+            writer.write(b"RFB 003.008\n")
+            await reader.readexactly(12)
+            writer.write(b"\x01\x01")                      # one type: None
+            await reader.readexactly(1)
+            writer.write(struct.pack(">I", 0))
+            await reader.readexactly(1)                      # ClientInit
+            name = b"demo screen"
+            writer.write(struct.pack(">HHBBBBHHHBBB3xI", width, height, 32, 24, 0, 1,
+                                     255, 255, 255, 16, 8, 0, len(name)) + name)
+            await writer.drain()
+            while True:
+                kind = (await reader.readexactly(1))[0]
+                if kind == 0:
+                    await reader.readexactly(19)
+                elif kind == 2:
+                    count = struct.unpack(">xH", await reader.readexactly(3))[0]
+                    await reader.readexactly(4 * count)
+                elif kind == 3:
+                    incremental = (await reader.readexactly(9))[0]
+                    if not incremental:
+                        pixel = bytes((0x2a, 0x6f, 0xd8, 0))
+                        writer.write(struct.pack(">BxHHHHHi", 0, 1, 0, 0, width, height, 0) +
+                                     pixel * (width * height))
+                        await writer.drain()
+                elif kind == 4:
+                    await reader.readexactly(7)
+                elif kind == 5:
+                    await reader.readexactly(5)
+                elif kind == 6:
+                    length = struct.unpack(">3xI", await reader.readexactly(7))[0]
+                    await reader.readexactly(length)
+                else:
+                    return
+        except (asyncio.IncompleteReadError, ConnectionError, asyncio.CancelledError):
+            pass
+        finally:
+            writer.close()
+
+    return await asyncio.start_server(serve, "127.0.0.1", 0)
+
+
 async def running_list_checks(instance, sid, capture=False):
     """What a backend already runs, recovered in real layout. The node starts
     a browser and a terminal for a session the way an agent does while no
@@ -7002,10 +7050,14 @@ async def running_list_checks(instance, sid, capture=False):
     tab after it, on a desktop and a phone in both themes, nothing spilling
     out of the dialog; a real click on its row shows it. New terminal lists
     the agent's terminal and a real click attaches a tab to it by its ID, and
-    New VNC connection lists a connection the catalog names."""
+    New VNC connection lists a connection the catalog names. Last, the node
+    dials a loopback screen and binds it to the session as an agent's connect
+    does: the chat head shows its chip in the browser chip's own face, and a
+    real click opens its tab beside the chat, live and tied to the session."""
     page = await browser.manager().create(origin="agent", owner_session=sid)
     second = None
     shell = await terminal.manager().create(command="", cwd=str(ROOT), origin="agent", owner_session=sid)
+    rfb = screen = None
     bid_js = "0"
 
     async def press(point):
@@ -7129,6 +7181,43 @@ async def running_list_checks(instance, sid, capture=False):
                 shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
                 (BASE / "data" / "running-vnc-desktop-dark.png").write_bytes(base64.b64decode(shot["data"]))
             await evaluate(instance, "document.querySelector('.modal #nv-cancel').click(); true")
+        await until(instance, "!document.querySelector('.modal')")
+
+        # A screen the session's agent chose: its chip, the browser chip's face, a press showing it
+        await evaluate(instance, "activateTab('s:0:%d'); true" % sid)
+        rfb = await start_stub_rfb()
+        screen = await vnc_module.manager().create(host="127.0.0.1", port=rfb.sockets[0].getsockname()[1],
+                                                   origin="agent")
+        vnc_module.manager().bind(sid, screen.vnc_id)
+        vnc_chip = ("[...%s.root.querySelectorAll('.chip.vnc')].find(n => n.textContent === 'VNC %s')"
+                    % (view, screen.vnc_id))
+        await until(instance, "!!(%s)" % vnc_chip)
+        assert await evaluate(instance, "!state.tabs.some(t => t.id === 'v:0:%s')" % screen.vnc_id), \
+            "the agent's screen has no tab here yet"
+        face = await evaluate(instance, """(() => {
+            const pick = n => { const c = getComputedStyle(n);
+              return [c.backgroundColor, c.color, c.borderTopColor, c.borderRadius, c.height, c.fontSize,
+                      c.cursor, n.tagName, !!n.querySelector('svg')]; };
+            return {vnc: pick(%s), browser: pick(%s), label: (%s).getAttribute('aria-label')}; })()"""
+                             % (vnc_chip, "%s.root.querySelector('.chip.browser, .chip.terminal')" % view, vnc_chip))
+        assert face["vnc"] == face["browser"], ("the VNC chip wears the browser chip's face", face)
+        assert face["label"] == "Show VNC " + screen.vnc_id, face
+        if capture:
+            shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+            (BASE / "data" / "running-vnc-chip-desktop-dark.png").write_bytes(base64.b64decode(shot["data"]))
+        await press(await centre(vnc_chip))
+        await until(instance, "state.active === 'v:0:%s' && state.tabs.find(t => t.id === 'v:0:%s').sid === %d"
+                    % (screen.vnc_id, screen.vnc_id, sid))
+        await until(instance, "state.views['v:0:%s'] && state.views['v:0:%s'].ws && "
+                              "state.views['v:0:%s'].ws.readyState === 1" % ((screen.vnc_id,) * 3))
+        order = await evaluate(instance, """(() => { const pane = workspacePaneForTab('s:0:%d');
+            return pane.tabs.indexOf('v:0:%s') - pane.tabs.indexOf('s:0:%d'); })()"""
+                               % (sid, screen.vnc_id, sid))
+        assert order == 1, ("the screen opens beside its chat", order)
+        assert screen.viewer_count() >= 1, "the tab is a viewer of the agent's own connection"
+        await evaluate(instance, "activateTab('s:0:%d'); true" % sid)
+        assert await evaluate(instance, "[...%s.root.querySelectorAll('.chip.vnc')].length" % view) == 1, \
+            "one chip, the tab's"
     finally:
         await evaluate(instance, """document.querySelectorAll('.modal #nb-cancel, .modal #nt-cancel, .modal #nv-cancel')
             .forEach(n => n.click());
@@ -7146,10 +7235,20 @@ async def running_list_checks(instance, sid, capture=False):
             await terminal.manager().close(shell.terminal_id, "test finished")
         except Exception:
             pass
+        if screen is not None:
+            await evaluate(instance, "if (state.tabs.some(t => t.id === 'v:0:%s')) closeTab('v:0:%s'); true"
+                           % (screen.vnc_id, screen.vnc_id))
+            try:
+                await vnc_module.manager().close(screen.vnc_id, "test finished")
+            except Exception:
+                pass
+        if rfb is not None:
+            rfb.close()
     print("PASS: what a backend already runs - an agent's browser and terminal for a session with no tab here, "
           "found by the chat head's chips (a real click opening the browser beside its chat, live) and listed by "
           "New browser, New terminal and New VNC connection on a desktop and a phone in both themes, a real "
-          "click on a row showing that browser or attaching a tab to that terminal", flush=True)
+          "click on a row showing that browser or attaching a tab to that terminal; and an agent's VNC screen's "
+          "chip in the browser chip's face, a real click showing it live beside its chat", flush=True)
 
 
 async def popout_checks(instance, sid, capture=False):

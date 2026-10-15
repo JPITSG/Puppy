@@ -804,9 +804,10 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   kind - who started each, the session it serves, what it runs or reaches,
   and when - with the ones that have no tab here first. A click shows it in a
   tab, attached to that same browser, terminal or connection rather than a new
-  one. A session's chat head also shows a chip for each browser and running
-  terminal its backend binds to that session, with a tab here or without, and
-  a click opens it beside the chat. *New browser* still opens a browser at once
+  one. A session's chat head also shows a chip for each browser, running
+  terminal and VNC connection its backend binds to that session (a screen is
+  bound to the session whose agent last used it), with a tab here or without,
+  and a click opens it beside the chat. *New browser* still opens a browser at once
   when its one backend holds nothing else to show.
 
 ### Agents that delegate and collaborate

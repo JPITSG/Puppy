@@ -73,6 +73,9 @@ const context = vm.createContext({
   applyTerminalInstancesSnapshot: (bid, payload) => {
     if (payload && Array.isArray(payload.instances)) context.state.terminalInstances[bid] = payload.instances;
   },
+  applyVncInstancesSnapshot: (bid, payload) => {
+    if (payload && Array.isArray(payload.instances)) context.state.vncInstances[bid] = payload.instances;
+  },
   modal: (html, cls, reopen) => {
     const m = document.createElement("div");
     m.innerHTML = html;
@@ -137,6 +140,9 @@ const browserItems = [
     assert.deepEqual(entry("vnc", { id: "V1V1", host: "10.0.0.5", port: 5901, label: "Lab desk",
       origin: "agent", connected: true, viewers: 0, view_only: true, created_at: 8 }),
       ["Lab desk", "Connected", "<VNC V1V1> · <10.0.0.5:5901> · View only · Started by an agent · stamp 8"]);
+    assert.deepEqual(entry("vnc", { id: "V3V3", host: "10.0.0.9", port: 5900, label: "", session_id: 4,
+      origin: "agent", connected: true, viewers: 0, created_at: 9 })[2],
+      "<VNC V3V3> · Harbor dashboard · Started by an agent · stamp 9", "a screen names the session whose agent chose it");
     assert.deepEqual(entry("vnc", { id: "V2V2", host: "screen.example", port: 5900, label: "",
       origin: "user", connected: false, error: "Refused", viewers: 0, created_at: 9 }).slice(0, 2),
       ["screen.example", "Disconnected"]);
@@ -207,19 +213,24 @@ const browserItems = [
     let release;
     routes["7:browser/status"] = () => new Promise(resolve => { release = resolve; });
     routes["7:terminal/instances"] = { instances: [{ id: "WRK1", running: true, session_id: 4 }] };
+    routes["7:vnc/instances"] = { instances: [{ id: "VRK1", host: "10.0.0.5", port: 5900, session_id: 4 }] };
+    context.state.vncInstances[7] = [];   // a catalog this console has read before
     const first = api.refreshRunningCatalogs(7), again = api.refreshRunningCatalogs(7);
     assert.equal(first, again, "a second read for the same backend joins the first");
     release({ enabled: true, instances: [{ id: "RB01", running: true }] });
     await first;
-    assert.deepEqual(JSON.parse(JSON.stringify(requests)), [[7, "browser/status"], [7, "terminal/instances"]]);
+    assert.deepEqual(JSON.parse(JSON.stringify(requests)),
+      [[7, "browser/status"], [7, "terminal/instances"], [7, "vnc/instances"]]);
     assert.equal(context.state.remoteBrowserStatus[7].instances[0].id, "RB01");
     assert.equal(context.state.terminalInstances[7][0].id, "WRK1");
+    assert.equal(context.state.vncInstances[7][0].id, "VRK1", "the screens too, for the chat head's chips");
     stream = true;
     requests.length = 0;
     await api.refreshRunningCatalogs(7);
     assert.equal(requests.length, 0, "a live stream keeps the catalog itself");
     stream = false;
     context.state.browserBackends = "";
+    delete context.state.vncInstances[7];
   }
   console.log("PASS: New browser lists the backend's browsers, a press shows one in a tab, and opens a new one at " +
               "once only when there is nothing to show; without a stream the catalogs are read, one read per backend");
@@ -348,7 +359,30 @@ const browserItems = [
     context.POPOUT = { id: "s:0:4" };
     assert.equal(view.untabbedRunning("browser").length, 0);
     context.POPOUT = null;
+    // a remote screen the session's agent chose has its chip too, tab or not
+    view.tab = { bid: 0, sid: 4 };
+    view.session = { id: 4 };
+    context.state.tabs = [{ id: "v:0:VTAB", type: "vnc", bid: 0, vncId: "VTAB", sid: 4 },
+      { id: "v:0:GONE", type: "vnc", bid: 0, vncId: "GONE", sid: 4, vncGone: true }];
+    context.state.vncInstances = { 0: [
+      { id: "VTAB", session_id: 4, host: "10.0.0.5", port: 5900 },
+      { id: "VHID", session_id: 4, host: "10.0.0.6", port: 5901, label: "Lab desk" },
+      { id: "VOTH", session_id: 9, host: "10.0.0.7", port: 5900 },
+      { id: "VNON", session_id: null, host: "10.0.0.8", port: 5900 }] };
+    view.syncVncChips();
+    const vncChips = () => [...view.root.querySelectorAll(".chip.vnc")].map(n => n.querySelector(".chip-text").textContent);
+    assert.deepEqual(vncChips(), ["VNC VTAB", "VNC VHID"],
+      "the session's own screens, with a tab here or without; never another session's, an unbound or a closed one");
+    assert.equal([...view.root.querySelectorAll(".chip.vnc")][1].getAttribute("aria-label"), "Show VNC VHID");
+    [...view.root.querySelectorAll(".chip.vnc")][1].onclick();
+    assert.deepEqual(last(), ["vnc", 0, "VHID", "pane-left",
+      { sid: 4, host: "10.0.0.6", port: 5901, label: "Lab desk", afterTabId: "s:0:4" }],
+      "a press opens it beside the chat, attached to that connection and the session");
+    context.state.vncInstances = { 0: [] };
+    context.state.tabs = [];
+    view.syncVncChips();
+    assert.deepEqual(vncChips(), [], "a closed connection takes its chip with it");
   }
-  console.log("PASS: the chat head's chips name the browsers and running terminals the node binds to its session " +
-              "without a tab here, and a press opens one beside the chat (beside Main for a task)");
+  console.log("PASS: the chat head's chips name the browsers, running terminals and remote screens the node binds " +
+              "to its session without a tab here, and a press opens one beside the chat (beside Main for a task)");
 })().catch(error => { console.error(error); process.exit(1); });

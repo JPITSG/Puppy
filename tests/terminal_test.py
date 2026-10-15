@@ -335,7 +335,7 @@ def check_static_contract() -> None:
     assert '.term-host::after{' in css
     assert 'border-radius:inherit;box-shadow:inset 0 0 0 1px var(--browser-frame);' \
         in css
-    assert '.chip.browser,.chip.terminal{' in css
+    assert '.chip.browser,.chip.terminal,.chip.vnc{' in css
 
     # The grid is fitted from the box the terminal is opened on, so that box
     # must carry no inset of its own. FitAddon reads

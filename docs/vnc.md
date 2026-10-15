@@ -165,6 +165,10 @@ The chat box inserts `@VNC A8AR` for an open connection and
 in lockstep. Each screen first touched in a turn broadcasts one ephemeral
 `vnc_activity` event, so its tab appears beside the chat without taking focus,
 and the node remembers which screen a session's tools mean until it is closed.
+The catalog names that session as each connection's additive `session_id` (the
+session whose agent last chose the screen, `null` before any has), so that
+chat's head shows a `VNC <ID>` chip for it like a browser's or a terminal's,
+in every console, with a tab there or without.
 The editable policy sent with every turn is Settings → System prompt → Remote
 screen guidance (`system_prompt.vnc`).
 
