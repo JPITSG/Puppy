@@ -200,6 +200,8 @@ def blockers() -> List[str]:
     reasons.extend(workspace_links.snapshot_blockers())
     from puppy import notify
     reasons.extend(notify.snapshot_blockers())
+    from puppy import schedules
+    reasons.extend(schedules.snapshot_blockers())
     from puppy import session_tasks
     if session_tasks.busy():
         reasons.append("workspace copy, apply, move, push or revert in progress")
@@ -721,6 +723,11 @@ def _validate_database(path: Path):
             session_titles.validate_persisted(connection)
         except (ValueError, TypeError) as exc:
             raise SnapshotError("snapshot session title state is not current") from exc
+        from puppy import schedules
+        try:
+            schedules.validate_persisted(connection)
+        except (ValueError, TypeError) as exc:
+            raise SnapshotError("snapshot schedule state is not current") from exc
         transport_row = connection.execute(
             "SELECT value FROM meta WHERE key=?", (web_tls.STATE_KEY,)).fetchone()
         if transport_row is None:

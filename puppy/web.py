@@ -18,8 +18,8 @@ from puppy import (__version__, agent_notes, auth, backends, backup_schedule, bi
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
                    project_move, prompt_index, spelling, token_usage,
-                   live_websockets, localization, protocol, runner, search, session_git, snapshots,
-                   session_titles, spawn_exec,
+                   live_websockets, localization, protocol, runner, schedules, search, session_git,
+                   snapshots, session_titles, spawn_exec,
                    state_stream, system_prompts, terminal, uploads, vnc,
                    usage_refresh, workspace_links, workspace_sync, workspaces)
 from puppy import web_tls
@@ -291,6 +291,7 @@ async def _publish_restored_state(app: web.Application) -> None:
                           "links": workspace_links.public_links()})
     runner.publish_state({"type": "notify", **notify.public_state()})
     runner.publish_state({"type": "titles", **session_titles.public_state()})
+    schedules.publish()
     notices.publish()
     spelling.publish()
     for payload in await _state_stream_snapshots(app, None, probes=False):
@@ -337,6 +338,7 @@ async def h_state(request: web.Request):
         "session_colors": db.SESSION_COLORS,
         "notify": notify.public_state(),
         "titles": session_titles.public_state(),
+        "schedules": schedules.public_state(),
         "browser": browser.ping_payload(),
     }
     _publish_engines({
@@ -352,6 +354,7 @@ async def h_state(request: web.Request):
                           "links": payload["workspace_links"]})
     runner.publish_state({"type": "notify", **payload["notify"]})
     runner.publish_state({"type": "titles", **payload["titles"]})
+    runner.publish_state(payload["schedules"])
     return web.json_response(payload)
 
 
@@ -587,22 +590,36 @@ async def h_sessions_list(request: web.Request):
 @operations.cancellable
 async def h_session_create(request: web.Request):
     body = await request.json()
+    payload, status = await create_session(body)
+    return web.json_response(payload, status=status)
+
+
+async def create_session(body) -> tuple:
+    """Create one session from a creation request: the route's body, or a
+    schedule's run on this instance. Answers (payload, HTTP status)."""
     if not isinstance(body, dict):
-        return web.json_response({"error": "invalid request"}, status=400)
+        return {"error": "invalid request"}, 400
     engine = body.get("engine") or ""
     try:
         driver = get_driver(engine)
     except KeyError:
-        return web.json_response({"error": f"unknown engine '{engine}'"}, status=400)
+        return {"error": f"unknown engine '{engine}'"}, 400
     await operations.wait(driver.refresh_model_options())
     operations.commit()
     try:
         choices = engine_defaults.for_session(driver, body)
     except ValueError as exc:
-        return web.json_response({"error": str(exc)}, status=400)
+        return {"error": str(exc)}, 400
     workspace_kind = str(body.get("workspace_kind") or workspaces.KIND_DIRECTORY)
     if workspace_kind not in workspaces.KINDS:
-        return web.json_response({"error": "unknown workspace kind"}, status=400)
+        return {"error": "unknown workspace kind"}, 400
+    # a schedule's run says which schedule and run it is
+    run_marker = None
+    if body.get("schedule") is not None:
+        try:
+            run_marker = schedules.validate_run_marker(body["schedule"])
+        except schedules.ScheduleError as exc:
+            return {"error": str(exc)}, 400
     cwd = ""
     workspace_json = ""
     mirror_uid = ""
@@ -611,13 +628,10 @@ async def h_session_create(request: web.Request):
         # controller-brokered remote workspace: the engine works in a private
         # stable mirror here while the project lives on the descriptor's node
         if not isinstance(link, dict) or workspace_kind != workspaces.KIND_DIRECTORY:
-            return web.json_response(
-                {"error": "invalid linked workspace descriptor"}, status=400)
+            return {"error": "invalid linked workspace descriptor"}, 400
         root = str(link.get("root") or "").strip()
         if not root.startswith("/") or len(root) > 4096:
-            return web.json_response(
-                {"error": "linked workspace root must be an absolute path"},
-                status=400)
+            return {"error": "linked workspace root must be an absolute path"}, 400
         node = str(link.get("node") or "").strip()[:80]
         label = str(link.get("label") or "").strip()[:512] or \
             ("{}:{}".format(node, root) if node else root)
@@ -627,9 +641,7 @@ async def h_session_create(request: web.Request):
             cwd = workspace_sync.allocate_mirror(
                 uid, os.path.basename(root.rstrip("/")) or "project")
         except (workspace_sync.SyncError, OSError) as exc:
-            return web.json_response(
-                {"error": "cannot allocate the workspace mirror: {}".format(exc)},
-                status=400)
+            return {"error": "cannot allocate the workspace mirror: {}".format(exc)}, 400
         mirror_uid = uid
         workspace_json = json.dumps(
             {"uid": uid, "root": root, "node": node, "label": label},
@@ -642,23 +654,22 @@ async def h_session_create(request: web.Request):
                 try:
                     os.makedirs(cwd, exist_ok=True)
                 except OSError as e:
-                    return web.json_response({"error": f"mkdir failed: {e}"}, status=400)
+                    return {"error": f"mkdir failed: {e}"}, 400
             else:
-                return web.json_response(
-                    {"error": f"directory does not exist: {cwd}", "mkdir_possible": True},
-                    status=400)
+                return {"error": f"directory does not exist: {cwd}", "mkdir_possible": True}, 400
     perm, model, effort = choices["permission_mode"], choices["model"], choices["effort"]
     color = body.get("color") if body.get("color") in db.SESSION_COLORS else random.choice(db.SESSION_COLORS)
     name = str(body.get("name") or "").strip()[:80]
     auto_title = body.get("auto_title", False)
     if type(auto_title) is not bool:
-        return web.json_response({"error": "auto_title must be true or false"}, status=400)
+        return {"error": "auto_title must be true or false"}, 400
     created_workspace = ""
     if workspace_kind == workspaces.KIND_TEMPORARY:
         try:
             cwd = created_workspace = workspaces.create_temporary()
         except workspaces.WorkspaceError as exc:
-            return web.json_response({"error": str(exc)}, status=500)
+            return {"error": str(exc)}, 500
+    sid = None
     try:
         sid = db.create_session(name, engine, cwd, model, effort, color, perm,
                                 workspace_kind=workspace_kind,
@@ -666,7 +677,13 @@ async def h_session_create(request: web.Request):
         # a typed name is the person's; only an unnamed session asks for one
         if auto_title and not name:
             session_titles.arm(sid)
+        # marked before anyone hears of the session, so no list ever shows a
+        # schedule's run without saying so
+        if run_marker is not None:
+            schedules.mark_run(sid, run_marker)
     except Exception:
+        if sid is not None and run_marker is not None and schedules.run_record(sid) is None:
+            db.delete_session(sid)
         if created_workspace:
             workspaces.discard_created(created_workspace)
         if mirror_uid:
@@ -678,7 +695,7 @@ async def h_session_create(request: web.Request):
     runner.broadcast_sessions()
     log.info("session %s created engine=%s workspace=%s cwd=%s",
              sid, engine, workspace_kind, cwd)
-    return web.json_response({"ok": True, "session": runner.session_payload(db.get_session(sid))})
+    return {"ok": True, "session": runner.session_payload(db.get_session(sid))}, 200
 
 
 async def h_sessions_reorder(request: web.Request):
@@ -1512,6 +1529,7 @@ async def _prepare_snapshot(app, ui_state, saved=False):
     app["puppy_snapshot_busy"] = "export"
     workspace_links.pause_for_snapshot()
     notify.pause_for_snapshot()
+    schedules.pause_for_snapshot()
     result = None
     try:
         result = await operations.to_thread(snapshots.create_archive, ui_state)
@@ -1528,6 +1546,7 @@ async def _prepare_snapshot(app, ui_state, saved=False):
         app["puppy_snapshot_busy"] = None
         workspace_links.resume_after_snapshot()
         notify.resume_after_snapshot()
+        schedules.resume_after_snapshot()
         state_stream.wake()
 
 
@@ -1641,6 +1660,7 @@ async def h_snapshot_import(request: web.Request):
         state_stream.invalidate()
         workspace_links.pause_for_snapshot()
         notify.pause_for_snapshot()
+        schedules.pause_for_snapshot()
         # Recheck states that could have changed immediately before the marker
         # was installed. New mutations are rejected from this point onward.
         blocked = snapshots.blockers()
@@ -1658,6 +1678,7 @@ async def h_snapshot_import(request: web.Request):
         result = snapshots.commit_import(staged)
         restored_state = True
         notify.reset_after_restore()
+        schedules.reset_after_restore()
         usage_refresh.reset_due(clear_status=True)
         backends.reset_auto_upgrade_schedule()
         # the restored database replaces every session this node knew, so the
@@ -1693,6 +1714,7 @@ async def h_snapshot_import(request: web.Request):
             request.app["puppy_snapshot_busy"] = None
             workspace_links.resume_after_snapshot(restored=restored_state)
             notify.resume_after_snapshot()
+            schedules.resume_after_snapshot()
             state_stream.wake()
         snapshots.discard_staged(staged)
         try:
@@ -2266,6 +2288,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     session_directories.register(app)
     session_git.register(app)
     session_titles.register(app)
+    schedules.register_node(app)
     state_stream.register(
         app, _state_stream_snapshots, _state_stream_interval,
         snapshot_topics=("engines", "node", "browser_status",
@@ -2351,6 +2374,9 @@ def build_app(runtime_web: dict = None,
     r.add_post("/api/snapshot/import", h_snapshot_import)
     backup_schedule.register(app, lambda app, ui: _prepare_snapshot(app, ui, saved=True), _snapshot_conflict)
     register_execution_api(app, include_terminal=True)
+    # after every startup check the execution API registers: the worker may
+    # start a run as soon as it begins
+    schedules.register(app)
 
     async def on_shutdown(app):
         try:

@@ -43,6 +43,10 @@ There is no build step, no npm, no daemon besides Puppy itself: Python 3.9+,
 - **A fleet, not a box.** Pair other machines as backends, run sessions there,
   attach shared terminals and managed browsers on any of them, and let agents
   delegate one-shot jobs or talk to other sessions across the fleet.
+- **Prompts on a schedule.** A cron for prompts: send one once, every few
+  minutes, on chosen days or by a cron expression, on any backend with the
+  engine, model, effort and permissions you pick, and get told when a run
+  fails or when the agent decides something needs you.
 - **Nothing gets lost.** Durable message queues, drafts that follow you between
   devices, full-history search, and one-click backup and restore.
 - **Type together without losing your place.** On backends with typing presence,
@@ -869,6 +873,37 @@ The API-only headless package provides the same bridges without running a web
 UI, including the backend's configured browser, terminal, remote screen,
 spawn and task policies.
 
+### Prompts on a schedule
+
+The clock in the sidebar's footer opens **Schedules**, a cron for prompts. A
+schedule names its prompt, the backend, engine, model, effort and permissions
+it runs with, and a working directory there or a fresh scratch workspace for
+every run. It repeats **once** at a date and time, **every** N minutes, hours or
+days from a start, **every day** at one or more times, on chosen **days of the
+week** or **days of the month** (including the last), or by a five-field **cron
+expression**; it can end on a date or after a number of runs. Times are this
+instance's own wall clock, and the editor shows the next runs as you type.
+
+Every run is a new conversation on that backend, kept out of the sidebar: open
+it from the schedule's **History** to read every step, answer an approval or
+carry on the conversation, and its chat head names the schedule and run. The
+history keeps each run's state, timing and the first part of its final answer.
+Only one run of a schedule works at a time: one that cannot start on time -
+the previous run still working, the backend offline, Puppy not running - either
+runs as soon as it can or is skipped, as the schedule says. A time limit (60
+minutes by default) stops a run that works too long; **Run now** and **Stop**
+work from the card, and the card's switch turns the schedule off. The newest
+10 conversations are kept by default.
+
+**Notify me** tells you about failed, stopped, missed and approval-waiting
+runs, about every finished run, or only when the agent flags something: the
+run is asked to end its answer with a `NOTIFY:` line when the result needs you,
+so "check /var/log for the last 24 hours and tell me if anything needs
+attention" becomes a notice only on the days it matters. Notices go to the
+notification history and every open console, and can also run the completion
+alert command with the notice's text as `{message}`. See
+[scheduled prompts](docs/schedules.md).
+
 ### Find anything, on any backend
 
 The sidebar box filters sessions by title, location and backend as you type.
@@ -1002,8 +1037,8 @@ with a window of history around it.
 - **Token usage.** Every node keeps a ledger of the tokens its engines used:
   each session turn as it ends, split by model where the engine breaks a turn
   down (Claude Code's subagents and helper calls), plus spawned agents and
-  session-title runs. The chart button in the footer, between the bell and the
-  notification tray, opens a sheet that asks the instance and every reachable
+  session-title runs. The chart button in the footer, between the schedules
+  clock and the notification tray, opens a sheet that asks the instance and every reachable
   backend at once and names any it could not ask. Pick the last 24 hours,
   7, 30 or 90 days, or all of it; tiles give the total, fresh input, cache reads
   and writes, output with its reasoning part, and turns. The stacked chart
@@ -1024,9 +1059,11 @@ with a window of history around it.
   completed by the command remain.
   Placeholders and `PUPPY_*` environment variables carry the session, engine,
   model, status, duration and directory. Arm or silence it with the bell in the
-  footer.
+  footer. A scheduled run never fires it by itself: its schedule decides what
+  is told, and can run the same command with the notice as `{message}`.
 - **Backup and restore.** Export one `.tar.gz` with settings, accounts, backend
-  registrations, sessions and transcripts, notification history, the words
+  registrations, sessions and transcripts, schedules and their run history,
+  notification history, the words
   added to the spelling dictionary, the instance's token ledger, uploads,
   scratch workspaces, task copies, tabs and drafts. Import validates the whole
   archive first, only runs while the instance is idle, and rolls back if the
@@ -1299,6 +1336,8 @@ python3 tests/notices_test.py        # the notification history record, routes a
 node tests/spellcheck_ui_test.js     # the bundled dictionary, its marks and autocorrect
 python3 tests/spelling_test.py       # the added words: the record, the learning rule, routes and stream topic
 node tests/token_usage_ui_test.js    # the Token usage sheet: nodes asked, sums, columns, colours, readout
+python3 tests/schedules_test.py      # scheduled prompts: timing, shapes, runs through the runner, both runtimes
+node tests/schedules_ui_test.js      # the Schedules sheet, a schedule's history and the editor
 python3 tests/token_usage_test.py    # the token ledger: counts, day records, the report and its route
 node tests/host_panel_ui_test.js     # the host box: charts, latency rows, process tree
 python3 tests/host_metrics_test.py   # CPU history, the process tree and backend latency

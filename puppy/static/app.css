@@ -3883,8 +3883,10 @@ html.light .prov-anthropic,html.light .prov-openai{background:var(--txt3)}
 .task-review-modal,.session-git-modal,.session-request-modal{display:flex;flex-direction:column}
 .task-review-modal>*,.session-git-modal>*,.session-request-modal>*{flex:0 0 auto}
 .task-review-modal .field-lbl{margin-bottom:5px}
-.task-review-facts .ws-fact,.session-git-facts .ws-fact,.session-request-facts .ws-fact{align-items:flex-start}
-.task-review-facts .field-lbl,.session-git-facts .field-lbl,.session-request-facts .field-lbl{flex:0 0 84px;margin-bottom:0}
+.task-review-facts .ws-fact,.session-git-facts .ws-fact,.session-request-facts .ws-fact,
+.schedule-facts .ws-fact{align-items:flex-start}
+.task-review-facts .field-lbl,.session-git-facts .field-lbl,.session-request-facts .field-lbl,
+.schedule-facts .field-lbl{flex:0 0 84px;margin-bottom:0}
 .task-review-files,.task-review-diff,.session-git-list,.session-request-list{
   flex:0 1 auto;margin:0 0 10px;padding:10px;background:var(--panel2);
   border:1px solid var(--line2);border-radius:var(--r-sm);
@@ -4098,3 +4100,105 @@ button.tu-session:focus-visible{outline:2px solid var(--acc);outline-offset:-2px
   .tu-split{display:inline}
   .tu-read-label{max-width:150px}
 }
+
+/* ---------- scheduled prompts ----------
+   The footer's clock opens the sheet: one card per schedule on the Tasks
+   sheet's card surface - its name, where its timing stands and its switch on
+   one line; what it repeats, then where it runs in the help voice; the
+   prompt's first line; the last run; then its verbs, the destructive one
+   last as in every inline strip. The history sheet sets the schedule's facts
+   on the linked-workspace sheet's column and one card per run under them,
+   the final answer rendered as the transcript renders it and folded to a
+   few lines until asked for. The editor is a form of the New session
+   dialog's fields. */
+#btn-schedules.busy{color:var(--acc2)}
+#btn-schedules.attention{color:var(--warn)}
+.schedules-modal,.schedule-history-modal,.schedule-editor-modal{--modal-w:var(--modal-w-editor)}
+.schedule-list,.schedule-runs{display:flex;flex-direction:column;gap:8px;min-width:0}
+.schedule-list:empty{display:none}
+.schedule-list{margin-bottom:4px}
+.schedule-empty{margin-bottom:0}
+.schedule-card,.schedule-run{
+  min-width:0;padding:10px 12px;background:var(--panel);
+  border:1px solid var(--line);border-radius:var(--r-md);
+}
+.schedule-card-head,.schedule-run-head{display:flex;align-items:center;gap:8px;min-width:0;font-size:var(--fs-md)}
+.schedule-card-head .spinner,.schedule-run-head .spinner{
+  flex:0 0 auto;width:10px;height:10px;border:2px solid var(--acc-dim);
+  border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;
+  animation-delay:var(--prompt-spin-delay,0ms);
+}
+.schedule-name,.sr-name{min-width:0;font-weight:600;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.schedule-name{flex:1 1 0}
+.sr-name{flex:0 0 auto}
+.schedule-when,.sr-state{
+  flex:0 1 auto;min-width:0;font-size:var(--fs-xs);color:var(--txt3);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.sr-when{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sr-state{margin-left:auto}
+.schedule-switch{flex:0 0 auto}
+.schedule-card-line{margin-top:4px;font-size:var(--fs-sm);color:var(--txt2);overflow-wrap:anywhere}
+.schedule-card-line.help{margin-top:2px}
+.schedule-card-prompt{
+  margin-top:6px;font-size:var(--fs-sm);color:var(--txt);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.schedule-card-prompt:empty{display:none}
+.schedule-card-last{margin-top:6px;overflow-wrap:anywhere}
+.schedule-card-detail.warn{color:var(--warn)}
+.schedule-card-actions,.sr-actions{margin-top:9px}
+.sr-actions:empty{display:none}
+.sr-flag,.sr-reason{margin-top:6px;font-size:var(--fs-sm);line-height:1.5;overflow-wrap:anywhere}
+.sr-flag.warn{color:var(--warn)}
+.sr-reason.bad{color:var(--err)}
+.sr-answer{
+  margin-top:8px;font-size:var(--fs-md);line-height:1.55;color:var(--txt);overflow-wrap:break-word;
+  max-height:calc(1.55em * 6);overflow:hidden;
+}
+.sr-answer.open{max-height:none}
+/* folded, the cut fades out rather than halving a line */
+.sr-answer.folded:not(.open){
+  -webkit-mask-image:linear-gradient(#000 calc(100% - 2.4em),transparent);
+  mask-image:linear-gradient(#000 calc(100% - 2.4em),transparent);
+}
+/* an answer's own headings are the transcript's, never the sheet's title */
+.schedule-run .md :is(h1,h2,h3,h4,h5,h6){
+  display:block;margin:.8em 0 0;font:600 1.1em/1.4 var(--sans);text-transform:none;
+  letter-spacing:0;color:var(--txt);
+}
+.schedule-run .md>:first-child{margin-top:0}
+.sr-more{padding:4px 0 0}
+.schedule-facts{display:flex;flex-direction:column;gap:6px;margin:0 0 12px}
+.schedule-runs-section .field-lbl{margin-bottom:6px}
+.schedule-history-modal .form-error{margin-top:12px}
+.schedule-form .composer-box{margin-bottom:10px}
+.schedule-form .task-composer-lbl{margin-bottom:5px}
+.schedule-editor-modal .composer-box textarea{min-height:110px;max-height:40vh}
+.schedule-form .workspace-pick{grid-template-columns:repeat(2,1fr)}
+.schedule-form .field-lbl{margin-bottom:10px}
+.schedule-days{max-width:100%;margin-top:6px}
+.schedule-preview{margin:0 0 12px}
+.schedule-preview.bad{color:var(--err)}
+.schedule-delete-conversations{margin:0 0 6px}
+#sc-alert-wrap.disabled{opacity:.45}
+#sc-alert-wrap+.hint{margin:4px 0 10px}
+/* the run's chip in a scheduled conversation's head opens its schedule */
+.chip.schedule{color:var(--txt2);font-family:var(--sans)}
+.chip.schedule svg{flex-shrink:0;opacity:.85}
+button.chip.schedule{
+  cursor:pointer;-webkit-appearance:none;appearance:none;
+  transition:border-color var(--t-base) var(--ease),color var(--t-base) var(--ease),transform var(--t-fast) var(--ease);
+}
+@media (hover:hover){button.chip.schedule:hover{border-color:var(--focus-line);color:var(--txt)}}
+button.chip.schedule:active{transform:scale(.96)}
+button.chip.schedule:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+@media (max-width:560px){
+  .schedule-form .field-row{flex-wrap:wrap}
+  .schedule-form .field-row>*{flex:1 1 calc(50% - 5px)}
+  /* the state takes a line of its own under the name, the switch keeping
+     the head's end */
+  .schedule-card-head{flex-wrap:wrap;row-gap:2px}
+  .schedule-when{order:3;flex:1 0 100%;white-space:normal}
+}
+@media (prefers-reduced-motion:reduce){.schedule-card-head .spinner,.schedule-run-head .spinner{animation:none}}

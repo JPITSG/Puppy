@@ -48,7 +48,8 @@ function consoleFor(sessions, remoteSessions, marks = false) {
     const node = el("div"); node.id = id; document.body.appendChild(node);
   }
   const state = { sessions, remoteSessions, views: {}, tabs: [], backends: [{ id: 2 }],
-    sessionFilter: "", showArchived: false, remoteOk: { 2: true }, selectedSession: "2:1" };
+    sessionFilter: "", showArchived: false, remoteOk: { 2: true }, selectedSession: "2:1",
+    schedules: null };
   const context = vm.createContext({
     document, el, state, console, Date, dragSess: null,
     $: id => document.getElementById(id),
@@ -74,6 +75,7 @@ function consoleFor(sessions, remoteSessions, marks = false) {
     between("function sidebarSessionKey(", "function focusedSessionKey("),
     between("function mergeSidebarRows(", "const AGENT_NOTE_FILES ="),
     between("function sessionOrderSnapshot(", "function acceptSessionListPayload("),
+    between("function scheduleById(", "/* The clock in the footer"),
   ].concat(marks ? [
     /* the real marks and glyphs, so the lane is the one the console draws */
     between("function sessionPinIcon(", "/* A compact transport indicator"),
@@ -135,6 +137,16 @@ ui.state.sessionFilter = "";
 // Task rows never escape their parent, including a newer task timestamp.
 ui.state.remoteSessions[2].push(session(3, 100, { task: { parent: 1 } }));
 assert.deepEqual(ui.render(), ["0:9", "2:9", "0:2", "2:1", "0:1"]);
+// A schedule's run stays out of the list while its schedule keeps it; one
+// whose schedule is gone, or no longer keeps it, is an ordinary row again.
+ui.state.remoteSessions[2].push(session(4, 90, { schedule: { id: "a1b2c3d4e5f6", name: "Log review", run: 3 } }));
+assert.deepEqual(ui.render(), ["0:9", "2:9", "0:2", "2:1", "2:4", "0:1"]);
+ui.state.schedules = { list: [{ id: "a1b2c3d4e5f6", kept_runs: [2, 3] }] };
+assert.deepEqual(ui.render(), ["0:9", "2:9", "0:2", "2:1", "0:1"]);
+ui.state.schedules = { list: [{ id: "a1b2c3d4e5f6", kept_runs: [2] }] };
+assert.deepEqual(ui.render(), ["0:9", "2:9", "0:2", "2:1", "2:4", "0:1"]);
+ui.state.schedules = null;
+ui.state.remoteSessions[2].pop();
 // A pinned session starting work cannot move within or out of the pin block.
 remotePin.status = "running";
 assert.deepEqual(ui.render(), ["0:9", "2:9", "0:2", "2:1", "0:1"]);

@@ -116,7 +116,7 @@ function consoleFor(options = {}) {
   });
   context.Date.now = () => NOW * 1000;
   vm.runInContext(between("/* ================= token usage =================",
-    "$(\"toggle-archived\")"), context);
+    "/* ================= scheduled prompts ================="), context);
   return { document, context, calls, storage, state };
 }
 

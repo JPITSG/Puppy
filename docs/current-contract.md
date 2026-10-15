@@ -79,6 +79,13 @@ still contain a value written before that release.
   shape. Existing ledgers require manual preparation for format 2 before
   upgrade; older ledger formats in snapshot archives are also refused. A new
   node has no records. See [Token usage](token-usage.md).
+- Scheduled prompts are meta records only, so no `config.json` changes. On the
+  controller, `schedule.<id>` is the exact settings-and-timing record and
+  `schedule_runs.<id>` the exact bounded run history; on every node,
+  `session_schedule.<sid>` is the exact `{format: 1, schedule, name, run}`
+  mark of a session a schedule started, deleted with its session. All are
+  optional - absent means no schedules - so existing databases need no
+  preparation. See [Scheduled prompts](schedules.md).
 
 ## Runtime APIs and console
 
@@ -261,6 +268,18 @@ offers the creation dialogs' choice only for nodes that advertise this; a
 node without it names a session from its first line as before. The `titles`
 config section is a persisted-shape change (above); nothing else changes a
 backup shape.
+
+Scheduled prompts' run marks are additive `session-schedule-runs`: both
+execution runtimes accept an optional `schedule` object (`{id, name, run}`)
+on `POST /api/sessions`, keep it as the session's `session_schedule.<sid>`
+record and carry it on every session payload as the additive `schedule`
+(`{id, name, run, waiting}`, `waiting` true while the run waits for an
+approval), re-sending the session list when that changes. The controller
+alone owns the schedules (`/api/schedules`, its routes in [Scheduled
+prompts](schedules.md)), publishes them on `/api/state` and the `schedules`
+stream topic, starts runs through the ordinary session routes, and never
+schedules a run on a node without this marker. Every session payload's
+`schedule` is absent for sessions no schedule started.
 
 The sheet's History is additive `session-git-log`: both execution runtimes
 serve `GET /api/sessions/{sid}/git/log?skip=N&limit=M`, one page of the

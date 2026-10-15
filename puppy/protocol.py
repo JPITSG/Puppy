@@ -266,6 +266,15 @@ SESSION_REFERENCES_CAPABILITY = "session-references"
 # that consumes requests never asks a node without this marker.
 SESSION_TITLES_CAPABILITY = "session-titles"
 
+# Scheduled prompts. POST /api/sessions accepts an optional ``schedule``
+# object ({id, name, run}) that the node keeps as the exact
+# session_schedule.<sid> record, deleted with the session, and carries on
+# every session payload as the additive ``schedule`` ({id, name, run,
+# waiting}); the session list is re-sent when such a run starts or stops
+# waiting for an approval. The controller that owns schedules never starts a
+# run on a node without this marker.
+SESSION_SCHEDULE_RUNS_CAPABILITY = "session-schedule-runs"
+
 # A task set to apply to Main when it is done (see BASE_CAPABILITIES).
 SESSION_TASK_AUTO_APPLY_CAPABILITY = "session-task-auto-apply"
 # The task MCP bridge and its editable system-prompt policy.
@@ -380,6 +389,7 @@ BASE_CAPABILITIES = (
     SESSION_ORDER_RECENCY_CAPABILITY,
     COMPLETION_EVENTS_CAPABILITY,
     SESSION_TITLES_CAPABILITY,
+    SESSION_SCHEDULE_RUNS_CAPABILITY,
     NODE_STATE_STREAM_CAPABILITY,
     SESSION_CONTROL_WS_CAPABILITY,
     HOST_METRICS_CAPABILITY,

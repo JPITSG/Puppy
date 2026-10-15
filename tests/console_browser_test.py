@@ -2682,6 +2682,211 @@ async def session_request_checks(instance):
           "a phone in both themes, and a real click on a name opening that session", flush=True)
 
 
+def seed_schedules():
+    """Two invented schedules for the sheet: one that has run - a failed start
+    and a finished run whose long answer flags something, its conversation a
+    demo session - and one switched off with a cron timing and a long name.
+    Answers the run conversation's session id."""
+    from puppy import schedules
+    from puppy.drivers import get_driver
+    driver = get_driver("claude")
+    now = time.time()
+    answer = "## Log review\n\n" + "\n".join(
+        "- line {}: sshd reported a failed password for root from 10.0.0.{}".format(i, i) for i in range(1, 15))
+    run_sid = db.create_session("Log review · run 2", "claude", "/var/log", "", "", "#4dd0c4", "default")
+    schedules.mark_run(run_sid, {"format": 1, "schedule": "c0ffee000001", "name": "Log review", "run": 2})
+
+    def seed(ident, name, enabled, runs, **changes):
+        record = schedules.normalize_settings({
+            "name": name, "prompt": "Check /var/log for the last 24 hours and tell me what needs attention.",
+            "enabled": enabled, "backend": 0, "engine": "claude", "model": "", "effort": "",
+            "permission_mode": driver.default_permission(), "workspace_kind": "directory",
+            "cwd": "/var/log", "timing": {"kind": "weekly", "days": [1, 2, 3, 4, 5], "times": ["06:00", "18:30"]},
+            "until": "", "max_runs": 0, "late": "run", "limit_minutes": 60, "notify": "agent",
+            "alert_command": False, "keep": 10, **changes})
+        record.update(format=1, id=ident, created_at=now - 1000 + len(name), updated_at=now,
+                      next_at=0.0, pending_at=0.0, scheduled_runs=len(runs))
+        record["next_at"] = schedules._next_at(record, now)
+        schedules._save(record, {"format": 1, "next_run": len(runs) + 1, "runs": runs})
+
+    run = lambda n, state, **extra: dict({"n": n, "trigger": "schedule", "due_at": now - 90000 * (3 - n),
+        "started_at": now - 90000 * (3 - n), "finished_at": now - 90000 * (3 - n) + 263, "backend": 0,
+        "session": 0, "state": state, "reason": "", "answer": "", "flag": "", "notified": False, "kept": False}, **extra)
+    seed("c0ffee000001", "Log review", True, [
+        run(1, "failed", reason="could not create its session · directory does not exist: /var/log/old"),
+        run(2, "ok", session=run_sid, kept=True, answer=answer, flag="14 failed SSH logins from 10.0.0.5")])
+    seed("c0ffee000002", "A schedule with a rather long name that has to be cut short in its card", False, [],
+         timing={"kind": "cron", "expr": "*/30 9-17 * * mon-fri"}, notify="failure")
+    schedules.publish()
+    runner.broadcast_sessions()
+    return run_sid
+
+
+async def schedules_checks(instance):
+    """The schedules sheet in real layout, on a desktop and a phone in both
+    themes: the footer's clock among the footer's buttons on their one row,
+    the sheet opened by a real click (from the drawer on a phone), cards that
+    fit the sheet with the switch at the head's end and their verbs wrapping
+    inside, the history's facts on one column with the runs under them - a
+    long answer folded with Show all, a flag in the warn tone, a run's
+    conversation opened by a real click - and the editor's fields inside the
+    sheet with the instance's own preview of the next runs; then a schedule
+    made with real typing and real clicks over the controller's routes, and
+    turned off by a real click on its switch. Nothing runs."""
+    from puppy import schedules
+    from puppy.drivers import get_driver
+    page = instance.page_session
+    driver = get_driver("claude")
+    run_sid = seed_schedules()
+    await until(instance, "state.schedules && state.schedules.list.length === 2 && "
+                          "!!findSessionMeta(0, %d)" % run_sid)
+
+    async def click(expression):
+        point = await evaluate(instance, """(() => { const b = %s; b.scrollIntoView({block: 'nearest'});
+            const r = b.getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()""" % expression)
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1),
+                                session=page)
+
+    footer = """(() => { const r = n => n.getBoundingClientRect();
+        const buttons = [...document.querySelectorAll('.foot-row .icon-btn')].filter(b => b.offsetParent);
+        const clock = document.getElementById('btn-schedules'), svg = r(clock.querySelector('svg')), box = r(clock);
+        return {ids: buttons.map(b => b.id), tops: buttons.map(b => r(b).top), widths: buttons.map(b => r(b).width),
+                cx: svg.left + svg.width / 2 - (box.left + box.width / 2),
+                cy: svg.top + svg.height / 2 - (box.top + box.height / 2)}; })()"""
+    sheet = """(() => { const m = document.querySelector('.schedules-modal'), r = n => n.getBoundingClientRect();
+        const cards = [...m.querySelectorAll('.schedule-card')].map(card => {
+            const c = r(card), sw = r(card.querySelector('.schedule-switch')), name = card.querySelector('.schedule-name');
+            const head = card.querySelector('.schedule-card-head'), pad = parseFloat(getComputedStyle(card).paddingRight);
+            const buttons = [...card.querySelectorAll('.schedule-card-actions .btn')].map(b => r(b));
+            return {left: c.left, right: c.right, switchRight: sw.right, contentRight: c.right - pad - 1,
+                    nameClipped: name.scrollWidth > name.clientWidth, headOverflow: head.scrollWidth > head.clientWidth + 1,
+                    buttonsInside: buttons.every(b => b.left >= c.left - 0.5 && b.right <= c.right + 0.5),
+                    labels: [...card.querySelectorAll('.schedule-card-actions .btn')].map(b => b.textContent)};
+        });
+        return {cards, overflow: m.scrollWidth > m.clientWidth + 1, left: r(m).left, right: r(m).right, vw: innerWidth}; })()"""
+    history = """(() => { const m = document.querySelector('.schedule-history-modal'), r = n => n.getBoundingClientRect();
+        const labels = [...m.querySelectorAll('.schedule-facts .field-lbl')].map(n => r(n).left);
+        const values = [...m.querySelectorAll('.schedule-facts .wsf-v')].map(n => r(n).left);
+        const runs = [...m.querySelectorAll('.schedule-run')].map(node => r(node));
+        const answer = m.querySelector('.sr-answer'), line = parseFloat(getComputedStyle(answer).lineHeight);
+        const flag = m.querySelector('.sr-flag');
+        return {labels, values, runs: runs.map(b => [b.left, b.right]), answerHeight: r(answer).height, line,
+                more: !!m.querySelector('.sr-more'), overflow: m.scrollWidth > m.clientWidth + 1,
+                flagColor: getComputedStyle(flag).color, warn: getComputedStyle(document.documentElement).getPropertyValue('--warn').trim(),
+                left: r(m).left, right: r(m).right, vw: innerWidth}; })()"""
+    editor = """(() => { const m = document.querySelector('.schedule-editor-modal'), r = n => n.getBoundingClientRect();
+        const box = r(m), fields = [...m.querySelectorAll('input:not([type=checkbox]),select,textarea,.choice-control')]
+            .filter(n => n.offsetParent).map(n => r(n));
+        return {overflow: m.scrollWidth > m.clientWidth + 1, inside: fields.every(f => f.left >= box.left - 0.5 && f.right <= box.right + 0.5),
+                preview: m.querySelector('#sc-preview').textContent, left: box.left, right: box.right, vw: innerWidth}; })()"""
+    close_all = "(() => { while (modalStack.length) modalStack[modalStack.length - 1].close(); return true; })()"
+    async def no_refresh(*args, **kwargs):
+        return None
+    try:
+        with patch.object(driver, "refresh_model_options", side_effect=no_refresh):
+            for width, height, mobile in ((1440, 900, False), (390, 844, True)):
+                await instance.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
+                    "deviceScaleFactor": 2 if mobile else 1, "mobile": mobile}, session=page)
+                for theme in ("dark", "light"):
+                    label = (width, theme)
+                    await evaluate(instance, "applyTheme(%s); %s" % (json.dumps(theme), "openDrawer(); true" if mobile else "true"))
+                    f = await evaluate(instance, footer)
+                    ids = [item for item in f["ids"] if item != "btn-bell"]
+                    assert ids == ["btn-settings", "btn-theme", "btn-schedules", "btn-usage", "btn-notices", "btn-logout"], (label, f)
+                    assert len(set(f["tops"])) == 1 and len(set(f["widths"])) == 1, (label, f)
+                    assert abs(f["cx"]) < 0.6 and abs(f["cy"]) < 0.6, ("the clock is centred", label, f)
+                    await click("document.getElementById('btn-schedules')")
+                    await until(instance, "document.querySelectorAll('.schedules-modal .schedule-card').length === 2")
+                    g = await evaluate(instance, sheet)
+                    assert not g["overflow"] and g["left"] >= 0 and g["right"] <= g["vw"] + 0.5, (label, g)
+                    for card in g["cards"]:
+                        assert abs(card["switchRight"] - card["contentRight"]) < 1.5, ("the switch ends the head", label, card)
+                        assert card["buttonsInside"] and not card["headOverflow"], (label, card)
+                    if mobile:
+                        assert g["cards"][1]["nameClipped"], ("a long name is cut short", label, g["cards"][1])
+                    assert g["cards"][0]["labels"] == ["Run now", "History", "Edit", "Duplicate", "Delete"], g["cards"][0]
+                    await click("document.querySelector('.schedules-modal .schedule-card [data-act=\"history\"]')")
+                    await until(instance, "document.querySelectorAll('.schedule-history-modal .schedule-run').length === 2")
+                    await evaluate(instance, "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+                    h = await evaluate(instance, history)
+                    assert max(h["labels"]) - min(h["labels"]) < 0.6 and max(h["values"]) - min(h["values"]) < 0.6, (label, h)
+                    assert not h["overflow"] and h["left"] >= 0 and h["right"] <= h["vw"] + 0.5, (label, h)
+                    assert h["answerHeight"] <= h["line"] * 6 + 1 and h["more"], ("a long answer is folded", label, h)
+                    assert len({tuple(item) for item in h["runs"]}) == 1, ("the runs share one column", label, h)
+                    await evaluate(instance, close_all)
+                    await evaluate(instance, "modalSchedules(); true")
+                    await click("document.querySelector('.schedules-modal #sl-new')")
+                    await until(instance, "!!document.querySelector('.schedule-editor-modal') && "
+                                          "document.querySelector('#sc-preview').textContent.startsWith('Next:')")
+                    e = await evaluate(instance, editor)
+                    assert not e["overflow"] and e["inside"] and e["left"] >= 0 and e["right"] <= e["vw"] + 0.5, (label, e)
+                    assert "time zone" in e["preview"], e
+                    await evaluate(instance, close_all)
+                    if mobile:
+                        await evaluate(instance, "closeDrawer(); true")
+            await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+                "deviceScaleFactor": 1, "mobile": False}, session=page)
+            await evaluate(instance, "applyTheme('dark'); true")
+            # Back closes the editor over the sheet, then the sheet; Forward
+            # opens each again, the editor fresh
+            await click("document.getElementById('btn-schedules')")
+            await until(instance, "document.querySelectorAll('.schedules-modal .schedule-card').length === 2")
+            await click("document.querySelector('.schedules-modal #sl-new')")
+            await until(instance, "!!document.querySelector('.schedule-editor-modal #sc-name')")
+            await evaluate(instance, "document.querySelector('#sc-name').value = 'Draft'; true")
+            await evaluate(instance, "history.back(); true")
+            await until(instance, "!document.querySelector('.schedule-editor-modal') && "
+                                  "!!document.querySelector('.schedules-modal')")
+            await evaluate(instance, "history.back(); true")
+            await until(instance, "!document.querySelector('.schedules-modal')")
+            await evaluate(instance, "history.forward(); true")
+            await until(instance, "document.querySelectorAll('.schedules-modal .schedule-card').length === 2")
+            await evaluate(instance, "history.forward(); true")
+            await until(instance, "!!document.querySelector('.schedule-editor-modal #sc-name') && "
+                                  "document.querySelector('#sc-name').value === ''")
+            await evaluate(instance, close_all)
+            # a run's conversation opens from the history with a real click
+            await evaluate(instance, "modalScheduleHistory('c0ffee000001'); true")
+            await until(instance, "document.querySelectorAll('.schedule-history-modal .schedule-run').length === 2")
+            await click("[...document.querySelectorAll('.schedule-history-modal .btn')].find(b => b.textContent === 'Open conversation')")
+            await until(instance, "!document.querySelector('.schedule-history-modal') && state.active === 's:0:%d'" % run_sid)
+            await evaluate(instance, "closeTab('s:0:%d'); true" % run_sid)
+            # a schedule made by real typing and clicks, then turned off
+            await evaluate(instance, "modalSchedules(); true")
+            await click("document.querySelector('.schedules-modal #sl-new')")
+            await until(instance, "!!document.querySelector('.schedule-editor-modal #sc-name')")
+            await click("document.querySelector('#sc-name')")
+            await instance.call("Input.insertText", {"text": "Disk check"}, session=page)
+            await click("document.querySelector('.schedule-editor-modal .composer-box textarea')")
+            await instance.call("Input.insertText", {"text": "Check the free space on every disk."}, session=page)
+            await click("document.querySelector('#sc-save')")
+            await until(instance, "!document.querySelector('.schedule-editor-modal') && "
+                                  "state.schedules.list.some(s => s.name === 'Disk check' && s.state === 'scheduled')")
+            made = next(item for item in schedules._load_all() if item["name"] == "Disk check")
+            assert made["prompt"] == "Check the free space on every disk." and \
+                made["timing"] == {"kind": "daily", "times": ["06:00"]} and made["next_at"] > time.time()
+            await until(instance, "[...document.querySelectorAll('.schedules-modal .schedule-name')]"
+                                  ".some(n => n.textContent === 'Disk check')")
+            await click("[...document.querySelectorAll('.schedules-modal .schedule-card')].find(c => "
+                        "c.querySelector('.schedule-name').textContent === 'Disk check').querySelector('.be-auto-track')")
+            await until(instance, "state.schedules.list.some(s => s.name === 'Disk check' && s.state === 'off')")
+            assert not schedules._load(made["id"])["enabled"]
+    finally:
+        await evaluate(instance, close_all + "; applyTheme('dark'); true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=page)
+        db.execute("DELETE FROM meta WHERE key GLOB 'schedule.*' OR key GLOB 'schedule_runs.*'")
+        schedules.publish()
+        if db.get_session(run_sid):
+            db.delete_session(run_sid)
+        runner.broadcast_sessions()
+    print("PASS: the schedules clock among the footer's buttons, the sheet's cards with their switch at the head's end, "
+          "the history's facts on one column with a long answer folded and a run opened by a real click, and the "
+          "editor's fields inside the sheet with the instance's preview, on a desktop and a phone in both themes; a "
+          "schedule made and turned off by real typing and clicks", flush=True)
+
+
 async def question_scroll_checks(instance, capture=False):
     """A real wheel scrolls the question first, then its history at either
     edge. The card fits the chat pane, including short windows and phones;
@@ -8323,7 +8528,7 @@ def css_rgb(colour):
 
 async def token_usage_checks(instance, capture=False):
     """The Token usage sheet, in a real browser: the chart button stands
-    between the bell and the tray, drawn and sized like them; a real click
+    between the schedules clock and the tray, drawn and sized like them; a real click
     opens the sheet, which reads this node's ledger over the real route and
     shows what the node's own report says; stacked columns stay thin with the
     surface gap between segments, the rounded end on the stack's top alone
@@ -8353,7 +8558,7 @@ async def token_usage_checks(instance, capture=False):
                 glyph:[glyph.width, glyph.height], trayGlyph:[trayGlyph.width, trayGlyph.height],
                 centre:glyph.top+glyph.height/2-(r.top+r.height/2)};
     })()""")
-    assert point["before"] == "btn-bell" and point["after"] == "btn-notices", point
+    assert point["before"] == "btn-schedules" and point["after"] == "btn-notices", point
     assert point["label"] == "Token usage", point
     assert point["box"] == point["trayBox"] and point["glyph"] == point["trayGlyph"], point
     assert abs(point["centre"]) < .6, point
@@ -8662,7 +8867,7 @@ async def token_usage_checks(instance, capture=False):
         await evaluate(instance, "closeTab('s:0:%d'); true" % sid)
     await evaluate(instance, "activateTab('s:0:1'); for (const key of ['puppy.usage.range','puppy.usage.by',"
                              "'puppy.usage.measure']) localStorage.removeItem(lsKey(key)); true")
-    print("PASS: token usage sheet - the button between the bell and the tray, the node's own report "
+    print("PASS: token usage sheet - the button between the schedules clock and the tray, the node's own report "
           "read over its route, thin stacked columns with surface gaps in each engine's validated hue in "
           "both themes, hover and key readouts that never move the plot, a phone layout that keeps to "
           "the screen, Back/Forward "
@@ -9116,6 +9321,8 @@ async def main(args):
             if args.serve:
                 if args.tool_clock_only:
                     seed_tool_clocks()
+                if args.schedules_only:
+                    seed_schedules()
                 await asyncio.Event().wait()
                 return
             config.set_value("browser.enabled", True)
@@ -9185,6 +9392,9 @@ async def main(args):
             if args.session_request_only:
                 await session_request_checks(instances[0])
                 return
+            if args.schedules_only:
+                await schedules_checks(instances[0])
+                return
             if args.image_viewer_only:
                 await image_viewer_checks(instances[0], args.screenshots)
                 await tool_image_checks(instances[0])
@@ -9221,6 +9431,7 @@ async def main(args):
             await engine_terminal_checks(instances[0], sid)
             await popout_checks(instances[0], sid)
             await running_list_checks(instances[0], sid)
+            await schedules_checks(instances[0])
             await navigation_checks(instances[0], url, sid, args.screenshots)
             if args.screenshots:
                 await screenshots(instances[0])
@@ -9255,6 +9466,7 @@ if __name__ == "__main__":
     parser.add_argument("--question-scroll-only", action="store_true")
     parser.add_argument("--image-viewer-only", action="store_true")
     parser.add_argument("--session-request-only", action="store_true")
+    parser.add_argument("--schedules-only", action="store_true")
     parser.add_argument("--prompt-gutter-only", action="store_true")
     parser.add_argument("--sidebar-width-only", action="store_true")
     parser.add_argument("--backup-schedule-only", action="store_true")

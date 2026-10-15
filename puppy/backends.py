@@ -1740,6 +1740,8 @@ async def h_delete(request: web.Request):
     db.execute("DELETE FROM backends WHERE id=?", (bid,))
     from puppy import notify
     notify.forget_backend(bid)
+    from puppy import schedules
+    schedules.forget_backend(bid)
     _clear_last_known(bid)
     _active_urls.pop(bid, None)
     _url_cursors.pop(bid, None)

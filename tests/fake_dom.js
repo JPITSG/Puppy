@@ -166,6 +166,13 @@ class FakeElement {
     return child;
   }
   remove() { if (this.parentNode) this.parentNode.removeChild(this); }
+  replaceWith(...nodes) {
+    const parent = this.parentNode;
+    if (!parent) return;
+    const next = this.nextSibling;
+    parent.removeChild(this);
+    for (const node of nodes) parent.insertBefore(node, next && next.parentNode === parent ? next : null);
+  }
   setAttribute(key, value) {
     this.attributes[key] = String(value);
     if (key === "class") this.className = value;

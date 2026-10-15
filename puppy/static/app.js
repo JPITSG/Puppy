@@ -192,6 +192,30 @@ function usageIcon(size) {
   return svg;
 }
 
+/* The schedules sheet's button: a clock face on the footer set's 24-box at
+   its 1.5 weight, one hand up and the other turned toward four. */
+function scheduleIcon(size) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const draw = (d) => {
+    const p = document.createElementNS(NS, "path");
+    p.setAttribute("d", d);
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", "currentColor");
+    p.setAttribute("stroke-width", "1.5");
+    p.setAttribute("stroke-linecap", "round");
+    p.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(p);
+  };
+  draw("M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z");
+  draw("M12 7.5V12l3.5 2");
+  return svg;
+}
+
 /* The tray the footer's notification list opens from: an in-tray with its
    shelf, drawn in the same 24-box at the same 1.5 weight as the bell and the
    sign-out arrow it stands between. */
@@ -1301,13 +1325,13 @@ function flushNotices() {
    the same count: every arrival is reported, folded or not. */
 const liveToasts = new Map();
 
-function toast(text, tone = "info", ms = TOAST_SHORT) {
+function toast(text, tone = "info", ms = TOAST_SHORT, { report = true } = {}) {
   const body = toastText(text);
   if (!body) return;
   const level = toastTone(tone);
   const key = level + "\u0000" + body;
   const live = liveToasts.get(key);
-  if (live) { live.repeat(ms); recordNotice(body, level); return; }
+  if (live) { live.repeat(ms); if (report) recordNotice(body, level); return; }
 
   const node = el("div", "toast " + level);
   const count = el("span", "toast-count");
@@ -1388,7 +1412,7 @@ function toast(text, tone = "info", ms = TOAST_SHORT) {
     });
   liveToasts.set(key, record);
   arm(ms);
-  recordNotice(body, level);
+  if (report) recordNotice(body, level);
 }
 
 /* Clipboard.writeText is unavailable on some plain-HTTP deployments. Keep one
@@ -3562,6 +3586,7 @@ const state = {
   // generated titles: the controller's switch and the model that names
   // unnamed sessions and tasks (backend id, engine key, model id)
   titles: { enabled: false, configured: false, backend: 0, engine: "", model: "" },
+  schedules: null,        // the controller's schedules topic, null until known
   notices: null,          // {items}: the controller's notice history, newest first
   browser: { enabled: false },  // this instance's managed-browser toggle
   browserStatus: null,          // full local browser status from node-state stream
@@ -4180,6 +4205,7 @@ async function refreshState() {
   state.clockFormat = s.clock_format === "12h" ? "12h" : "24h";
   if (s.notify) { state.notify = s.notify; syncBell(); }
   if (s.titles) state.titles = titlesPublicState(s.titles);
+  if (s.schedules) { state.schedules = schedulesPublicState(s.schedules); syncSchedulesButton(); }
   state.sessionColors = s.session_colors || [];
   rememberEnginePayload(0, {
     engines: Array.isArray(s.engines) ? s.engines : [],
@@ -4454,10 +4480,14 @@ function handleUpdatesMessage(d) {
   } else if (d.type === "titles") {
     state.titles = titlesPublicState(d);
     for (const sync of titlesStateListeners) sync();
+  } else if (d.type === "schedules") {
+    applySchedules(d);
   } else if (d.type === "toast") {
     /* a notice the controller itself raises for every console - a title
-       that could not be generated - on the one surface notices have */
-    if (typeof d.text === "string" && d.text) toast(d.text, d.level || "info", TOAST_LONG);
+       that could not be generated - on the one surface notices have; one the
+       controller already kept in the history (a schedule's) is only shown */
+    if (typeof d.text === "string" && d.text)
+      toast(d.text, d.level || "info", TOAST_LONG, { report: d.recorded !== true });
   } else if (d.type === "notices") {
     applyNotices(d);
   } else if (d.type === "spelling") {
@@ -6072,7 +6102,7 @@ function mergeSidebarRows(groups) {
   for (const { bid, sessions } of groups) {
     const rows = [];
     for (const s of sessions) {
-      if (s.task) continue;
+      if (s.task || scheduledRunHidden(s)) continue;
       (s.pinned === true ? pinned : rows).push({ bid, s });
     }
     ordinary.push({ rows, index: 0 });
@@ -10003,6 +10033,1131 @@ function modalTokenUsage() {
 
 $("btn-usage").onclick = () => modalTokenUsage();
 
+/* ================= scheduled prompts =================
+   The footer's clock opens the schedules sheet: prompts this instance sends
+   on its own, each on the backend, engine, model, effort and permissions its
+   schedule names. The controller owns them (puppy/schedules.py) and pushes
+   the `schedules` topic on every change; a run is a new session on its
+   backend, carrying the node's `schedule` mark, kept out of the sidebar while
+   its schedule keeps the conversation (`kept_runs`) and opened from the
+   schedule's history. A schedule's times are wall clocks in this instance's
+   own time zone, persisted as canonical HH:MM and shown through the server's
+   clock helpers. */
+const SCHEDULE_KINDS = [
+  { value: "once", label: "Once" },
+  { value: "interval", label: "Every few minutes, hours or days" },
+  { value: "daily", label: "Every day" },
+  { value: "weekly", label: "On days of the week" },
+  { value: "monthly", label: "On days of the month" },
+  { value: "cron", label: "Cron expression" },
+];
+const SCHEDULE_WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const SCHEDULE_WEEKDAY_NAMES = ["Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays",
+  "Saturdays", "Sundays"];
+const SCHEDULE_NOTIFY = [
+  { value: "never", label: "Never" },
+  { value: "failure", label: "When a run fails or needs me" },
+  { value: "agent", label: "When the agent flags something" },
+  { value: "always", label: "After every run" },
+];
+const SCHEDULE_LATE = [
+  { value: "run", label: "Run it as soon as it can" },
+  { value: "skip", label: "Skip it" },
+];
+const SCHEDULE_ENDS = [
+  { value: "never", label: "Never" },
+  { value: "date", label: "On a date" },
+  { value: "count", label: "After a number of runs" },
+];
+const SCHEDULE_UNITS = [
+  { value: "minutes", label: "minutes", factor: 1 },
+  { value: "hours", label: "hours", factor: 60 },
+  { value: "days", label: "days", factor: 1440 },
+];
+const SCHEDULE_RUN_STATES = {
+  starting: { word: "Starting", tone: "busy" },
+  working: { word: "Working", tone: "busy" },
+  ok: { word: "Finished", tone: "ok" },
+  failed: { word: "Failed", tone: "bad" },
+  stopped: { word: "Stopped", tone: "warn" },
+  missed: { word: "Missed", tone: "warn" },
+  skipped: { word: "Skipped", tone: "" },
+  lost: { word: "Conversation deleted", tone: "warn" },
+};
+const SCHEDULE_TRIGGERS = { schedule: "On time", late: "Late", manual: "Started by hand" };
+const SCHEDULE_PREVIEW_MS = 250;
+const scheduleStateListeners = new Set();
+
+function schedulesPublicState(d) {
+  return {
+    list: d && Array.isArray(d.schedules) ? d.schedules.filter(item =>
+      item && typeof item.id === "string") : [],
+    timezone: d && typeof d.timezone === "string" ? d.timezone : "",
+    limits: d && d.limits && typeof d.limits === "object" ? d.limits : {},
+  };
+}
+
+function scheduleHiddenSignature() {
+  const list = state.schedules ? state.schedules.list : [];
+  return JSON.stringify(list.map(item => [item.id, item.kept_runs]));
+}
+
+function applySchedules(d) {
+  const before = scheduleHiddenSignature();
+  state.schedules = schedulesPublicState(d);
+  syncSchedulesButton();
+  if (scheduleHiddenSignature() !== before) renderSidebar();
+  for (const view of liveViews())
+    if (view && typeof view.syncScheduleChip === "function") view.syncScheduleChip();
+  for (const sync of [...scheduleStateListeners]) {
+    try { sync(); } catch (error) { console.warn("schedule view update failed", error); }
+  }
+}
+
+function scheduleById(id) {
+  return (state.schedules && state.schedules.list.find(item => item.id === id)) || null;
+}
+
+/* A run's conversation stays out of the sidebar exactly while the schedule
+   that started it is known here and still keeps it: one whose schedule was
+   deleted, or whose entry left the history, is an ordinary session again. */
+function scheduledRunHidden(session) {
+  const mark = session && session.schedule;
+  if (!mark || typeof mark !== "object") return false;
+  const schedule = scheduleById(mark.id);
+  return !!schedule && Array.isArray(schedule.kept_runs) && schedule.kept_runs.includes(mark.run);
+}
+
+/* The clock in the footer: accented while a run works, the warn tone while
+   one waits for an approval. */
+function syncSchedulesButton() {
+  const button = $("btn-schedules");
+  if (!button) return;
+  const list = state.schedules ? state.schedules.list : [];
+  const working = list.filter(item => item.state === "working");
+  const waiting = working.some(item => item.run && item.run.waiting);
+  button.classList.toggle("busy", working.length > 0 && !waiting);
+  button.classList.toggle("attention", waiting);
+  button.setAttribute("aria-label", "Schedules" + (waiting ? " · a run is waiting for your approval" :
+    working.length ? ` · ${working.length} ${working.length === 1 ? "run" : "runs"} working` : ""));
+}
+
+function scheduleListText(items) {
+  if (items.length <= 1) return items.join("");
+  return items.slice(0, -1).join(", ") + " and " + items[items.length - 1];
+}
+
+function scheduleOrdinal(n) {
+  const tens = n % 100;
+  if (tens >= 11 && tens <= 13) return `${n}th`;
+  return n + ({ 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th");
+}
+
+/* A wall-clock date of the schedule (YYYY-MM-DD) in the viewer's language. */
+function scheduleDateText(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+  if (!match) return String(value || "");
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const options = { weekday: "short", month: "short", day: "numeric" };
+  if (date.getFullYear() !== new Date().getFullYear()) options.year = "numeric";
+  return date.toLocaleDateString([], options);
+}
+
+function scheduleIntervalText(minutes) {
+  const value = Number(minutes) || 0;
+  const unit = [...SCHEDULE_UNITS].reverse().find(item => value % item.factor === 0) || SCHEDULE_UNITS[0];
+  const count = value / unit.factor;
+  return `${count} ${count === 1 ? unit.label.replace(/s$/, "") : unit.label}`;
+}
+
+function scheduleWeekdaysText(days) {
+  const list = [...days].sort((a, b) => a - b).join(",");
+  if (list === "1,2,3,4,5,6,7") return "Every day";
+  if (list === "1,2,3,4,5") return "Weekdays";
+  if (list === "6,7") return "Weekends";
+  return scheduleListText(days.map(day => SCHEDULE_WEEKDAY_NAMES[day - 1]));
+}
+
+function scheduleMonthDaysText(days) {
+  return "the " + scheduleListText(days.filter(day => day > 0).map(scheduleOrdinal)
+    .concat(days.includes(-1) ? ["last day"] : []));
+}
+
+/* "Every day at 06:00 and 18:30", "Weekdays at 08:30", "Every 2 hours". */
+function scheduleTimingText(timing) {
+  if (!timing) return "";
+  const times = () => scheduleListText((timing.times || []).map(fmtClockSetting));
+  switch (timing.kind) {
+    case "once": return `Once, ${scheduleDateText(timing.date)} at ${fmtClockSetting(timing.time)}`;
+    case "interval": return `Every ${scheduleIntervalText(timing.minutes)}`;
+    case "daily": return `Every day at ${times()}`;
+    case "weekly": return `${scheduleWeekdaysText(timing.days || [])} at ${times()}`;
+    case "monthly": return `Monthly on ${scheduleMonthDaysText(timing.days || [])} at ${times()}`;
+    case "cron": return `Cron ${timing.expr}`;
+    default: return "";
+  }
+}
+
+function scheduleEnginesFor(bid) {
+  const list = bid ? state.engCache[bid] : state.engines;
+  return Array.isArray(list) ? list : [];
+}
+
+function scheduleOptionLabel(options, value, fallback) {
+  const option = (options || []).find(item => item && item.value === value);
+  return (option && option.label) || value || fallback;
+}
+
+/* Backend · engine · model · effort · permissions, as the catalogs name them. */
+function scheduleTargetText(schedule) {
+  const engine = engineInfo(schedule.backend, schedule.engine);
+  const parts = [backendName(schedule.backend), engine ? engine.label : schedule.engine,
+    schedule.model ? modelDisplayName(schedule.backend, schedule.engine, schedule.model) : "Default model"];
+  if (schedule.effort)
+    parts.push(scheduleOptionLabel(effortOptionsForModel(engine, schedule.model), schedule.effort, schedule.effort));
+  parts.push(scheduleOptionLabel(engine && engine.permission_options, schedule.permission_mode,
+    schedule.permission_mode));
+  return parts.join(" · ");
+}
+
+function scheduleRunState(run) {
+  if (!run) return { word: "", tone: "" };
+  if ((run.state === "working" || run.state === "starting") && run.waiting)
+    return { word: "Waiting for your approval", tone: "warn" };
+  return SCHEDULE_RUN_STATES[run.state] || { word: run.state, tone: "" };
+}
+
+/* Where the schedule stands, for the card's head and the sheet's facts. */
+function scheduleStateText(schedule) {
+  switch (schedule.state) {
+    case "working": {
+      const run = schedule.run;
+      return run && run.waiting ? { text: `Run ${run.n} is waiting for your approval`, tone: "warn" } :
+        { text: run ? `Run ${run.n} working since ${fmtStamp(run.started_at)}` : "Working", tone: "busy" };
+    }
+    case "waiting":
+      return { text: "Due" + (schedule.pending_reason ? ` · waiting because ${schedule.pending_reason}` : ""),
+        tone: "warn" };
+    case "scheduled": return { text: `Next ${fmtStamp(schedule.next_at)}`, tone: "" };
+    case "off": return { text: "Off", tone: "" };
+    default: return { text: "Ended · nothing left to run", tone: "" };
+  }
+}
+
+/* A run's conversation, when this console knows that session as that run. */
+function scheduleRunSession(schedule, run) {
+  if (!run || !run.session || !run.kept) return null;
+  const meta = findSessionMeta(run.backend, run.session);
+  return meta && meta.schedule && meta.schedule.id === schedule.id && meta.schedule.run === run.n ?
+    meta : null;
+}
+
+const scheduleSheets = new Set();
+function openScheduleRun(schedule, run) {
+  const meta = scheduleRunSession(schedule, run);
+  if (!meta) { toast("Could not open the run · its conversation is not here", "bad"); return; }
+  for (const close of [...scheduleSheets]) close();
+  openSessionTab(run.backend, run.session, meta);
+}
+
+async function scheduleRunNow(schedule, button = null) {
+  if (button) button.disabled = true;
+  try {
+    const r = await api(0, `schedules/${schedule.id}/run`, { method: "POST" });
+    toast(`${schedule.name}: Run ${r.run.n} started`, "busy");
+  } catch (e) {
+    toast(`${schedule.name}: Could not start a run · ${e.message}`, "bad", TOAST_LONG);
+  } finally {
+    if (button && button.isConnected) button.disabled = false;
+  }
+}
+
+async function scheduleStop(schedule, button = null) {
+  if (button) button.disabled = true;
+  try {
+    const r = await api(0, `schedules/${schedule.id}/stop`, { method: "POST" });
+    toast(`${schedule.name}: Stopping run ${r.run.n}`, "busy");
+  } catch (e) {
+    toast(`${schedule.name}: Could not stop the run · ${e.message}`, "bad", TOAST_LONG);
+  } finally {
+    if (button && button.isConnected) button.disabled = false;
+  }
+}
+
+async function scheduleToggle(schedule, enabled, input = null) {
+  if (input) input.disabled = true;
+  try {
+    await api(0, `schedules/${schedule.id}`, { method: "PATCH", body: { enabled } });
+  } catch (e) {
+    if (input && input.isConnected) input.checked = !enabled;
+    toast(`${schedule.name}: Could not turn it ${enabled ? "on" : "off"} · ${e.message}`, "bad");
+  } finally {
+    if (input && input.isConnected) input.disabled = false;
+  }
+}
+
+/* Deleting asks once, with the run conversations it keeps named: by default
+   they go too, unticked they stay as ordinary sessions in the sidebar. */
+function modalDeleteSchedule(schedule) {
+  const kept = (schedule.kept_runs || []).length;
+  return new Promise(resolve => {
+    const { m, close, onClose } = modal(`<h2>Delete schedule?</h2>
+      ${modalSubjectHtml(schedule.name)}
+      ${modalCopyHtml("Its settings and run history are deleted. Nothing runs from it again.")}
+      <label class="check schedule-delete-conversations${kept ? "" : " hidden"}">
+        <input type="checkbox" id="sd-conversations" checked>
+        Also delete its ${kept} kept ${kept === 1 ? "conversation" : "conversations"}</label>
+      <p class="form-error hidden" role="alert"></p>
+      <div class="m-btns"><button type="button" class="btn" id="sd-no">Cancel</button>
+        <button type="button" class="btn btn-danger btn-solid" id="sd-yes">Delete</button></div>`,
+      "schedule-delete-modal");
+    let settled = false;
+    const finish = value => { if (!settled) { settled = true; resolve(value); } };
+    onClose(() => finish(false));
+    const yes = m.querySelector("#sd-yes"), no = m.querySelector("#sd-no");
+    const error = m.querySelector(".form-error");
+    no.onclick = close;
+    yes.onclick = async () => {
+      const conversations = !!kept && m.querySelector("#sd-conversations").checked;
+      yes.disabled = no.disabled = true;
+      yes.textContent = "Deleting…";
+      error.classList.add("hidden");
+      try {
+        const r = await api(0, `schedules/${schedule.id}?conversations=${conversations ? 1 : 0}`,
+          { method: "DELETE", timeoutMs: 120000 });
+        finish(true);
+        close();
+        toast(r.left ? `Schedule deleted · ${r.left} ${r.left === 1 ? "conversation" : "conversations"} could not be deleted and stay in the sidebar` :
+          "Schedule deleted", r.left ? "warn" : "ok", r.left ? TOAST_LONG : TOAST_SHORT);
+      } catch (e) {
+        if (!m.isConnected) return;
+        yes.disabled = no.disabled = false;
+        yes.textContent = "Delete";
+        error.textContent = `Could not delete the schedule · ${e.message}`;
+        error.classList.remove("hidden");
+      }
+    };
+    no.focus();
+  });
+}
+
+/* ---- the sheet: every schedule as a card ---- */
+function scheduleCardActions(schedule, close) {
+  const box = el("div", "task-card-actions schedule-card-actions");
+  const add = (label, act, run, cls = "") => {
+    const button = el("button", "btn btn-sm" + (cls ? " " + cls : ""), label);
+    button.type = "button";
+    button.dataset.act = act;
+    button.onclick = () => run(button);
+    box.appendChild(button);
+    return button;
+  };
+  const run = schedule.run;
+  const working = schedule.state === "working";
+  if (working) add("Stop", "stop", button => scheduleStop(schedule, button));
+  else add("Run now", "run", button => scheduleRunNow(schedule, button));
+  if (working && scheduleRunSession(schedule, run))
+    add("Open", "open", () => openScheduleRun(schedule, run));
+  add("History", "history", () => modalScheduleHistory(schedule.id));
+  add("Edit", "edit", () => modalScheduleEditor(schedule.id));
+  add("Duplicate", "duplicate", () => modalScheduleEditor(null, schedule.id));
+  add("Delete", "delete", () => modalDeleteSchedule(schedule), "btn-danger");
+  return box;
+}
+
+function scheduleCardNode(schedule, close) {
+  const card = el("div", "schedule-card");
+  card.dataset.id = schedule.id;
+  const head = el("div", "schedule-card-head");
+  const stateText = scheduleStateText(schedule);
+  if (schedule.state === "working") head.appendChild(promptSpinnerNode());
+  else {
+    const runState = scheduleRunState(schedule.run);
+    head.appendChild(el("span", "gdot" + (runState.tone ? " " + runState.tone : "")));
+  }
+  head.appendChild(el("span", "schedule-name", schedule.name));
+  head.appendChild(el("span", "schedule-when state-word" + (stateText.tone ? " " + stateText.tone : ""),
+    stateText.text));
+  const toggle = el("label", "be-auto schedule-switch");
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = !!schedule.enabled;
+  input.dataset.act = "toggle";
+  input.setAttribute("aria-label", `Run ${schedule.name} on its schedule`);
+  input.onchange = () => scheduleToggle(schedule, input.checked, input);
+  const track = el("span", "be-auto-track");
+  track.setAttribute("aria-hidden", "true");
+  track.appendChild(el("span"));
+  toggle.appendChild(input);
+  toggle.appendChild(track);
+  head.appendChild(toggle);
+  card.appendChild(head);
+  card.appendChild(el("div", "schedule-card-line", scheduleTimingText(schedule.timing)));
+  card.appendChild(el("div", "schedule-card-line help", scheduleTargetText(schedule)));
+  card.appendChild(el("div", "schedule-card-prompt", schedule.excerpt || ""));
+  const run = schedule.run;
+  if (run && schedule.state !== "working") {
+    const runState = scheduleRunState(run);
+    const last = el("div", "schedule-card-last help");
+    last.appendChild(document.createTextNode(`Last run ${run.n} · ${fmtStamp(run.started_at)} · `));
+    last.appendChild(el("span", "state-word" + (runState.tone ? " " + runState.tone : ""), runState.word));
+    const detail = run.flag || run.reason || run.excerpt;
+    if (detail) last.appendChild(el("span", "schedule-card-detail" + (run.flag ? " warn" : ""),
+      " · " + detail));
+    card.appendChild(last);
+  }
+  card.appendChild(scheduleCardActions(schedule, close));
+  return card;
+}
+
+function modalSchedules() {
+  const { m, close, onClose } = modal(`<h2>Schedules</h2>
+    <p class="modal-copy">Prompts that run on their own, on the backend, engine and model you
+      choose. Every run is a new conversation, kept out of the sidebar and opened from its
+      schedule's history.</p>
+    <div class="schedule-list" role="list"></div>
+    <p class="modal-copy schedule-empty hidden">No schedules yet.</p>
+    <p class="form-error hidden" role="alert"></p>
+    <div class="m-btns"><button type="button" class="btn" id="sl-close">Close</button>
+      <button type="button" class="btn btn-pri" id="sl-new">New schedule</button></div>`,
+    "schedules-modal", () => modalSchedules());
+  scheduleSheets.add(close);
+  onClose(() => scheduleSheets.delete(close));
+  const list = m.querySelector(".schedule-list"), empty = m.querySelector(".schedule-empty");
+  const error = m.querySelector(".form-error");
+  const cards = new Map();
+  m.querySelector("#sl-close").onclick = close;
+  m.querySelector("#sl-new").onclick = () => modalScheduleEditor();
+  /* keyed cards redrawn in place, the control a press or a key landed on
+     keeping the focus */
+  const render = () => {
+    if (!m.isConnected) return;
+    const items = state.schedules ? state.schedules.list : null;
+    empty.classList.toggle("hidden", !items || items.length > 0);
+    if (!items) return;
+    const seen = new Set();
+    let before = list.firstChild;
+    for (const schedule of items) {
+      seen.add(schedule.id);
+      const signature = JSON.stringify([schedule, state.clockFormat,
+        scheduleRunSession(schedule, schedule.run) ? 1 : 0, scheduleTargetText(schedule)]);
+      let entry = cards.get(schedule.id);
+      if (!entry || entry.signature !== signature) {
+        const focused = entry && entry.node.contains(document.activeElement) ?
+          document.activeElement.dataset.act : "";
+        const node = scheduleCardNode(schedule, close);
+        node.setAttribute("role", "listitem");
+        if (entry) entry.node.replaceWith(node);
+        entry = { node, signature };
+        cards.set(schedule.id, entry);
+        if (focused) {
+          const again = node.querySelector(`[data-act="${focused}"]`);
+          if (again) again.focus({ preventScroll: true });
+        }
+      }
+      if (entry.node !== before) list.insertBefore(entry.node, before);
+      before = entry.node.nextSibling;
+    }
+    for (const [id, entry] of cards) if (!seen.has(id)) { entry.node.remove(); cards.delete(id); }
+  };
+  scheduleStateListeners.add(render);
+  onClose(() => scheduleStateListeners.delete(render));
+  render();
+  if (!state.schedules) {
+    api(0, "schedules").then(data => applySchedules(data)).catch(e => {
+      if (!m.isConnected) return;
+      error.textContent = `Could not read the schedules · ${e.message}`;
+      error.classList.remove("hidden");
+    });
+  }
+  m.querySelector("#sl-new").focus();
+  return { m, close };
+}
+
+/* ---- one schedule's history ---- */
+function scheduleRunNode(schedule, run, onDelete) {
+  const node = el("div", "schedule-run");
+  const head = el("div", "schedule-run-head");
+  const runState = scheduleRunState(run);
+  if (run.state === "working" || run.state === "starting") head.appendChild(promptSpinnerNode());
+  else head.appendChild(el("span", "gdot" + (runState.tone ? " " + runState.tone : "")));
+  head.appendChild(el("span", "sr-name", `Run ${run.n}`));
+  head.appendChild(el("span", "sr-when help", `${fmtStamp(run.started_at)} · ${SCHEDULE_TRIGGERS[run.trigger] || run.trigger}`));
+  const took = run.finished_at && run.state !== "missed" && run.state !== "skipped" ?
+    " · " + hostDuration(run.finished_at - run.started_at) : "";
+  head.appendChild(el("span", "sr-state state-word" + (runState.tone ? " " + runState.tone : ""),
+    runState.word + took));
+  node.appendChild(head);
+  if (run.flag) node.appendChild(el("div", "sr-flag warn", run.flag));
+  if (run.reason) node.appendChild(el("div", "sr-reason" + (run.state === "failed" ? " bad" : " help"),
+    run.reason));
+  if (run.answer) {
+    const answer = el("div", "sr-answer md");
+    answer.innerHTML = md(run.answer);
+    decorateMarkdownLinks(answer);
+    decorateMarkdownImages(answer);
+    node.appendChild(answer);
+    const more = el("button", "sr-more linklike", "Show all");
+    more.type = "button";
+    more.onclick = () => {
+      const open = answer.classList.toggle("open");
+      more.textContent = open ? "Show less" : "Show all";
+    };
+    node.appendChild(more);
+    requestAnimationFrame(() => {
+      if (!answer.isConnected) return;
+      if (answer.scrollHeight <= answer.clientHeight + 1) more.remove();
+      else answer.classList.add("folded");
+    });
+  }
+  const actions = el("div", "task-card-actions sr-actions");
+  if (scheduleRunSession(schedule, run)) {
+    const open = el("button", "btn btn-sm", "Open conversation");
+    open.type = "button";
+    open.onclick = () => openScheduleRun(schedule, run);
+    actions.appendChild(open);
+  }
+  if (run.state === "working" || run.state === "starting") {
+    const stop = el("button", "btn btn-sm", "Stop");
+    stop.type = "button";
+    stop.onclick = () => scheduleStop(schedule, stop);
+    actions.appendChild(stop);
+  } else {
+    const remove = el("button", "btn btn-sm btn-danger", "Delete");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Delete run ${run.n}` + (run.kept && run.session ?
+      " and its conversation" : ""));
+    remove.onclick = () => onDelete(run, remove);
+    actions.appendChild(remove);
+  }
+  node.appendChild(actions);
+  return node;
+}
+
+function modalScheduleHistory(id) {
+  if (!scheduleById(id)) return null;
+  const { m, close, onClose } = modal(`<h2></h2>
+    <div class="schedule-facts"></div>
+    <div class="schedule-runs-section">
+      <div class="field-lbl">Runs <span class="field-optional"></span></div>
+      <div class="schedule-runs" aria-live="polite"><p class="help">Loading…</p></div>
+    </div>
+    <p class="form-error hidden" role="alert"></p>
+    <div class="m-btns"><button type="button" class="btn" id="sh-close">Close</button>
+      <button type="button" class="btn" id="sh-edit">Edit</button>
+      <button type="button" class="btn btn-pri" id="sh-run">Run now</button></div>`,
+    "schedule-history-modal", () => { if (scheduleById(id)) modalScheduleHistory(id); });
+  scheduleSheets.add(close);
+  onClose(() => scheduleSheets.delete(close));
+  const facts = m.querySelector(".schedule-facts"), runsBox = m.querySelector(".schedule-runs");
+  const count = m.querySelector(".schedule-runs-section .field-optional");
+  const error = m.querySelector(".form-error"), runButton = m.querySelector("#sh-run");
+  let runs = null, generation = 0, readSignature = "";
+  m.querySelector("#sh-close").onclick = close;
+  m.querySelector("#sh-edit").onclick = () => modalScheduleEditor(id);
+  const fact = (label, value, tone = "") => {
+    const row = el("div", "ws-fact");
+    row.appendChild(el("span", "field-lbl", label));
+    row.appendChild(el("span", "wsf-v" + (tone ? " " + tone : ""), value));
+    facts.appendChild(row);
+  };
+  const setError = text => {
+    error.textContent = text || "";
+    error.classList.toggle("hidden", !text);
+  };
+  const remove = async (run, button) => {
+    const conversation = run.kept && run.session;
+    if (!await modalConfirm(`Delete run ${run.n}?`, conversation ?
+        "The entry leaves the history and its conversation is deleted." :
+        "The entry leaves the history.", { confirmLabel: "Delete", destructive: true })) return;
+    button.disabled = true;
+    try {
+      await api(0, `schedules/${id}/runs/${run.n}`, { method: "DELETE", timeoutMs: 60000 });
+      read();
+    } catch (e) {
+      if (button.isConnected) button.disabled = false;
+      setError(`Could not delete run ${run.n} · ${e.message}`);
+    }
+  };
+  const render = () => {
+    if (!m.isConnected) return;
+    const schedule = scheduleById(id);
+    if (!schedule) { close(); return; }
+    m.querySelector("h2").textContent = schedule.name;
+    facts.replaceChildren();
+    const standing = scheduleStateText(schedule);
+    fact("State", standing.text, standing.tone);
+    fact("Repeats", scheduleTimingText(schedule.timing) + (schedule.until ?
+      ` · until ${scheduleDateText(schedule.until)}` : "") + (schedule.max_runs ?
+      ` · ${schedule.scheduled_runs} of ${schedule.max_runs} runs` : ""));
+    if (schedule.upcoming && schedule.upcoming.length > 1)
+      fact("Then", schedule.upcoming.slice(1).map(fmtStamp).join(" · "));
+    fact("Runs on", scheduleTargetText(schedule));
+    fact("Directory", schedule.workspace_kind === "temporary" ? "A new scratch workspace each run" : schedule.cwd);
+    fact("Notify", scheduleOptionLabel(SCHEDULE_NOTIFY, schedule.notify, schedule.notify) +
+      (schedule.alert_command ? " · with the alert command" : ""));
+    const working = schedule.state === "working";
+    runButton.textContent = working ? "Stop" : "Run now";
+    runButton.onclick = () => working ? scheduleStop(schedule, runButton) : scheduleRunNow(schedule, runButton);
+    /* the runs follow the topic: a changed latest run reads the history again */
+    const signature = JSON.stringify([schedule.run, schedule.runs]);
+    if (signature !== readSignature) { readSignature = signature; read(); }
+    else drawRuns(schedule);
+  };
+  const drawRuns = schedule => {
+    if (!runs) return;
+    count.textContent = runs.length ? `· ${runs.length}` : "";
+    if (!runs.length) {
+      runsBox.replaceChildren(el("p", "help", "No runs yet."));
+      return;
+    }
+    runsBox.replaceChildren(...runs.map(run => scheduleRunNode(schedule, run, remove)));
+  };
+  const read = async () => {
+    const mine = ++generation;
+    try {
+      const data = await api(0, `schedules/${id}`);
+      if (mine !== generation || !m.isConnected) return;
+      runs = Array.isArray(data.runs) ? data.runs : [];
+      setError("");
+      const schedule = scheduleById(id);
+      if (schedule) drawRuns(schedule);
+    } catch (e) {
+      if (mine !== generation || !m.isConnected) return;
+      if (e.status === 404) { close(); return; }
+      setError(`Could not read the history · ${e.message}`);
+      if (!runs) runsBox.replaceChildren();
+    }
+  };
+  scheduleStateListeners.add(render);
+  onClose(() => scheduleStateListeners.delete(render));
+  render();
+  loadMarkdownLibraries().then(() => {
+    const schedule = scheduleById(id);
+    if (m.isConnected && schedule) drawRuns(schedule);
+  }).catch(() => {});
+  runButton.focus();
+  return { m, close };
+}
+
+/* ---- the editor ---- */
+function scheduleTimesValue(text) {
+  const parts = String(text || "").split(/[,;]/).map(part => part.trim()).filter(Boolean);
+  const times = parts.map(parseClockSetting);
+  if (!parts.length || times.some(value => !value)) return null;
+  return [...new Set(times)].sort();
+}
+
+function scheduleMonthDaysValue(text) {
+  const parts = String(text || "").split(/[,;\s]+/).map(part => part.trim().toLowerCase()).filter(Boolean);
+  const days = parts.map(part => part === "last" ? -1 : /^\d{1,2}$/.test(part) &&
+    Number(part) >= 1 && Number(part) <= 31 ? Number(part) : null);
+  if (!parts.length || days.some(day => day === null)) return null;
+  return [...new Set(days)].sort((a, b) => a - b);
+}
+
+function scheduleLocalDate(at = new Date()) {
+  const pad = n => String(n).padStart(2, "0");
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+}
+
+/* A fresh schedule: the backend's saved defaults for its first engine,
+   tomorrow's 06:00 on every day, and the sheet's own defaults. */
+function scheduleBlank() {
+  const limits = state.schedules ? state.schedules.limits : {};
+  return { name: "", prompt: "", enabled: true, backend: 0, engine: "", model: "", effort: "",
+    permission_mode: "", workspace_kind: "directory", cwd: state.defaultCwd || "/",
+    timing: { kind: "daily", times: ["06:00"] }, until: "", max_runs: 0, late: "run",
+    limit_minutes: Number(limits.limit_default) || 60, notify: "failure", alert_command: false,
+    keep: Number(limits.keep_default) || 10 };
+}
+
+async function modalScheduleEditor(id = null, copyOf = null) {
+  const editing = !!id;
+  const source = id || copyOf;
+  const limits = state.schedules ? state.schedules.limits : {};
+  let submitting = false;
+  const { m, close, onClose } = modal(`<form class="schedule-form" novalidate>
+    <h2>${editing ? "Edit schedule" : "New schedule"}</h2>
+    <label>Name<input type="text" id="sc-name" maxlength="80" autocomplete="off" required></label>
+    <label for="sc-prompt" class="task-composer-lbl">Prompt</label>
+    ${composerBoxHtml({ id: "sc-prompt", rows: 4,
+      placeholder: "What should the agent do each time?", className: "mention-below" })}
+    <div class="field-row">
+      <label>Backend<select id="sc-backend"></select></label>
+      <label>Engine<select id="sc-engine"></select></label>
+    </div>
+    <div class="field-row">
+      <label>Model<select id="sc-model"></select></label>
+      <label>Effort<select id="sc-effort"></select></label>
+      <label>Permissions<select id="sc-perm"></select></label>
+    </div>
+    <label class="hidden" id="sc-custom-wrap">Custom model<input type="text" id="sc-custom"
+      placeholder="Model ID" spellcheck="false" maxlength="256"></label>
+    <p class="hint">Nobody answers approvals during a run: one that needs an answer waits for
+      you, and the schedule says so when it notifies.</p>
+    <div class="field-lbl">Workspace
+      <div class="workspace-pick" id="sc-workspace">
+        <button type="button" class="wp sel" data-kind="directory" aria-pressed="true">
+          <span class="wp-name">Directory</span><span class="wp-sub">Work in a folder</span></button>
+        <button type="button" class="wp" data-kind="temporary" aria-pressed="false">
+          <span class="wp-name">Scratch</span><span class="wp-sub">An empty folder each run</span></button>
+      </div>
+    </div>
+    <div id="sc-dir-fields">
+      <label>Working directory<input type="text" id="sc-cwd" spellcheck="false" autocomplete="off"></label>
+      <div class="dirpick hidden" id="sc-dirs"></div>
+    </div>
+    <div class="field-row schedule-when-row">
+      <label>Repeats<select id="sc-kind"></select></label>
+      <label class="sc-k sc-once">Date<input type="date" id="sc-date"></label>
+      <label class="sc-k sc-once">Time<input type="text" id="sc-time" autocomplete="off" spellcheck="false"></label>
+      <label class="sc-k sc-interval">Every<input type="number" id="sc-every" min="1" step="1" inputmode="numeric"></label>
+      <label class="sc-k sc-interval">Unit<select id="sc-unit"></select></label>
+      <label class="sc-k sc-monthly">Days of the month<input type="text" id="sc-mdays" autocomplete="off"
+        spellcheck="false" placeholder="1, 15, last"></label>
+      <label class="sc-k sc-daily sc-weekly sc-monthly">At<input type="text" id="sc-times" autocomplete="off"
+        spellcheck="false"></label>
+      <label class="sc-k sc-cron">Expression<input type="text" id="sc-cron" class="mono" autocomplete="off"
+        spellcheck="false" placeholder="0 6 * * 1-5"></label>
+    </div>
+    <div class="field-row sc-k sc-interval">
+      <label>Starting on<input type="date" id="sc-from-date"></label>
+      <label>At<input type="text" id="sc-from-time" autocomplete="off" spellcheck="false"></label>
+    </div>
+    <div class="field-lbl sc-k sc-weekly">Days
+      <div class="seg schedule-days" id="sc-days" role="group" aria-label="Days of the week"></div></div>
+    <div class="field-row sc-k sc-interval sc-daily sc-weekly sc-monthly sc-cron">
+      <label>Ends<select id="sc-ends"></select></label>
+      <label class="sc-end sc-end-date">On<input type="date" id="sc-until"></label>
+      <label class="sc-end sc-end-count">After<input type="number" id="sc-count" min="1" step="1" inputmode="numeric"></label>
+    </div>
+    <p class="hint schedule-preview" id="sc-preview" aria-live="polite"></p>
+    <div class="field-row">
+      <label>When a run cannot start on time<select id="sc-late"></select></label>
+      <label>Stop a run after <span class="field-optional">(minutes, 0 for never)</span>
+        <input type="number" id="sc-limit" min="0" max="${Number(limits.limit_minutes) || 1440}" step="1" inputmode="numeric"></label>
+    </div>
+    <div class="field-row">
+      <label>Notify me<select id="sc-notify"></select></label>
+      <label>Conversations to keep<input type="number" id="sc-keep" min="1" max="${Number(limits.keep) || 50}"
+        step="1" inputmode="numeric"></label>
+    </div>
+    <label class="check" id="sc-alert-wrap"><input type="checkbox" id="sc-alert"> Also run the completion alert command</label>
+    <p class="hint" id="sc-alert-hint"></p>
+    <label class="check"><input type="checkbox" id="sc-enabled"> Run it on this schedule</label>
+    <p class="form-error hidden" role="alert"></p>
+    <div class="m-btns"><button type="button" class="btn" id="sc-cancel">Cancel</button>
+      <button type="submit" class="btn btn-pri" id="sc-save">${editing ? "Save schedule" : "Create schedule"}</button></div>
+  </form>`, "schedule-editor-modal", () => {
+    if (!editing || scheduleById(id)) modalScheduleEditor(id, copyOf);
+  });
+  const $$ = selector => m.querySelector(selector);
+  const form = $$(".schedule-form"), errorLine = $$(".form-error"), save = $$("#sc-save");
+  const name = $$("#sc-name"), backendSel = $$("#sc-backend"), engineSel = $$("#sc-engine");
+  const modelSel = $$("#sc-model"), effortSel = $$("#sc-effort"), permSel = $$("#sc-perm");
+  const custom = $$("#sc-custom"), customWrap = $$("#sc-custom-wrap");
+  const cwd = $$("#sc-cwd"), dirs = $$("#sc-dirs"), dirFields = $$("#sc-dir-fields");
+  const workspaceBox = $$("#sc-workspace"), kindSel = $$("#sc-kind"), unitSel = $$("#sc-unit");
+  const endsSel = $$("#sc-ends"), lateSel = $$("#sc-late"), notifySel = $$("#sc-notify");
+  const preview = $$("#sc-preview"), daysBox = $$("#sc-days");
+  const alert = $$("#sc-alert"), alertHint = $$("#sc-alert-hint"), enabled = $$("#sc-enabled");
+  const field = idName => $$("#" + idName);
+  const fail = text => {
+    errorLine.textContent = text || "";
+    errorLine.classList.toggle("hidden", !text);
+  };
+  $$("#sc-cancel").onclick = close;
+  const composer = new Composer($$(".composer-box"), {
+    bid: 0, sid: null, submit: () => form.requestSubmit(),
+    uploadsBlocked: () => "A scheduled prompt is text only", privateUploads: () => false,
+  });
+  onClose(() => composer.destroy({ discardUploads: false }));
+
+  const fillSimple = (select, options, value) => {
+    select.replaceChildren(...options.map(option => {
+      const node = el("option", "", option.label);
+      node.value = option.value;
+      return node;
+    }));
+    select.value = value;
+    refreshChoiceSelect(select);
+  };
+  fillSimple(kindSel, SCHEDULE_KINDS, "daily");
+  fillSimple(unitSel, SCHEDULE_UNITS, "minutes");
+  fillSimple(endsSel, SCHEDULE_ENDS, "never");
+  fillSimple(lateSel, SCHEDULE_LATE, "run");
+  fillSimple(notifySel, SCHEDULE_NOTIFY, "failure");
+  const dayButtons = SCHEDULE_WEEKDAYS.map((label, index) => {
+    const button = el("button", "seg-btn", label);
+    button.type = "button";
+    button.dataset.day = String(index + 1);
+    button.setAttribute("aria-pressed", "false");
+    button.onclick = () => {
+      const on = button.getAttribute("aria-pressed") !== "true";
+      button.setAttribute("aria-pressed", on ? "true" : "false");
+      button.classList.toggle("on", on);
+      schedulePreview();
+    };
+    daysBox.appendChild(button);
+    return button;
+  });
+  const setDays = days => {
+    for (const button of dayButtons) {
+      const on = days.includes(Number(button.dataset.day));
+      button.setAttribute("aria-pressed", on ? "true" : "false");
+      button.classList.toggle("on", on);
+    }
+  };
+
+  /* where it runs: the backends that can run schedules, their engines and
+     those engines' own choices, kept when a catalog refreshes */
+  let workspaceKind = "directory";
+  const pickWorkspace = kind => {
+    workspaceKind = kind;
+    for (const button of workspaceBox.querySelectorAll(".wp")) {
+      const selected = button.dataset.kind === kind;
+      button.classList.toggle("sel", selected);
+      button.setAttribute("aria-pressed", selected ? "true" : "false");
+    }
+    dirFields.classList.toggle("hidden", kind !== "directory");
+    dirs.classList.add("hidden");
+  };
+  for (const button of workspaceBox.querySelectorAll(".wp")) button.onclick = () => pickWorkspace(button.dataset.kind);
+  const currentBid = () => parseInt(backendSel.value, 10) || 0;
+  const renderBackends = selected => {
+    const nodes = [{ id: 0, name: backendName(0) }].concat(state.backends);
+    backendSel.replaceChildren(...nodes.map(node => {
+      const capable = !node.id || backendHasCapability(node, "session-schedule-runs");
+      const offline = !!node.id && !backendConnectionAllowed(node.id);
+      const option = el("option", "", node.name + (!capable ? " (needs a Puppy upgrade)" :
+        offline ? " (offline)" : ""));
+      option.value = String(node.id || 0);
+      option.disabled = !capable;
+      return option;
+    }));
+    backendSel.value = String(selected || 0);
+    if (backendSel.value !== String(selected || 0)) backendSel.value = "0";
+    refreshChoiceSelect(backendSel);
+  };
+  const modelValue = () => modelSel.value === "__custom__" ? custom.value.trim() : modelSel.value;
+  const renderEngine = (choice, keepEngine = true) => {
+    const bid = currentBid();
+    const engines = scheduleEnginesFor(bid);
+    const key = keepEngine && engines.some(item => item.key === choice.engine) ? choice.engine :
+      (engines[0] && engines[0].key) || choice.engine || "";
+    fillEngineChoice(engineSel, engines.map(item => ({ value: item.key,
+      label: item.label + (item.installed === false ? " (not installed)" : "") })), key);
+    const info = engines.find(item => item.key === key) || null;
+    const defaults = info && info.session_defaults ? info.session_defaults : {};
+    const fresh = !keepEngine || key !== choice.engine;
+    const model = fresh ? (defaults.model || "") : choice.model;
+    const customAllowed = !info || info.allow_custom_model !== false;
+    const offered = engineOffersModel(info, model);
+    const isCustom = customAllowed && !!model && !offered && !engineCatalogPending(info);
+    const options = modelOptionsForPicker(info, model);
+    if (!isCustom) options.push(...pendingModelRows(info, model));
+    if (customAllowed) options.push({ value: "__custom__", label: "Custom…" });
+    custom.value = isCustom ? model : "";
+    fillEngineChoice(modelSel, options, isCustom ? "__custom__" : model);
+    customWrap.classList.toggle("hidden", !isCustom);
+    fillEngineChoice(effortSel, effortOptionsForModel(info, model), fresh ? (defaults.effort || "") : choice.effort);
+    fillEngineChoice(permSel, (info && info.permission_options) || [],
+      fresh ? (defaults.permission_mode || "") : choice.permission_mode);
+  };
+  const current = () => ({ engine: engineSel.value, model: modelValue(), effort: effortSel.value,
+    permission_mode: permSel.value });
+  const syncEffort = () => {
+    const info = scheduleEnginesFor(currentBid()).find(item => item.key === engineSel.value);
+    const options = effortOptionsForModel(info, modelValue());
+    fillEngineChoice(effortSel, options, options.some(item => item.value === effortSel.value) ?
+      effortSel.value : "");
+    customWrap.classList.toggle("hidden", modelSel.value !== "__custom__");
+  };
+  modelSel.onchange = syncEffort;
+  custom.oninput = syncEffort;
+  engineSel.onchange = () => renderEngine({ ...current(), engine: engineSel.value }, false);
+  let engineRead = 0;
+  const loadEngines = async () => {
+    const bid = currentBid(), mine = ++engineRead;
+    const known = scheduleEnginesFor(bid);
+    if (known.length && !known.some(engineCatalogPending)) return;
+    try {
+      const data = await api(bid, "engines", { timeoutMs: ENGINE_POLL_TIMEOUT });
+      if (mine !== engineRead || !m.isConnected) return;
+      if (!data || !Array.isArray(data.engines)) throw new Error("the backend sent no engine list");
+      rememberEnginePayload(bid, data);
+    } catch (e) {
+      if (mine === engineRead && m.isConnected && !scheduleEnginesFor(bid).length)
+        fail(`Could not read this backend's engines · ${e.message}`);
+    }
+  };
+  const engineListener = (bid, loaded) => {
+    if (!m.isConnected || submitting || bid !== currentBid()) return;
+    renderEngine(current(), true);
+  };
+  enginePayloadListeners.add(engineListener);
+  onClose(() => enginePayloadListeners.delete(engineListener));
+  backendSel.onchange = () => {
+    composer.host.bid = currentBid();
+    composer.syncUploadButton();
+    fail("");
+    renderEngine(current(), true);
+    loadEngines();
+  };
+  wireDirectoryPicker(cwd, dirs, currentBid);
+
+  /* when it runs: one row of fields per kind, and the instance's own answer
+     to "when next?" under them */
+  const syncKind = () => {
+    const kind = kindSel.value;
+    for (const node of m.querySelectorAll(".sc-k"))
+      node.classList.toggle("hidden", !node.classList.contains("sc-" + kind));
+    const ends = endsSel.value;
+    for (const node of m.querySelectorAll(".sc-end"))
+      node.classList.toggle("hidden", kind === "once" ||
+        !node.classList.contains(ends === "date" ? "sc-end-date" : ends === "count" ? "sc-end-count" : "none"));
+  };
+  const timingValue = () => {
+    const kind = kindSel.value;
+    if (kind === "once") {
+      const time = parseClockSetting(field("sc-time").value);
+      if (!field("sc-date").value) return { error: "Choose the date it runs on" };
+      if (!time) return { error: `Use a time like ${clockSettingExample()}` };
+      return { timing: { kind, date: field("sc-date").value, time } };
+    }
+    if (kind === "interval") {
+      const every = Number(field("sc-every").value);
+      const factor = (SCHEDULE_UNITS.find(item => item.value === unitSel.value) || SCHEDULE_UNITS[0]).factor;
+      const time = parseClockSetting(field("sc-from-time").value);
+      if (!Number.isInteger(every) || every < 1) return { error: "Repeat every whole number of minutes, hours or days" };
+      if (!field("sc-from-date").value) return { error: "Choose the date it starts on" };
+      if (!time) return { error: `Use a start time like ${clockSettingExample()}` };
+      return { timing: { kind, minutes: every * factor, date: field("sc-from-date").value, time } };
+    }
+    if (kind === "cron") {
+      const expr = field("sc-cron").value.trim();
+      if (!expr) return { error: "Enter a cron expression: minute hour day month weekday" };
+      return { timing: { kind, expr } };
+    }
+    const times = scheduleTimesValue(field("sc-times").value);
+    if (!times) return { error: `Use times like ${clockSettingExample()}, separated by commas` };
+    if (kind === "daily") return { timing: { kind, times } };
+    if (kind === "weekly") {
+      const days = dayButtons.filter(button => button.getAttribute("aria-pressed") === "true")
+        .map(button => Number(button.dataset.day));
+      if (!days.length) return { error: "Choose the days of the week it runs on" };
+      return { timing: { kind, days, times } };
+    }
+    const days = scheduleMonthDaysValue(field("sc-mdays").value);
+    if (!days) return { error: "Use days of the month like 1, 15, last" };
+    return { timing: { kind, days, times } };
+  };
+  const endsValue = () => {
+    if (kindSel.value === "once" || endsSel.value === "never") return { until: "", max_runs: 0 };
+    if (endsSel.value === "date") {
+      if (!field("sc-until").value) return { error: "Choose the date it ends on" };
+      return { until: field("sc-until").value, max_runs: 0 };
+    }
+    const count = Number(field("sc-count").value);
+    if (!Number.isInteger(count) || count < 1) return { error: "Stop after a whole number of runs" };
+    return { until: "", max_runs: count };
+  };
+  let previewTimer = null, previewRead = 0;
+  const zone = () => state.schedules && state.schedules.timezone ?
+    ` · times are in this instance's time zone, ${state.schedules.timezone}` : "";
+  function schedulePreview() {
+    syncKind();
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(async () => {
+      const { timing, error } = timingValue();
+      const ends = endsValue();
+      const mine = ++previewRead;
+      preview.classList.remove("bad");
+      if (error || ends.error) {
+        preview.textContent = error || ends.error;
+        return;
+      }
+      try {
+        const data = await api(0, "schedules/preview", { method: "POST",
+          body: { timing, until: ends.until, max_runs: ends.max_runs } });
+        if (mine !== previewRead || !m.isConnected) return;
+        const next = Array.isArray(data.next) ? data.next : [];
+        preview.textContent = (next.length ? "Next: " + next.slice(0, 3).map(fmtStamp).join(" · ") :
+          "Nothing left to run with these times") + zone();
+      } catch (e) {
+        if (mine !== previewRead || !m.isConnected) return;
+        preview.textContent = e.message;
+        preview.classList.add("bad");
+      }
+    }, SCHEDULE_PREVIEW_MS);
+  }
+  for (const control of [kindSel, unitSel, endsSel])
+    control.addEventListener("change", schedulePreview);
+  for (const idName of ["sc-date", "sc-time", "sc-every", "sc-from-date", "sc-from-time", "sc-cron",
+      "sc-times", "sc-mdays", "sc-until", "sc-count"])
+    field(idName).addEventListener("input", schedulePreview);
+  /* a clock typed in the server's face is shown back in it once it parses */
+  for (const idName of ["sc-time", "sc-from-time"])
+    field(idName).addEventListener("blur", () => {
+      const value = parseClockSetting(field(idName).value);
+      if (value) field(idName).value = fmtClockSetting(value);
+    });
+  field("sc-times").addEventListener("blur", () => {
+    const times = scheduleTimesValue(field("sc-times").value);
+    if (times) field("sc-times").value = times.map(fmtClockSetting).join(", ");
+  });
+
+  const syncAlert = () => {
+    const notice = state.notify || {};
+    const quiet = notifySel.value === "never";
+    alert.disabled = !notice.configured || quiet;
+    $$("#sc-alert-wrap").classList.toggle("disabled", alert.disabled);
+    alertHint.textContent = !notice.configured ?
+      "Set a command under Settings → Completion alerts to send notices outside Puppy" :
+      quiet ? "" : !notice.enabled ? "Completion alerts are silenced from the footer's bell; arm them for this to run" :
+        "A finished run uses the On success command; a failure, a miss, a flag or a wait uses On failure";
+    alertHint.classList.toggle("hidden", !alertHint.textContent);
+  };
+  notifySel.addEventListener("change", syncAlert);
+
+  /* fill the form from a schedule: a saved one, a copy, or the blank */
+  const fill = values => {
+    name.value = values.name || "";
+    composer.set(values.prompt || "");
+    renderBackends(values.backend);
+    composer.host.bid = currentBid();
+    composer.syncUploadButton();
+    renderEngine(values, !!values.engine);
+    pickWorkspace(values.workspace_kind === "temporary" ? "temporary" : "directory");
+    cwd.value = values.workspace_kind === "temporary" ? (state.defaultCwd || "/") : values.cwd;
+    const timing = values.timing || { kind: "daily", times: ["06:00"] };
+    kindSel.value = timing.kind;
+    refreshChoiceSelect(kindSel);
+    const tomorrow = new Date(Date.now() + 86400000);
+    field("sc-date").value = timing.kind === "once" ? timing.date : scheduleLocalDate(tomorrow);
+    field("sc-time").value = fmtClockSetting(timing.kind === "once" ? timing.time : "09:00");
+    const minutes = timing.kind === "interval" ? timing.minutes : 60;
+    const unit = [...SCHEDULE_UNITS].reverse().find(item => minutes % item.factor === 0) || SCHEDULE_UNITS[0];
+    field("sc-every").value = String(minutes / unit.factor);
+    unitSel.value = unit.value;
+    refreshChoiceSelect(unitSel);
+    const now = new Date(Math.ceil(Date.now() / 300000) * 300000);
+    field("sc-from-date").value = timing.kind === "interval" ? timing.date : scheduleLocalDate(now);
+    field("sc-from-time").value = fmtClockSetting(timing.kind === "interval" ? timing.time :
+      `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`);
+    field("sc-cron").value = timing.kind === "cron" ? timing.expr : "";
+    field("sc-times").value = (timing.times || ["06:00"]).map(fmtClockSetting).join(", ");
+    setDays(timing.kind === "weekly" ? timing.days : [((new Date().getDay() + 6) % 7) + 1]);
+    field("sc-mdays").value = timing.kind === "monthly" ?
+      timing.days.map(day => day === -1 ? "last" : String(day)).join(", ") : "1";
+    endsSel.value = values.until ? "date" : values.max_runs ? "count" : "never";
+    refreshChoiceSelect(endsSel);
+    field("sc-until").value = values.until || scheduleLocalDate(new Date(Date.now() + 30 * 86400000));
+    field("sc-count").value = String(values.max_runs || 10);
+    lateSel.value = values.late || "run";
+    refreshChoiceSelect(lateSel);
+    field("sc-limit").value = String(values.limit_minutes);
+    notifySel.value = values.notify || "failure";
+    refreshChoiceSelect(notifySel);
+    field("sc-keep").value = String(values.keep);
+    alert.checked = !!values.alert_command;
+    enabled.checked = values.enabled !== false;
+    syncAlert();
+    schedulePreview();
+  };
+
+  const values = () => {
+    const { timing, error } = timingValue();
+    if (error) return { error };
+    const ends = endsValue();
+    if (ends.error) return { error: ends.error };
+    const text = composer.message();
+    if (!name.value.trim()) return { error: "Give the schedule a name", focus: name };
+    if (!text) return { error: "Enter the prompt the schedule sends", focus: composer };
+    if (!engineSel.value) return { error: "Choose an engine" };
+    if (modelSel.value === "__custom__" && !custom.value.trim())
+      return { error: "Enter the custom model", focus: custom };
+    const limit = Number(field("sc-limit").value), keep = Number(field("sc-keep").value);
+    if (!Number.isInteger(limit) || limit < 0 || limit > (Number(limits.limit_minutes) || 1440))
+      return { error: `Stop a run after 0 to ${Number(limits.limit_minutes) || 1440} minutes`, focus: field("sc-limit") };
+    if (!Number.isInteger(keep) || keep < 1 || keep > (Number(limits.keep) || 50))
+      return { error: `Keep 1 to ${Number(limits.keep) || 50} conversations`, focus: field("sc-keep") };
+    if (workspaceKind === "directory" && !cwd.value.trim())
+      return { error: "Choose the working directory", focus: cwd };
+    return { body: {
+      name: name.value.trim(), prompt: text, enabled: enabled.checked, backend: currentBid(),
+      engine: engineSel.value, model: modelValue(), effort: effortSel.value,
+      permission_mode: permSel.value, workspace_kind: workspaceKind,
+      cwd: workspaceKind === "directory" ? cwd.value.trim().replace(/(.)\/+$/, "$1") : "",
+      timing, until: ends.until, max_runs: ends.max_runs, late: lateSel.value,
+      limit_minutes: limit, notify: notifySel.value,
+      alert_command: alert.checked && !alert.disabled, keep } };
+  };
+
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (submitting || !m.isConnected) return;
+    fail("");
+    const result = values();
+    if (result.error) {
+      fail(result.error);
+      if (result.focus) result.focus.focus();
+      return;
+    }
+    submitting = true;
+    save.disabled = true;
+    save.textContent = "Saving…";
+    composer.setBusy(true);
+    try {
+      const data = await api(0, editing ? `schedules/${id}` : "schedules", {
+        method: editing ? "PUT" : "POST", body: result.body, timeoutMs: ENGINE_POLL_TIMEOUT });
+      close();
+      const saved = data.schedule;
+      toast(saved && saved.next_at ? `${saved.name}: ${editing ? "Saved" : "Scheduled"} · next run ${fmtStamp(saved.next_at)}` :
+        `${result.body.name}: ${editing ? "Saved" : "Created"}`, "ok");
+    } catch (e) {
+      if (!m.isConnected) { toast(`Could not save the schedule · ${e.message}`, "bad", TOAST_LONG); return; }
+      fail(`Could not save the schedule · ${e.message}`);
+    } finally {
+      submitting = false;
+      if (m.isConnected) {
+        save.disabled = false;
+        save.textContent = editing ? "Save schedule" : "Create schedule";
+        composer.setBusy(false);
+      }
+    }
+  };
+
+  renderBackends(0);
+  fill(scheduleBlank());
+  if (source) {
+    form.setAttribute("aria-busy", "true");
+    save.disabled = true;
+    try {
+      const data = await api(0, `schedules/${source}`);
+      if (!m.isConnected) return;
+      const saved = data.schedule;
+      fill(copyOf ? { ...saved, name: `${saved.name} (copy)`.slice(0, 80) } : saved);
+    } catch (e) {
+      if (!m.isConnected) return;
+      fail(`Could not read the schedule · ${e.message}`);
+      return;
+    } finally {
+      if (m.isConnected) {
+        form.setAttribute("aria-busy", "false");
+        save.disabled = false;
+      }
+    }
+  }
+  loadEngines();
+  /* a new schedule is a dialog opened to type into; an edit only where the
+     caret may land by itself */
+  if (!editing || focusOnShow()) name.focus();
+}
+
+$("btn-schedules").onclick = () => modalSchedules();
+
 $("toggle-archived").onclick = () => { state.showArchived = !state.showArchived; renderSidebar(); };
 
 /* ---- sidebar quick-search ----
@@ -11901,6 +13056,7 @@ if (logoutButton) {
 }
 $("btn-notices").appendChild(trayIcon(14));
 $("btn-usage").appendChild(usageIcon(14));
+$("btn-schedules").appendChild(scheduleIcon(14));
 
 $("btn-bell").onclick = async () => {
   const want = !(state.notify && state.notify.enabled);
@@ -20771,6 +21927,28 @@ class SessionView {
     chip.onclick = () => modalWorkspaceLink(this.tab.bid, s);
   }
 
+  /* A schedule's run names its schedule and run after its location; the chip
+     opens that schedule's history while this console knows the schedule. */
+  syncScheduleChip() {
+    const scroll = this.root && this.root.querySelector(".chat-meta-scroll");
+    if (!scroll) return;
+    const mark = this.session && this.session.schedule;
+    let chip = scroll.querySelector(".chip.schedule");
+    if (!mark || typeof mark !== "object") { if (chip) chip.remove(); return; }
+    const known = !!scheduleById(mark.id);
+    if (!chip || (chip.tagName === "BUTTON") !== known) {
+      if (chip) chip.remove();
+      chip = el(known ? "button" : "span", "chip schedule");
+      if (known) chip.type = "button";
+      const after = scroll.querySelector(".chip.ws") || scroll.querySelector(".chip.cwd");
+      scroll.insertBefore(chip, after ? after.nextSibling : scroll.querySelector(".chat-status"));
+    }
+    chip.replaceChildren(scheduleIcon(11), el("span", "chip-text", `${mark.name} · run ${mark.run}`));
+    chip.setAttribute("aria-label", `Started by the schedule ${mark.name}, run ${mark.run}` +
+      (known ? " · show its history" : ""));
+    chip.onclick = known ? () => modalScheduleHistory(mark.id) : null;
+  }
+
   /* The strip shows or hides with the session's setting - Main's, for a
      task - wherever that is known from: the socket, the list, a menu press. */
   syncMetaVisibility() {
@@ -20815,6 +21993,7 @@ class SessionView {
       `Project location · ${workspaceLocationTitle(s, this.tab.bid)}`);
     cwd.classList.toggle("warn", !!s.workspace_missing);
     this.syncWorkspaceChip();
+    this.syncScheduleChip();
     this.syncBrowserChips();
     const setMini = (cls, label, value, pending = false, note = "") => {
       const control = this.root.querySelector(".mini." + cls);

@@ -24,7 +24,8 @@ from tests.scratch import private_root  # noqa: E402
 TEST_ROOT = private_root("snapshot-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
-from puppy import (auth, backup_schedule, cli_releases, config, db, listener_handoff, notices, notify, spelling,
+from puppy import (auth, backup_schedule, cli_releases, config, db, listener_handoff, notices, notify,
+                   schedules, spelling,
                    runner as session_runner, snapshots, terminal, token_usage, uploads,
                    web_tls, workspace_sync,
                    workspaces)  # noqa: E402
@@ -364,6 +365,24 @@ async def main() -> None:
                 "SELECT key,value FROM meta WHERE key GLOB ?", (token_usage.PREFIX + "*",))}
         saved_usage = usage_records()
         assert list(saved_usage) == ["token_usage.2026-09-21"], saved_usage
+        # And the schedules: their settings, run history and the mark one of
+        # the run sessions carries.
+        saved_schedule = schedules.normalize_settings({
+            "name": "Log review", "prompt": "Check the logs", "enabled": True, "backend": 0,
+            "engine": "claude", "model": "", "effort": "", "permission_mode": "default",
+            "workspace_kind": "temporary", "cwd": "", "timing": {"kind": "daily", "times": ["06:00"]},
+            "until": "", "max_runs": 0, "late": "run", "limit_minutes": 60, "notify": "agent",
+            "alert_command": False, "keep": 10})
+        saved_schedule.update(format=1, id="a1b2c3d4e5f6", created_at=time.time(),
+                              updated_at=time.time(), next_at=time.time() + 600, pending_at=0.0,
+                              scheduled_runs=1)
+        saved_runs = {"format": 1, "next_run": 2, "runs": [{
+            "n": 1, "trigger": "schedule", "due_at": 1.0, "started_at": 2.0, "finished_at": 3.0,
+            "backend": 0, "session": scratch_id, "state": "ok", "reason": "", "answer": "All quiet",
+            "flag": "", "notified": False, "kept": True}]}
+        schedules._save(saved_schedule, saved_runs)
+        schedules.mark_run(scratch_id, {"format": 1, "schedule": "a1b2c3d4e5f6",
+                                        "name": "Log review", "run": 1})
         db.execute(
             "INSERT INTO workspace_links(uid,exec_backend,session_id,ws_backend,"
             "root,lease,state,generation,conflicts,resolutions,last_error,created_at) "
@@ -472,6 +491,18 @@ async def main() -> None:
             lambda: snapshots._validate_database(invalid_usage_db),
             "token usage ledger")
         invalid_usage_db.unlink()
+        invalid_schedule_db = TEST_ROOT / "invalid-schedule.db"
+        db.backup_to(str(invalid_schedule_db))
+        invalid_schedule_connection = sqlite3.connect(str(invalid_schedule_db))
+        invalid_schedule_connection.execute(
+            "UPDATE meta SET value='{\"format\":1,\"next_run\":1,\"runs\":[]}' WHERE key=?",
+            (schedules.PREFIX + "a1b2c3d4e5f6",))
+        invalid_schedule_connection.commit()
+        invalid_schedule_connection.close()
+        expect_snapshot_error(
+            lambda: snapshots._validate_database(invalid_schedule_db),
+            "schedule state")
+        invalid_schedule_db.unlink()
         missing_transport_db = TEST_ROOT / "missing-web-transport.db"
         db.backup_to(str(missing_transport_db))
         missing_transport_connection = sqlite3.connect(str(missing_transport_db))
@@ -992,6 +1023,13 @@ async def main() -> None:
             "SELECT value FROM meta WHERE key=?", (spelling.META_KEY,))["value"]) == saved_spelling
         assert usage_records() == saved_usage, "the ledger comes back as recorded, and only it"
         assert backup_schedule._load() == saved_backups, "the daily backup settings come back as recorded"
+        restored_schedule = schedules._load("a1b2c3d4e5f6")
+        assert {key: value for key, value in restored_schedule.items() if key != "next_at"} == \
+            {key: value for key, value in saved_schedule.items() if key != "next_at"}, \
+            "a schedule comes back as recorded, its next run counted from the restore"
+        assert restored_schedule["next_at"] > 0
+        assert schedules._load_history("a1b2c3d4e5f6") == saved_runs
+        assert schedules.run_record(scratch_id)["schedule"] == "a1b2c3d4e5f6"
         restored_mirror = Path(restored_linked["cwd"])
         assert restored_mirror.is_dir()
         assert not (restored_mirror / "clean-cache.txt").exists()

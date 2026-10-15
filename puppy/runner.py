@@ -17,7 +17,7 @@ import uuid
 from puppy import (agent_notes, browser_agent, config, db, engine_defaults, handoff, notify, spawn_agent,
                    system_prompts, task_agent, terminal_agent, vnc_agent,
                    session_agent, session_directories, session_git, session_links, uploads, workspace_sync,
-                   workspaces, session_tasks, session_titles, token_usage, tool_calls)
+                   workspaces, schedules, session_tasks, session_titles, token_usage, tool_calls)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
 from puppy.drivers import messages as engine_messages
@@ -385,6 +385,10 @@ def session_payload(session):
     out["tasks_enabled"] = session_tasks.enabled(session["id"])
     out["tasks_digest"] = session_tasks.digest_enabled(session["id"])
     out["auto_title"] = session_titles.public(session_titles.record(session["id"]))
+    # the schedule a run session belongs to (schedules), when one started it
+    run = schedules.run_payload(session["id"])
+    if run is not None:
+        out["schedule"] = run
     out["fast_mode"] = bool(out.get("fast_mode"))
     # Another model answering in place of the requested one, while it is the
     # one last_model names (see SessionHub._note_effective_model).
@@ -657,6 +661,7 @@ def sessions_payload() -> dict:
         })
     session_tasks.decorate(sessions)
     session_titles.decorate(sessions)
+    schedules.decorate(sessions)
     return {"type": "sessions", "server_time": now, "sessions": sessions}
 
 
@@ -2729,6 +2734,10 @@ class SessionHub:
                 int(time.time() - block_started) if block_started else 0)
         except Exception:
             log.exception("completion notify failed for session %s", self.id)
+        try:
+            schedules.local_changed(self.id)
+        except Exception:
+            log.exception("schedule wake failed for session %s", self.id)
         return completion_status
 
     async def interrupt(self, clear_queue: bool = False) -> None:
@@ -2834,7 +2843,7 @@ class SessionHub:
         if not isinstance(answers, dict):
             answers = None
         self.pending_approval = None
-        if session_tasks.record(self.id):
+        if session_tasks.record(self.id) or schedules.run_record(self.id):
             broadcast_sessions()
         session = db.get_session(self.id)
         driver = get_driver(session["engine"])
@@ -3883,14 +3892,14 @@ class SessionHub:
                         # stored raw: the reply must echo the engine's own
                         # paths, so only the broadcast copy is rewritten
                         self.pending_approval = act["req"]
-                        if session_tasks.record(self.id):
+                        if session_tasks.record(self.id) or schedules.run_record(self.id):
                             broadcast_sessions()
                         self.broadcast({"type": "approval_request",
                                         "req": self._scrub_value(act["req"])})
                     elif a == "approval_cancel":
                         if self.pending_approval and self.pending_approval.get("request_id") == act.get("request_id"):
                             self.pending_approval = None
-                            if session_tasks.record(self.id):
+                            if session_tasks.record(self.id) or schedules.run_record(self.id):
                                 broadcast_sessions()
                         self.broadcast({"type": "approval_resolved",
                                         "request_id": act.get("request_id", ""), "behavior": "cancelled"})

@@ -30,9 +30,10 @@ from puppy import config, db, operations, protocol, workspace_sync
 
 log = logging.getLogger("puppy.notify")
 
-# {placeholder} substitutions (shell-quoted) and PUPPY_* environment variables
+# {placeholder} substitutions (shell-quoted) and PUPPY_* environment variables;
+# ``message`` is a schedule notice's own text and empty for a completion
 PLACEHOLDERS = ("backend", "session", "engine", "model", "status", "duration",
-                "duration_hms", "cwd", "id")
+                "duration_hms", "cwd", "id", "message")
 EXEC_TIMEOUT = 30.0
 MAX_COMMAND = config.MAX_NOTIFY_COMMAND
 COMPLETION_VERSION = 1
@@ -269,7 +270,7 @@ def clean_info(info) -> dict:
     limits = {
         "backend": 300, "session": 300, "engine": 80, "model": 300,
         "status": 40, "duration": 40, "duration_hms": 40,
-        "cwd": 4096, "id": 80,
+        "cwd": 4096, "id": 80, "message": 500,
     }
     out = {key: str(info.get(key) or "")[:limits[key]]
            for key in PLACEHOLDERS if info.get(key)}
@@ -349,7 +350,8 @@ def session_finished(session: dict, status: str, duration_s: int):
     if session is None:
         return None
     record = _record_completion(session, status, duration_s)
-    if status != "interrupted" and active():
+    # a schedule's run is told about by its schedule, never as a completion
+    if status != "interrupted" and active() and not _scheduled(0, record["session_id"]):
         asyncio.ensure_future(_fire({
             **record,
             "backend": config.get("instance_name") or "local",
@@ -367,6 +369,11 @@ async def _fire(info: dict) -> None:
                                                              (result.get("output") or "")[:200]))
     except Exception:
         log.exception("completion command failed")
+
+
+def _scheduled(bid: int, sid: int) -> bool:
+    from puppy import schedules
+    return schedules.claims(bid, sid)
 
 
 def _cursor_key(bid: int) -> str:
@@ -501,7 +508,8 @@ async def _poll_backend(backend: dict) -> None:
             log.warning("backend %s completion history rolled over before cursor %s",
                         bid, after)
         for item in checked:
-            if item["status"] != "interrupted" and active():
+            if item["status"] != "interrupted" and active() and \
+                    not _scheduled(bid, item["session_id"]):
                 await _fire({
                     **item, "backend": str(backend.get("name") or bid),
                     "id": str(item["session_id"]),

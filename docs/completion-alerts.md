@@ -14,8 +14,15 @@ durable completion cursor; an open browser is not required.
 
 Both commands support the existing shell-quoted placeholders and matching
 `PUPPY_*` environment variables: `backend`, `session`, `engine`, `model`, `status`,
-`duration`, `duration_hms`, `cwd`, and `id`. Tests supply `ok` or `error` consistently
-to both `{status}` and `PUPPY_STATUS`. Execution still uses `/api/notify/exec` on
+`duration`, `duration_hms`, `cwd`, `id`, and `message`. Tests supply `ok` or `error`
+consistently to both `{status}` and `PUPPY_STATUS`.
+
+A scheduled run's completion never fires these commands by itself; its schedule
+decides what is told (see [Scheduled prompts](schedules.md)). A schedule set to
+**Also run the completion alert command** runs **On success** for a finished run
+and **On failure** for a failed, stopped, missed, waiting or flagged one, with
+`{session}` the schedule's name and `{message}` (`PUPPY_MESSAGE`) the notice's
+text. For an ordinary completion `{message}` is empty. Execution still uses `/api/notify/exec` on
 the selected backend, whose shell surface must be enabled.
 
 ## Persisted configuration

@@ -950,6 +950,19 @@ headless node only keeps the records and runs the jobs it is asked to. The
 `titles` config section is required on every runtime. See
 [Session titles](../docs/session-titles.md).
 
+## Scheduled runs
+
+Nodes advertising `session-schedule-runs` mark the sessions a controller's
+schedule starts: `POST /api/sessions` accepts an optional `schedule` object
+(`{"id", "name", "run"}`: the schedule's 12-hex-character id, its name and the
+run's number), kept as the exact `session_schedule.<sid>` meta record,
+validated at startup and on restore and deleted with the session. Every session
+payload carries it as the additive `schedule` (`{"id", "name", "run",
+"waiting"}`, `waiting` true while the run waits for an approval), and the
+session list is re-sent when that changes. The schedules, their timing and
+their history live on the controller; a node keeps nothing else and needs no
+configuration. See [Scheduled prompts](../docs/schedules.md).
+
 ## Git repositories
 
 Nodes advertising `session-git` carry the additive `git` field on every
