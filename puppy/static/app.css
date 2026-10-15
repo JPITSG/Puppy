@@ -588,6 +588,14 @@ html.popout body::after{--side-w:0px}
 }
 .gdot.ok,.conn-dot.ok{background:var(--dot-ok)}
 .gdot.bad,.conn-dot{background:var(--dot-bad)}
+/* a lost connection breathes: the red dot pulses with a ring until it is back */
+.conn-dot:not(.ok){animation:conn-dot-pulse calc(var(--t-slow) * 8) var(--ease) infinite}
+@keyframes conn-dot-pulse{
+  0%{opacity:1;box-shadow:0 0 0 0 color-mix(in srgb,var(--dot-bad) 60%,transparent)}
+  50%{opacity:.45}
+  70%,100%{opacity:1;box-shadow:0 0 0 5px transparent}
+}
+@media (prefers-reduced-motion:reduce){.conn-dot:not(.ok){animation:none}}
 .gdot.warn{background:var(--warn)}
 /* the two remaining toast tones, for the notification rows' dots */
 .gdot.busy{background:var(--acc2)}

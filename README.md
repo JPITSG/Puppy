@@ -941,7 +941,9 @@ with a window of history around it.
   reset. Other accounts and model-specific allowances stay separate; engine
   readiness and upgrade status remain per backend. See [shared usage](docs/shared-usage.md)
   for identity requirements and freshness rules.
-- **Host activity.** The CPU reading in the footer's corner opens a box under
+- **Host activity.** The CPU reading in the footer's corner (a bare
+  percentage beside the connection dot, which pulses red while the console has
+  lost its instance) opens a box under
   the engine stats. CPU, Latency and Processes each have a chevron to collapse
   or expand their contents. All three start expanded on a fresh page and keep
   their choices through live updates and closing/reopening the box. Each node

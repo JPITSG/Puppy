@@ -3282,7 +3282,7 @@ async def sidebar_width_checks(instance, capture=False):
             return {width:side.width,left:side.left,right:side.right,viewport:innerWidth,items,
                 inset:parseFloat(getComputedStyle(foot).paddingRight),cpu:$('host-cpu').textContent};
         })()""")
-        assert value["cpu"] == "CPU 100%", (where, value)
+        assert value["cpu"] == "100%", (where, value)
         assert value["left"] >= -.1 and value["right"] <= value["viewport"] + .1, (where, value)
         for item in value["items"]:
             assert item["width"] > 0 and not item["clipped"], (where, value)
@@ -3295,6 +3295,17 @@ async def sidebar_width_checks(instance, capture=False):
         return value["width"]
 
     await viewport(1440)
+    # the connection dot pulses while it is red, and only then; reduced motion stills it
+    dot = """(() => { const d = $('conn-dot'), was = d.classList.contains('ok'), read = () => {
+        return {name: getComputedStyle(d).animationName}; };
+      d.classList.remove('ok'); const red = read(); d.classList.add('ok'); const green = read();
+      d.classList.toggle('ok', was); return {red, green}; })()"""
+    pulse = await evaluate(instance, dot)
+    assert pulse["red"]["name"] == "conn-dot-pulse" and pulse["green"]["name"] == "none", pulse
+    await instance.call("Emulation.setEmulatedMedia", {"features": [
+        {"name": "prefers-reduced-motion", "value": "reduce"}]}, session=instance.page_session)
+    assert (await evaluate(instance, dot))["red"]["name"] == "none"
+    await instance.call("Emulation.setEmulatedMedia", {"features": []}, session=instance.page_session)
     # A width saved by an older console is corrected during boot, even while
     # the bell and CPU are hidden. Showing either must not resize the sidebar.
     await evaluate(instance, "lsSet('puppy.sidew','200'); lsSet('puppy.sidecollapsed',''); true")
@@ -3383,7 +3394,7 @@ async def sidebar_width_checks(instance, capture=False):
     await until(instance, "demoView.draftReady")
     await evaluate(instance, "delete window.sideFrames; true")
     print("PASS: sidebar slides left with its contents and fades through drag, release and reopening; "
-          "footer fits every button and CPU 100% after narrow saved widths, drag, reset, "
+          "footer fits every button and a 100% CPU reading after narrow saved widths, drag, reset, "
           "collapsed reload and reopen; measured controls/fonts, steady CPU digit changes and both themes "
           "on desktop and 320/390px phones", flush=True)
 

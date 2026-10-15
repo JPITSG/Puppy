@@ -4570,7 +4570,7 @@ function renderHostCpu(cpuPercent) {
     closeHostPanel();
     return;
   }
-  output.textContent = `CPU ${Math.round(value)}%`;
+  output.textContent = `${Math.round(value)}%`;
   output.setAttribute("aria-label", `WebUI host CPU usage: ${value.toFixed(1)}%`);
   output.classList.remove("hidden");
   hostCpuSample(value);
@@ -11940,7 +11940,7 @@ function syncSideMinimum() {
   probe.setAttribute("inert", "");
   for (const node of row.querySelectorAll("[id]")) node.removeAttribute("id");
   for (const node of row.querySelectorAll(".hidden")) node.classList.remove("hidden");
-  row.querySelector(".host-cpu").textContent = "CPU 100%";
+  row.querySelector(".host-cpu").textContent = "100%";
   Object.assign(probe.style, { position: "absolute", visibility: "hidden",
     width: "max-content", minWidth: "0", height: "auto", transition: "none" });
   foot.style.minWidth = "0"; // the collapse animation must not widen the probe
