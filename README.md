@@ -382,6 +382,12 @@ Everything typed at an agent goes through one shared prompt box: `Enter` sends
 (using the chosen action during a running turn),
 `Shift+Enter` or `Ctrl+J` breaks a line, and `@` opens the mention list (browsers,
 terminals, VNC screens, sessions, a new spawn; session chats also offer **New loop**).
+A word starting with `./` or `../` opens a folder list in the same place: the
+subfolders of that path, relative to the folder the session's agent works in (a
+schedule's own folder in the schedule editor), with `..` first to step up a level.
+The arrow keys highlight a row and `Enter` or a click moves into that folder,
+typing filters by name and `Tab` completes it, and `Escape` closes the list.
+Nothing is highlighted when the list opens, so `Enter` still sends.
 In session chats, `↑` at the start of the box recalls earlier prompts. The New task
 and New loop boxes keep normal Up/Down caret movement without prompt recall.
 Recall reads the session's stored prompts, loading older pages as
@@ -1314,7 +1320,7 @@ node tests/drag_scroll_ui_test.js    # the lists a reorder drag scrolls, and the
 node tests/menu_dismiss_ui_test.js   # menu dismissal, toggles and open dropdowns
 node tests/navigation_ui_test.js    # browser Back/Forward, dialogs and cancellation ownership
 python3 tests/session_loop_test.py  # loop batches, queue controls, bounds and both runtimes
-node tests/composer_ui_test.js       # the shared prompt box and its "@" list
+node tests/composer_ui_test.js       # the shared prompt box, its "@" list and folder list
 node tests/backend_settings_ui_test.js # backend forms, removal errors and retry
 node tests/task_config_ui_test.js    # the New task dialog
 python3 tests/task_agent_test.py     # apply when done, Git's merges into tasks, the task tools, both runtimes

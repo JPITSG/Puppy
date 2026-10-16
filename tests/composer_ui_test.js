@@ -37,6 +37,39 @@ const loopEngine = key => ({ key, label: key, model_catalog_loaded: true,
     { value: 'quick', label: 'Quick', effort_options: loopOptions(['', 'low']) }],
   session_defaults: { model: 'quick', effort: 'low', permission_mode: 'safe' } });
 let storedEvents = [];
+/* a small folder tree for "./" and "../", answered the way the node's /api/fs
+   answers: the normalized path, its parent, its subfolders (hidden ones only
+   with hidden=1), and a non-folder listed as its parent filtered by name */
+const folderTree = {
+  "/": [".cache", "home", "srv"], "/home": ["mira"], "/home/mira": ["harbor", "notes"],
+  "/home/mira/harbor": [".git", "api", "apps", "docs", "web"], "/home/mira/harbor/docs": ["api", "guides"],
+  "/home/mira/harbor/docs/api": [], "/srv": ["app"], "/srv/app": ["lib"], "/data/proj": ["src"],
+};
+const folderFiles = new Set(["/home/mira/harbor/readme.md"]);
+const folderReads = [];
+let folderHold = null;
+const normalizeFolder = raw => {
+  const stack = [];
+  for (const part of raw.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") stack.pop(); else stack.push(part);
+  }
+  return "/" + stack.join("/");
+};
+async function folderAnswer(bid, route) {
+  const query = new URLSearchParams(route.split("?")[1]);
+  folderReads.push({ bid, path: query.get("path"), hidden: query.get("hidden") });
+  if (folderHold) await folderHold;
+  const path = normalizeFolder(query.get("path"));
+  const parent = path === "/" ? null : normalizeFolder(path + "/..");
+  if (folderFiles.has(path)) {
+    const name = path.split("/").pop();
+    return { path: parent, parent: null, dirs: folderTree[parent].filter(d => d.startsWith(name)), filter: name };
+  }
+  if (!folderTree[path]) throw new Error("not a directory");
+  const dirs = folderTree[path].filter(d => query.get("hidden") === "1" || !d.startsWith("."));
+  return { path, parent, dirs, filter: "" };
+}
 const promptEvent = (seq, text) => ({ seq, kind: "user", data: { text } });
 function historyPage(route) {
   const query = new URLSearchParams(route.split("?")[1]);
@@ -67,6 +100,7 @@ const context = vm.createContext({
       if (loopFailure) throw loopFailure;
       return { queued: false, iterations: options.body.iterations };
     }
+    if (route.startsWith("fs?")) return await folderAnswer(bid, route);
     if (route === "session-links/catalog") return await sessionCatalog;
     if (/\/events\?/.test(route))
       return historyRead ? historyRead(bid, route, options) : historyPage(route);
@@ -116,6 +150,7 @@ const context = vm.createContext({
   backendHasCapability: (backend, capability) => !!backend && backend.capabilities.includes(capability),
   spawnExecFor: () => false,
   sessionsFor: () => [], tasksIcon: icon, applyWhenDoneIcon: icon, sessionWorkspace: () => null,
+  folderIcon: icon, parentDirIcon: icon, linkForSession: () => null,
   linkifyInto: (node, text) => { node.appendChild(document.createTextNode(text)); return node; },
   findSessionMeta: (bid, sid) => ({ name: "Session " + sid, engine: 'first', model: 'precise', effort: 'high' }),
   backendName: bid => bid ? "node " + bid : "this node",
@@ -143,8 +178,10 @@ vm.runInContext([
   between("function effectiveQueuedConfig(", "/* One workspace tab"),
   between("const TASK_STATES", "/* The one line the Tasks sheet gives"),
 ].join("\n"), context);
-const { Composer, composerBoxHtml, SessionView, SharedDraft } = vm.runInContext(
-  "({ Composer, composerBoxHtml, SessionView, SharedDraft })", context);
+const { Composer, composerBoxHtml, SessionView, SharedDraft, composerFolderContext, folderParentPath,
+        folderMatches } = vm.runInContext(
+  "({ Composer, composerBoxHtml, SessionView, SharedDraft, composerFolderContext, folderParentPath, " +
+  "folderMatches })", context);
 
 function makeBox(host = {}, options = {}) {
   const wrap = document.createElement("div");
@@ -1475,4 +1512,174 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.equal('configurations' in calls.api.at(-1).body, false, 'an older backend receives only the basic contract');
   state.backends.pop(); delete state.engCache[78];
   console.log("PASS: shared prompt box keys, mentions, attachments, recall, replacements, controls and loop dialog validation, submission, cleanup and retry guards");
+
+  /* ---- folder paths: "./" and "../" ---- */
+  {
+    const at = (text, caret = text.length, end = caret) =>
+      JSON.parse(JSON.stringify(composerFolderContext(text, caret, end)));
+    assert.deepEqual(at("./"), { start: 0, dir: "./", filter: "" });
+    assert.deepEqual(at("look at ../src/pu"), { start: 8, dir: "../src/", filter: "pu" });
+    assert.deepEqual(at("(./a"), { start: 1, dir: "./", filter: "a" }, "an opening bracket starts a word");
+    assert.deepEqual(at("x\n../"), { start: 2, dir: "../", filter: "" });
+    for (const text of ["a./b", "http://x/./", ".../", "./a b", "../ and"])
+      assert.equal(at(text), null, `${JSON.stringify(text)} is not a folder being named`);
+    assert.equal(at("./src", 1, 3), null, "a selection is not a caret");
+    assert.equal(at("." + "/x".repeat(600)), null, "an over-long word is not a path");
+    assert.deepEqual(at("./src/ more", 6), { start: 0, dir: "./src/", filter: "" }, "the caret ends the word");
+    for (const [dir, up] of [["./", "../"], ["./src/", "./"], ["../", "../../"], ["../a/b/", "../a/"],
+                             ["./a/../b/", "./"], ["./../", "../../"], ["../../", "../../../"]])
+      assert.equal(folderParentPath(dir), up, `${dir} goes up to ${up}`);
+    assert.deepEqual(JSON.parse(JSON.stringify(folderMatches([".git", "api", "Apps", "docs"], ""))),
+      ["api", "Apps", "docs"], "hidden folders wait for a dot");
+    assert.deepEqual(JSON.parse(JSON.stringify(folderMatches([".git", "api", "Apps", "docs"], "AP"))),
+      ["api", "Apps"], "a typed name is a prefix, whatever its case");
+    assert.deepEqual(JSON.parse(JSON.stringify(folderMatches([".git", ".github", "api"], ".git"))),
+      [".git", ".github"]);
+
+    const choices = box => [...box.box.querySelectorAll(".mention-item")].filter(row => !row.classList.contains("quiet"));
+    const rows = box => choices(box).map(row => ({
+      label: row.querySelector(".mention-label").textContent,
+      hint: row.querySelector(".mention-hint") ? row.querySelector(".mention-hint").textContent : "",
+      lit: row.classList.contains("sel") }));
+    const labels = box => rows(box).map(row => row.label);
+    const open = box => !box.composer.mentionEl.classList.contains("hidden");
+    const head = box => box.box.querySelector(".mention-path").textContent.replace(/\u200e/g, "");
+    const note = box => (box.box.querySelector(".mention-item.quiet .mention-label") || {}).textContent || "";
+    const typeAt = async (b, text) => { b.ta.focus(); type(b.ta, text); await settle(); };
+
+    const b = makeBox({ directory: () => ({ bid: 0, path: "/home/mira/harbor" }) });
+    folderReads.length = 0;
+    b.ta.focus(); type(b.ta, "./");
+    assert.equal(open(b), false, "nothing shows before the folder has answered");
+    await settle();
+    assert.deepEqual(JSON.parse(JSON.stringify(folderReads)),
+      [{ bid: 0, path: "/home/mira/harbor/./", hidden: "1" }], "one read of the folder, hidden ones included");
+    assert.equal(open(b), true);
+    assert.equal(b.composer.mentionEl.getAttribute("aria-label"), "Folders");
+    assert.equal(head(b), "/home/mira/harbor", "the head names the folder listed");
+    assert.deepEqual(JSON.parse(JSON.stringify(rows(b))), [
+      { label: "..", hint: "mira", lit: false }, { label: "api", hint: "", lit: false },
+      { label: "apps", hint: "", lit: false }, { label: "docs", hint: "", lit: false },
+      { label: "web", hint: "", lit: false }], "folders only, the way up first, nothing lit");
+    // Enter with nothing lit is a send, never a pick
+    let sent = b.events.submit;
+    key(b.ta, "Enter");
+    assert.equal(b.events.submit, sent + 1, "Enter sends while no row is lit");
+    assert.equal(b.ta.value, "./");
+    // the arrows light a row; Enter then takes it and the list moves into that folder
+    key(b.ta, "ArrowDown"); key(b.ta, "ArrowDown"); key(b.ta, "ArrowDown"); key(b.ta, "ArrowDown");
+    assert.deepEqual(rows(b).filter(row => row.lit).map(row => row.label), ["docs"]);
+    let release; folderHold = new Promise(resolve => { release = resolve; });
+    sent = b.events.submit;
+    key(b.ta, "Enter");
+    assert.equal(b.events.submit, sent, "a lit row is a pick, not a send");
+    assert.equal(b.ta.value, "./docs/", "a folder adds its name and a slash, with no space after it");
+    assert.equal(b.ta.selectionStart, 7);
+    assert.equal(open(b), true, "moving folders keeps the list");
+    assert.deepEqual(labels(b), [], "the last folder's rows are gone while the next one loads");
+    assert.equal(note(b), "Loading…");
+    folderHold = null; release(); await settle();
+    assert.equal(head(b), "/home/mira/harbor/docs");
+    assert.deepEqual(labels(b), ["..", "api", "guides"]);
+    assert.equal(rows(b).some(row => row.lit), false, "a new folder opens with nothing lit");
+    // a typed name filters; Tab completes it
+    await typeAt(b, "./docs/gu");
+    assert.deepEqual(labels(b), ["guides"], "no way up once a name is typed");
+    key(b.ta, "Tab");
+    assert.equal(b.ta.value, "./docs/guides/");
+    await typeAt(b, "./docs/zz");
+    assert.equal(open(b), false, "a name no folder starts with closes the list");
+    // ".." steps up the way a person writes it
+    await typeAt(b, "./docs/");
+    key(b.ta, "ArrowDown"); key(b.ta, "Enter");
+    assert.equal(b.ta.value, "./");
+    await settle();
+    key(b.ta, "ArrowUp");
+    assert.deepEqual(rows(b).filter(row => row.lit).map(row => row.label), ["web"], "Up from nothing lights the last row");
+    key(b.ta, "ArrowDown");   // wraps to ".."
+    key(b.ta, "Enter");
+    assert.equal(b.ta.value, "../");
+    await settle();
+    assert.equal(head(b), "/home/mira");
+    assert.deepEqual(labels(b), ["..", "harbor", "notes"]);
+    // a click picks as well, from the text around it
+    await typeAt(b, "see ../ please");
+    b.ta.selectionStart = b.ta.selectionEnd = 7; fire(b.ta, "input"); await settle();
+    choices(b)[2].onclick();
+    assert.equal(b.ta.value, "see ../notes/ please", "the rest of the sentence stays");
+    // hidden folders wait for a dot; Tab with nothing typed lights the first row
+    await typeAt(b, "./");
+    assert.equal(labels(b).includes(".git"), false);
+    key(b.ta, "Tab");
+    assert.equal(b.ta.value, "./");
+    assert.deepEqual(rows(b).filter(row => row.lit).map(row => row.label), [".."]);
+    await typeAt(b, "./.g");
+    assert.deepEqual(labels(b), [".git"]);
+    // Escape leaves this path alone until the caret leaves it
+    await typeAt(b, "./a");
+    key(b.ta, "Escape");
+    assert.equal(open(b), false);
+    await typeAt(b, "./ap");
+    assert.equal(open(b), false, "the dismissed path stays quiet while it is typed on");
+    await typeAt(b, "./ap ");
+    await typeAt(b, "./ap ./");
+    assert.equal(open(b), true, "a new path opens again");
+    // a folder that cannot be read, and a file written as a folder, show nothing
+    await typeAt(b, "./nope/");
+    assert.equal(open(b), false);
+    await typeAt(b, "./readme.md/");
+    assert.equal(open(b), false, "a file is not a folder, even where the route lists its parent");
+    // the "@" list keeps its place
+    await typeAt(b, "@Brow");
+    assert.notEqual(b.composer.mentionEl.getAttribute("aria-label"), "Folders");
+    // the root has no way up
+    const top = makeBox({ directory: () => ({ bid: 0, path: "/" }) });
+    await typeAt(top, "./");
+    assert.deepEqual(labels(top), [".cache", "home", "srv"].filter(name => !name.startsWith(".")));
+    // an empty folder says so
+    await typeAt(b, "./docs/api/");
+    assert.deepEqual(labels(b), [".."]);
+    assert.equal(note(b), "No folders here");
+    b.composer.destroy(); top.composer.destroy();
+
+    // with no host answer, "./" is the session's own directory
+    const realView = context.sessionViewFor, realWorkspace = context.sessionWorkspace;
+    context.sessionViewFor = () => ({ status: "idle", queued: [], session: { id: 10, cwd: "/srv/app" } });
+    const own = makeBox();
+    folderReads.length = 0;
+    await typeAt(own, "./");
+    assert.deepEqual(JSON.parse(JSON.stringify(folderReads.map(read => [read.bid, read.path]))),
+      [[0, "/srv/app/./"]]);
+    assert.deepEqual(labels(own), ["..", "lib"]);
+    own.composer.destroy();
+    // a linked workspace is listed on the backend holding its files
+    context.sessionViewFor = () => ({ session: { id: 10, cwd: "/data/proj",
+      workspace: { root: "/data/proj", node: "files" } } });
+    context.sessionWorkspace = session => session.workspace || null;
+    const linked = makeBox({}, {});
+    folderReads.length = 0;
+    await typeAt(linked, "./");
+    assert.equal(folderReads.length, 0, "no link known, nothing listed");
+    context.linkForSession = () => ({ ws_backend: 3 });
+    await typeAt(linked, "./ ./");
+    assert.deepEqual(JSON.parse(JSON.stringify(folderReads.map(read => [read.bid, read.path]))),
+      [[3, "/data/proj/./"]]);
+    linked.composer.destroy();
+    context.linkForSession = () => null;
+    // a missing scratch copy, or a box with no session, lists nothing
+    context.sessionViewFor = () => ({ session: { id: 10, cwd: "/srv/app", workspace_missing: true } });
+    const missing = makeBox();
+    folderReads.length = 0;
+    await typeAt(missing, "./");
+    assert.equal(folderReads.length, 0);
+    missing.composer.destroy();
+    const none = makeBox({ sid: null });
+    await typeAt(none, "./");
+    assert.equal(folderReads.length, 0);
+    none.composer.destroy();
+    context.sessionViewFor = realView; context.sessionWorkspace = realWorkspace;
+  }
+  console.log("PASS: folder paths: \"./\" and \"../\" open the box's folder list - folders only with the way up, " +
+              "nothing lit until the arrows, Enter sends until then, picks move between folders, Tab completes, " +
+              "Escape dismisses, and the folder is the session's own (a linked workspace's on its own backend)");
 })().catch(error => { console.error(error); process.exitCode = 1; });

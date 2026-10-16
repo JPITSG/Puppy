@@ -2086,6 +2086,12 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   text-transform:uppercase;letter-spacing:.09em;
 }
 .mention-item.quiet{color:var(--txt3);cursor:default}
+/* The folder list ("./", "../"): its head names the folder it lists, and a
+   long path gives up its start rather than its end. Folders wear the folder
+   picker's own colours. */
+.mention-path{font-family:var(--mono);direction:rtl;text-align:left}
+.mention-ico.folder{color:var(--warn)}
+.mention-ico.folder-up{color:var(--txt3)}
 .mention-chev svg{transition:none}
 .mention-chev.right svg{transform:rotate(-90deg)}
 .mention-chev.left svg{transform:rotate(90deg)}

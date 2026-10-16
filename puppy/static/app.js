@@ -10771,6 +10771,9 @@ async function modalScheduleEditor(id = null, copyOf = null) {
   const composer = new Composer($$(".composer-box"), {
     bid: 0, sid: null, submit: () => form.requestSubmit(),
     uploadsBlocked: () => "A scheduled prompt is text only", privateUploads: () => false,
+    /* "./" is the folder each run works in; a fresh empty one has nothing to list */
+    directory: () => workspaceKind === "directory" && cwd.value.trim() ?
+      { bid: currentBid(), path: cwd.value.trim() } : null,
   });
   onClose(() => composer.destroy({ discardUploads: false }));
 
@@ -13683,6 +13686,54 @@ function filterMentionItems(items, query) {
   return items.filter(item => item.search.includes(q));
 }
 
+/* ---- folder paths ---- */
+/* A word opening with "./" or "../" is a folder being named, relative to the
+   directory the agent works in, and the box offers that folder's subfolders
+   in the same place as the "@" list. The token runs from the word's start to
+   the caret and ends at whitespace, so a sentence that merely says "../"
+   steps aside at its next space. `dir` is everything up to the last "/" (the
+   folder to list) and `filter` the name being typed inside it. */
+const FOLDER_TOKEN_MAX = 1024;
+
+function composerFolderContext(value, selStart, selEnd) {
+  if (selStart !== selEnd) return null;
+  const text = String(value == null ? "" : value);
+  const caret = Math.max(0, Math.min(text.length, Number(selStart) || 0));
+  let start = caret;
+  while (start > 0 && caret - start < FOLDER_TOKEN_MAX && !/[\s([{'"`]/.test(text[start - 1])) start--;
+  if (start > 0 && !/[\s([{'"`]/.test(text[start - 1])) return null;   // too long to be a path
+  const token = text.slice(start, caret);
+  if (!/^\.\.?\//.test(token)) return null;
+  const cut = token.lastIndexOf("/") + 1;
+  return { start, dir: token.slice(0, cut), filter: token.slice(cut) };
+}
+
+/* The folder above `dir`, written the way a person would: "./src/" goes to
+   "./", "./" to "../" and "../a/" to "../" - never "./src/../". */
+function folderParentPath(dir) {
+  const stack = [];
+  for (const part of String(dir || "").split("/").concat("..")) {
+    if (!part || part === ".") continue;
+    if (part === ".." && stack.length && stack[stack.length - 1] !== "..") stack.pop();
+    else stack.push(part);
+  }
+  if (!stack.length) return "./";
+  return (stack[0] === ".." ? "" : "./") + stack.join("/") + "/";
+}
+
+/* The subfolders a typed name leaves, by prefix and without regard to case.
+   Hidden folders show once the name being typed starts with a dot, as in a
+   shell. */
+function folderMatches(names, filter) {
+  const typed = String(filter || "").toLowerCase();
+  return (names || []).filter(name => (typed.startsWith(".") || !name.startsWith(".")) &&
+    name.toLowerCase().startsWith(typed));
+}
+
+function folderBaseName(path) {
+  return String(path || "").replace(/\/+$/, "").split("/").pop() || "/";
+}
+
 /* The spawn wizard's finished directive. It includes only the chosen
    settings, leaving task wording to the user: the spawn MCP
    guidance defines this shape, omitted parts mean the engine defaults, a
@@ -14403,7 +14454,10 @@ function spellAutocorrection(word) {
      privateUploads()  whether staged server files belong to this box alone,
                        so removing a chip may delete them; a shared draft may
                        still own them on another device (optional, default
-                       true) */
+                       true)
+     directory()       {bid, path}: the folder "./" means in this box, or null
+                       for none (optional; by default the directory the
+                       session's agent works in, on the backend holding it) */
 function composerBoxHtml({ id = "", placeholder = "", rows = 1, className = "",
                            controls = "", actions = "" } = {}) {
   return `<div class="composer-box${className ? " " + esc(className) : ""}">
@@ -14431,6 +14485,40 @@ function composerBoxHtml({ id = "", placeholder = "", rows = 1, className = "",
       <button type="button" class="composer-draft-review hidden">Review drafts</button>
     </div>
   </div>`;
+}
+
+/* One listing per folder for every box, read through the node's own folder
+   route and kept a short while, so a keystroke filters what is already here
+   rather than asking again. A stale listing keeps showing while a fresh read
+   is on its way; an answer re-evaluates the box that is being typed in. */
+const FOLDER_LISTING_TTL = 15000;
+const FOLDER_LISTING_MAX = 64;
+const folderListings = new Map();   // "bid\0path" -> {at, data, error, promise}
+
+function folderListing(bid, path) {
+  const key = `${bid}\u0000${path}`;
+  const known = folderListings.get(key);
+  if (known && (known.promise || Date.now() - known.at < FOLDER_LISTING_TTL)) return known;
+  const entry = { at: Date.now(), data: known ? known.data : null, error: "", promise: null };
+  entry.promise = api(bid, "fs?hidden=1&path=" + encodeURIComponent(path)).then(answer => {
+    /* the route lists a path that is not a folder as its parent filtered by
+       the last name; asked for "name/", that answer means "not a folder" */
+    entry.data = answer && Array.isArray(answer.dirs) && !answer.filter ? answer : null;
+    entry.error = entry.data ? "" : "unreadable";
+  }, error => {
+    entry.data = null;
+    entry.error = (error && error.message) || "unreadable";
+  }).then(() => {
+    entry.promise = null;
+    entry.at = Date.now();
+    for (const composer of Composer.live)
+      if (!composer.closed && document.activeElement === composer.ta) composer.updateMention();
+  });
+  folderListings.delete(key);
+  folderListings.set(key, entry);
+  while (folderListings.size > FOLDER_LISTING_MAX)
+    folderListings.delete(folderListings.keys().next().value);
+  return entry;
 }
 
 class Composer {
@@ -15495,6 +15583,7 @@ class Composer {
   mentionKeydown(e) {
     const m = this.mention;
     if (!m) return false;
+    if (m.folders) return this.folderKeydown(e);
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
@@ -15536,6 +15625,10 @@ class Composer {
     let ctx = composerMentionContext(
       this.ta.value, this.ta.selectionStart, this.ta.selectionEnd);
     if (!ctx) {
+      const folder = !this.history &&
+        composerFolderContext(this.ta.value, this.ta.selectionStart, this.ta.selectionEnd);
+      if (folder && this.mentionDismissedAt === folder.start) { this.hideMention(); return; }
+      if (folder) { this.mentionDismissedAt = -1; this.showFolders(folder); return; }
       this.mentionDismissedAt = -1;   // left the token; dismissal is spent
       this.hideMention();
       return;
@@ -15585,6 +15678,117 @@ class Composer {
     if (!this.mentionSpawn && !this.mentionSession) this.refreshMentionInstances();
   }
 
+  /* ---- folder paths ---- */
+  /* The list opens with nothing lit, because a sentence that says "../" and
+     ends with Enter means send: Enter takes a row only once the arrows (or
+     the pointer) have lit one. Tab completes the name being typed, as a shell
+     would, or lights the first row when nothing is typed yet. */
+  folderKeydown(e) {
+    const m = this.mention;
+    const plain = !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      this.mentionDismissedAt = m.start;   // this path asked to be left alone
+      this.hideMention();
+      return true;
+    }
+    if (!m.items.length || !plain) return false;
+    const n = m.items.length;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const down = e.key === "ArrowDown";
+      this.selectMention(m.sel < 0 ? (down ? 0 : n - 1) : (m.sel + (down ? 1 : n - 1)) % n);
+      return true;
+    }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const first = m.items.find(item => item.kind === "folder");
+      if (m.sel >= 0) this.applyMention(m.items[m.sel]);
+      else if (m.folders.filter && first) this.applyMention(first);
+      else this.selectMention(0);
+      return true;
+    }
+    if (e.key === "Enter" && m.sel >= 0) {
+      e.preventDefault();
+      this.applyMention(m.items[m.sel]);
+      return true;
+    }
+    return false;
+  }
+
+  /* The folder "./" means here: the host's own answer, else the directory
+     the session's agent works in, listed on the backend that holds those
+     files - for a linked workspace that is not the one running the engine. */
+  folderRoot() {
+    if (this.host.directory) return this.host.directory() || null;
+    if (this.host.sid == null) return null;
+    const bid = Number(this.host.bid) || 0;
+    const view = sessionViewFor(bid, this.host.sid);
+    const session = (view && view.session) || findSessionMeta(bid, this.host.sid);
+    if (!session || session.workspace_missing) return null;
+    const ws = sessionWorkspace(session);
+    if (ws) {
+      const link = linkForSession(bid, session.id);
+      return link ? { bid: Number(link.ws_backend) || 0, path: ws.root } : null;
+    }
+    return session.cwd ? { bid, path: session.cwd } : null;
+  }
+
+  /* The subfolders of the path under the caret. Nothing shows until the
+     folder's first listing has answered, a typed name that matches no folder
+     closes the list, and a folder that cannot be read shows nothing at all;
+     moving to another folder from an open list says it is loading rather
+     than leave the last folder's rows under the pointer. */
+  showFolders(ctx) {
+    const root = this.folderRoot();
+    if (!root || !root.path) { this.hideMention(); return; }
+    const path = String(root.path).replace(/\/+$/, "") + "/" + ctx.dir;
+    const key = `${Number(root.bid) || 0}\u0000${path}`;
+    const entry = folderListing(Number(root.bid) || 0, path);
+    const open = this.mention && this.mention.folders ? this.mention : null;
+    this.mentionSession = null;
+    this.mentionSpawn = null;
+    if (!entry.data) {
+      if (!entry.promise || !open || open.start !== ctx.start) { this.hideMention(); return; }
+      this.mention = { start: ctx.start, query: ctx.filter, items: [], sel: -1,
+        folders: { dir: ctx.dir, filter: ctx.filter, key, path: "", note: "Loading…" } };
+      this.renderMention();
+      return;
+    }
+    const data = entry.data;
+    const items = [];
+    if (!ctx.filter && data.parent !== null && data.parent !== undefined)
+      items.push({ kind: "folder-up", label: "..", hint: folderBaseName(data.parent), search: ".." });
+    for (const name of folderMatches(data.dirs, ctx.filter))
+      items.push({ kind: "folder", label: name, search: name.toLowerCase(), insert: ctx.dir + name + "/" });
+    if (ctx.filter && !items.length) { this.hideMention(); return; }
+    const lit = open && open.folders.key === key && open.sel >= 0 ? open.items[open.sel] : null;
+    const sel = lit ? items.findIndex(item => item.kind === lit.kind && item.label === lit.label) : -1;
+    this.mention = { start: ctx.start, query: ctx.filter, items, sel,
+      folders: { dir: ctx.dir, filter: ctx.filter, key, path: String(data.path || path),
+                 note: items.some(item => item.kind === "folder") ? "" : "No folders here" } };
+    this.renderMention();
+    if (!open || open.folders.key !== key) this.mentionEl.scrollTop = 0;   // a new folder starts at its top
+  }
+
+  /* A pick replaces the path under the caret and keeps the list open on the
+     folder it names: a folder adds "name/", ".." steps up a level. */
+  applyFolder(item) {
+    const m = this.mention;
+    if (!m || !m.folders || !item) return;
+    const text = item.kind === "folder-up" ? folderParentPath(m.folders.dir) : item.insert;
+    const ta = this.ta;
+    const start = Math.max(0, Math.min(m.start, ta.value.length));
+    const end = Math.max(start, Math.min(ta.selectionStart, ta.value.length));
+    ta.value = ta.value.slice(0, start) + text + ta.value.slice(end);
+    const caret = start + text.length;
+    ta.setSelectionRange(caret, caret);
+    ta.focus();
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    this.revealCaret();
+  }
+
   hideMention() {
     this.mentionSession = null;
     this.mentionSpawn = null;
@@ -15602,6 +15806,15 @@ class Composer {
     this.mentionEl.textContent = "";
     this.mentionRowEls = [];
     this.mentionEl.setAttribute("aria-multiselectable", this.mentionSession ? "true" : "false");
+    this.mentionEl.setAttribute("aria-label", m.folders ? "Folders" : "Puppy tools and mentions");
+    if (m.folders) {
+      const head = el("div", "mention-step-head");
+      /* the marks keep the path one left-to-right run inside its
+         right-to-left box, so a long one gives up its start, not its end */
+      head.appendChild(el("span", "mention-step-trail mention-path", "\u200e" + m.folders.path + "\u200e"));
+      head.appendChild(el("span", "mention-step-name", "Folders"));
+      this.mentionEl.appendChild(head);
+    }
     if (wizard) {
       const head = el("div", "mention-step-head");
       const trail = [wizard.kind === "task" ? "New task" : "New spawn"];
@@ -15634,6 +15847,9 @@ class Composer {
         ico.appendChild(choiceSvg("check"));
       } else if (item.kind === "spawn-retry") {
         ico.appendChild(refreshIcon(11));
+      } else if (item.kind === "folder" || item.kind === "folder-up") {
+        ico.classList.add(item.kind);
+        ico.appendChild(item.kind === "folder" ? folderIcon(13) : parentDirIcon(12));
       } else if (item.kind !== "spawn-wait") {
         ico.appendChild(item.kind === "browser" ? globeIcon(12) :
           item.kind === "terminal" ? terminalIcon(12) :
@@ -15649,6 +15865,13 @@ class Composer {
       this.mentionEl.appendChild(row);
       this.mentionRowEls.push(row);
     });
+    /* an empty or loading folder says so, present but plainly not a choice */
+    if (m.folders && m.folders.note) {
+      const note = el("div", "mention-item quiet");
+      note.appendChild(el("span", "mention-ico"));
+      note.appendChild(el("span", "mention-label", m.folders.note));
+      this.mentionEl.appendChild(note);
+    }
     this.mentionEl.classList.remove("hidden");
     this.mentionEl.classList.remove("slide-next", "slide-back");
     if (wizard && wizard.slide) {
@@ -15681,6 +15904,7 @@ class Composer {
      whose re-evaluation then retires the completed token as prose. Wizard
      rows never insert directly: they advance, retreat, or retry a part. */
   applyMention(item) {
+    if (item.kind === "folder" || item.kind === "folder-up") { this.applyFolder(item); return; }
     if (item.kind === "session-picker") { this.beginSessionMention(); return; }
     if (item.kind === "session-wait") return;
     if (item.kind === "session-back") {
