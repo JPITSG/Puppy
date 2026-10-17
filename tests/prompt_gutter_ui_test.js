@@ -316,6 +316,37 @@ const key = (node, name) => {
   console.log("PASS: a pin per prompt beside its bubble, numbered from the session's first prompt with steers as beads, " +
               "the list button under the top plate, the room taken only from a narrow column, no gutter when too narrow or filtered");
 
+  /* ---- a page holding none of the session's prompts ---- */
+  {
+    // a long turn: the newest 200 events are all its work, its prompt above them
+    const view = makeView(0, 11);
+    view.oldestSeq = 400; view.newestSeq = 600;
+    const gutter = new api.PromptGutter(view);
+    gutter.render();
+    assert.ok(gutter.plates.classList.contains("hidden") && gutter.thread.classList.contains("hidden"),
+      "a session with no prompts known has no gutter");
+    for (const seq of [12, 30])
+      gutter.index.set(seq, {seq, at: 1000 + seq, steering: false, text: "p" + seq, answer: 0, outcome: ""});
+    gutter.order = null;
+    gutter.render();
+    assert.ok(!gutter.plates.classList.contains("hidden") && !gutter.thread.classList.contains("hidden") &&
+      !gutter.layer.classList.contains("hidden"), "the session's prompts keep the gutter with none of them on the page");
+    assert.equal(pins(view).length, 0, "no pin without its bubble");
+    assert.equal(gutter.current, 30, "the prompt being read is the newest before the page");
+    assert.equal(gutter.up.disabled, false);
+    gutter.up.onclick({ detail: 1 });
+    assert.deepEqual(view.jumps, [30], "the top plate reaches it in history not loaded yet");
+    // the turn's prompt loads with older history: its pin joins
+    bubble(view, 30, 10);
+    gutter.render();
+    assert.deepEqual(pins(view).map(p => p.number), ["2"]);
+    view.chatLogMask = 6;
+    gutter.render();
+    assert.ok(gutter.plates.classList.contains("hidden"), "Questions filtered out still means no gutter");
+  }
+  console.log("PASS: a page holding none of the session's prompts keeps its gutter while the index knows some, " +
+              "the plate reaching the newest one before the page");
+
   /* ---- scrolling: the thread, tucked pins, the lit prompt, the plates' reach ---- */
   {
     const view = makeView(0, 10);

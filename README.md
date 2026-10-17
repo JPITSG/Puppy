@@ -188,7 +188,9 @@ reading anywhere further up is never pulled away from it.
   words or their number, then pick one with the arrow keys and Enter or a
   click.
   Numbers count from the session's first prompt, and the buttons and the list
-  reach prompts in older history that is not loaded yet; a backend reads its
+  reach prompts in older history that is not loaded yet - the gutter stays
+  even when a long turn has pushed its own prompt above everything loaded so
+  far; a backend reads its
   prompt list as one short line per prompt and sends only the prompts that
   are new since the last read, with the newest prompt's turn read again as it
   ends (one from before the turn marks lists its prompts without them, one

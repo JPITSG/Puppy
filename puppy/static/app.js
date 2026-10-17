@@ -20526,7 +20526,10 @@ class PromptGutter {
        changes no column under the place it lands on. */
     if (!scroll.clientHeight) { this.closeList(); return; }
     const width = scroll.clientWidth;
-    const active = bubbles.length > 0 && width >= PROMPT_GUTTER_MIN_WIDTH &&
+    /* "No prompts" is the session's, not the page's: a long turn can push its
+       own prompt above the history loaded so far, and the plates still reach
+       it through the index */
+    const active = this.index.size > 0 && width >= PROMPT_GUTTER_MIN_WIDTH &&
       !!(view.chatLogMask & CHAT_LOG_TYPES[0].bit);
     this.active = active;
     this.layer.classList.toggle("hidden", !active);
