@@ -112,7 +112,8 @@ vm.runInContext([
 const api = vm.runInContext(`({ attachmentChipNode, openImageViewer, openImageViewerFrom,
   fillToolResultInto, toolImageItems, el, checkImagePreviews, imagePreviewUnavailable,
   imageViewerFit, imageViewerRange, imageViewerClamp, imageViewerAround, imageViewerCover,
-  imageViewerInset, imageViewerVelocity, IMAGE_VIEWER_MAX_SCALE, IMAGE_VIEWER_TAP_MS })`, context);
+  imageViewerInset, imageViewerVelocity, IMAGE_VIEWER_MAX_SCALE, IMAGE_VIEWER_TAP_MS,
+  imageMarkSizes, imageMarkCircle, imageMarkArrow, imageArrowShape, markedImageName, IMAGE_MARK_COLOR })`, context);
 const current = () => vm.runInContext("imageViewerOpen", context);
 const close = (a, b) => Math.abs(a - b) < 1e-6;
 /* values built inside the context carry its own prototypes; compare them as data */
@@ -672,6 +673,162 @@ console.log("PASS: Forward reopens a fresh viewer on the picture last shown, a f
   assert.equal(empty.querySelector("pre").textContent, "(Empty)");
 }
 console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in the head that opens the viewer without folding the card, the sent image's chips under the caption, local and remote, named for the file read, an unknown id or type never a picture");
+
+/* ---- marks on a waiting picture: a circle and an arrow for the agent ---- */
+{
+  const near = (a, b) => Math.abs(a - b) < 1e-6;
+  const sizes = api.imageMarkSizes(2000, 1000);
+  assert.deepEqual(plain(sizes), {stroke: 6, arrow: 140, circle: 60}, "sized for the picture, not the zoom");
+  assert.deepEqual(plain(api.imageMarkSizes(100, 80)), {stroke: 3, arrow: 48, circle: 18}, "never too thin to see");
+  assert.deepEqual(plain(api.imageMarkCircle({x: 10, y: 20}, {x: 50, y: 10}, sizes)),
+    {kind: "circle", w: 6, cx: 30, cy: 15, rx: 20, ry: 5}, "the ellipse the drag's box holds, any way round");
+  assert.deepEqual(plain(api.imageMarkCircle({x: 10, y: 20}, {x: 50, y: 10}, sizes, true, true)),
+    {kind: "circle", w: 6, cx: 30, cy: 0, rx: 20, ry: 20}, "Shift draws it round");
+  assert.deepEqual(plain(api.imageMarkCircle({x: 10, y: 20}, {x: 10, y: 20}, sizes, false)),
+    {kind: "circle", w: 6, cx: 10, cy: 20, rx: 60, ry: 60}, "a click circles the spot");
+  for (const [to, tail] of [[{x: 300, y: 200}, [240, 200]], [{x: 100, y: 50}, [100, 60]], [{x: 50, y: 210}, [-40, 200]]]) {
+    const arrow = api.imageMarkArrow({x: 100, y: 200}, to, sizes);
+    assert.ok(arrow.x2 === 100 && arrow.y2 === 200, "its point stays on the press");
+    assert.ok(near(Math.hypot(arrow.x1 - 100, arrow.y1 - 200), 140), "one length whichever way it turns");
+    if (to.y === 200 || to.x === 100) assert.deepEqual([Math.round(arrow.x1), Math.round(arrow.y1)], tail,
+      "its tail toward the release");
+  }
+  const clicked = api.imageMarkArrow({x: 100, y: 200}, {x: 100, y: 200}, sizes, false);
+  assert.ok(clicked.x1 > 100 && clicked.y1 > 200 && near(clicked.x1 - 100, clicked.y1 - 200),
+    "a click points up and to the left, like a pointer");
+  const shape = api.imageArrowShape({kind: "arrow", w: 6, x1: 200, y1: 100, x2: 100, y2: 100});
+  assert.deepEqual(plain(shape.head[0]), [100, 100], "the head's point is the arrow's point");
+  assert.ok(shape.shaft[2] > 100 && shape.head[1][0] > 100, "the shaft stops at the head");
+  assert.equal(api.markedImageName("shot.png"), "shot-marked.png");
+  assert.equal(api.markedImageName("shot-marked.png"), "shot-marked.png", "marked again, named once");
+  assert.equal(api.markedImageName("photo.final.jpeg"), "photo.final-marked.png");
+  assert.ok(/^#[0-9a-f]{6}$/i.test(api.IMAGE_MARK_COLOR));
+
+  // the box's thumbnail carries what marking needs; a sent picture does not
+  function waiting({markable = true, marks = [], source = ""} = {}) {
+    const box = {applied: [], markable: () => markable,
+      applyMarks(attachment, list) { this.applied.push([attachment, plain(list)]); return true; }};
+    const row = document.createElement("div");
+    row.className = "attach-strip";
+    const attachment = {name: "pasted.png", path: "/u/p", preview: true};
+    const chip = api.attachmentChipNode(attachment, "blob:shown");
+    row.appendChild(chip);
+    chip.querySelector("img").onload();
+    chip.querySelector(".attach-view")._marking = {composer: box, attachment, marks, source};
+    document.body.appendChild(row);
+    row.querySelector(".attach-view").onclick();
+    const viewer = current();
+    layout(viewer);
+    load(viewer, 2000, 1000);
+    return {viewer, box, attachment, row};
+  }
+  const sent = opened(["blob:s"], 0);
+  assert.ok(sent.viewer.m.querySelector(".iv-tool") === null, "a sent picture is only looked at");
+  assert.equal(sent.viewer.marksLayer.children.length, 0);
+  sent.viewer.dialog.close();
+  const letGo = waiting({markable: false});
+  assert.ok(letGo.viewer.m.querySelector(".iv-tool") === null, "a picture the box has let go takes no marks");
+  letGo.viewer.dialog.close();
+  assert.equal(letGo.box.applied.length, 0);
+
+  const {viewer, box} = waiting();
+  const bar = viewer.bar.children;
+  assert.deepEqual([...bar].slice(0, 4).map(node => node.className),
+    ["icon-btn iv-tool iv-circle", "icon-btn iv-tool iv-arrow", "icon-btn iv-tool iv-undo", "iv-sep"],
+    "the tools lead the bar, set off from the zoom");
+  assert.deepEqual([viewer.circleButton, viewer.arrowButton, viewer.undoButton].map(b => b.getAttribute("aria-label")),
+    ["Draw a circle", "Draw an arrow", "Undo the last mark"]);
+  assert.ok(!viewer.circleButton.disabled && !viewer.arrowButton.disabled && viewer.undoButton.disabled);
+  assert.equal(viewer.circleButton.getAttribute("aria-pressed"), "false");
+  const item = viewer.items[0];
+
+  // with no tool on, a drag at the fit marks nothing
+  press(viewer, "pointerdown", 1, 500, 400);
+  press(viewer, "pointermove", 1, 600, 450);
+  press(viewer, "pointerup", 1, 600, 450);
+  assert.equal(item.marks.length, 0);
+
+  // a circle: drawn live from the press, kept on release
+  viewer.circleButton.onclick();
+  assert.ok(viewer.m.classList.contains("iv-marking") && viewer.circleButton.getAttribute("aria-pressed") === "true");
+  const [ax, ay] = point(viewer, 500, 400), [bx, by] = point(viewer, 600, 450);
+  press(viewer, "pointerdown", 1, 500, 400);
+  press(viewer, "pointermove", 1, 600, 450);
+  assert.equal(viewer.marksLayer.children.length, 1, "the circle shows while it is drawn");
+  assert.equal(viewer.marksLayer.children[0].tag, "ellipse");
+  assert.equal(viewer.marksLayer.children[0].getAttribute("stroke"), api.IMAGE_MARK_COLOR);
+  press(viewer, "pointerup", 1, 600, 450);
+  assert.equal(item.marks.length, 1);
+  const ring = item.marks[0];
+  assert.ok(near(ring.cx, (ax + bx) / 2) && near(ring.cy, (ay + by) / 2) &&
+    near(ring.rx, (bx - ax) / 2) && near(ring.ry, (by - ay) / 2), "in the picture's own pixels");
+  assert.ok(!viewer.undoButton.disabled);
+  assert.equal(viewer.marksLayer.style.transform, viewer.img.style.transform, "the layer stands on the picture");
+  // a click circles the spot
+  press(viewer, "pointerdown", 1, 300, 300);
+  press(viewer, "pointerup", 1, 301, 300);
+  assert.equal(item.marks[1].rx, viewer.sizes().circle);
+
+  // an arrow: its point on the press, its tail wherever the pointer is let go
+  viewer.arrowButton.onclick();
+  assert.ok(viewer.circleButton.getAttribute("aria-pressed") === "false" &&
+    viewer.arrowButton.getAttribute("aria-pressed") === "true", "one tool at a time");
+  const [tx, ty] = point(viewer, 500, 400);
+  press(viewer, "pointerdown", 1, 500, 400);
+  press(viewer, "pointermove", 1, 380, 400);
+  press(viewer, "pointerup", 1, 380, 400);
+  const left = item.marks[2];
+  assert.ok(near(left.x2, tx) && near(left.y2, ty) && near(left.x1, tx - viewer.sizes().arrow) && near(left.y1, ty),
+    "let go to the left: the arrow comes from the left");
+  press(viewer, "pointerdown", 1, 500, 400);
+  press(viewer, "pointermove", 1, 500, 300);
+  press(viewer, "pointerup", 1, 500, 300);
+  assert.ok(near(item.marks[3].x1, tx) && near(item.marks[3].y1, ty - viewer.sizes().arrow), "and from above");
+  assert.equal(viewer.marksLayer.children.length, 2 + 2 * 2, "two circles, two arrows of a shaft and a head");
+
+  // a second finger is a pinch, never half a mark; a double click is two marks, not a zoom
+  press(viewer, "pointerdown", 1, 400, 400, "touch");
+  press(viewer, "pointerdown", 2, 600, 400, "touch");
+  press(viewer, "pointerup", 1, 400, 400, "touch");
+  press(viewer, "pointerup", 2, 600, 400, "touch");
+  assert.equal(item.marks.length, 4);
+  const fit = viewer.s;
+  viewer.stage.dispatchEvent(ev("dblclick", {clientX: 500, clientY: 400}));
+  assert.equal(viewer.s, fit);
+
+  // undo takes back the last mark, from the bar or ctrl/cmd+Z
+  viewer.undoButton.onclick();
+  assert.equal(item.marks.length, 3);
+  const undone = key(viewer, "z", {ctrlKey: true});
+  assert.ok(undone.defaultPrevented && item.marks.length === 2);
+  key(viewer, "z", {metaKey: true});
+  key(viewer, "z", {ctrlKey: true});
+  assert.ok(item.marks.length === 0 && viewer.undoButton.disabled);
+  press(viewer, "pointerdown", 1, 500, 400);
+  press(viewer, "pointerup", 1, 500, 400);
+  assert.equal(item.marks.length, 1);
+
+  // closing hands the marks to the prompt box, once
+  viewer.dialog.close();
+  assert.equal(box.applied.length, 1);
+  assert.ok(box.applied[0][0] === viewer.items[0].marking.attachment);
+  assert.equal(box.applied[0][1].length, 1);
+
+  // a marked picture opens as it was, with its marks to change; unchanged, closing changes nothing
+  const before = [{kind: "circle", w: 6, cx: 500, cy: 400, rx: 60, ry: 60}];
+  const reopened = waiting({marks: before, source: "blob:original"});
+  assert.equal(reopened.viewer.items[0].url, "blob:original", "the picture under the marks");
+  assert.equal(reopened.viewer.img.src, "blob:original");
+  assert.deepEqual(plain(reopened.viewer.items[0].marks), before);
+  assert.equal(reopened.viewer.marksLayer.children.length, 1, "its marks laid over it again");
+  reopened.viewer.dialog.close();
+  assert.equal(reopened.box.applied.length, 0);
+  const cleared = waiting({marks: before, source: "blob:original"});
+  cleared.viewer.undoButton.onclick();
+  cleared.viewer.dialog.close();
+  assert.deepEqual(cleared.box.applied.map(entry => entry[1]), [[]], "every mark taken back puts the picture back");
+}
+console.log("PASS: marks on a waiting picture - circles and arrows sized for the picture, the tools leading the bar only for a picture a prompt box waits to send, a circle from its drag or a click, an arrow pointing at the press from wherever it is let go, a pinch never half a mark, undo, and the marks handed to the box on close");
 
 /* ---- Copy: the picture onto the clipboard, offered only where a page may write one ---- */
 (async () => {

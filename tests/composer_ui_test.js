@@ -1679,6 +1679,122 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     none.composer.destroy();
     context.sessionViewFor = realView; context.sessionWorkspace = realWorkspace;
   }
+  /* ---- marks on a waiting picture ---- */
+  {
+    const rendered = [];
+    let renderFail = null;
+    context.imageWithMarks = (url, marks) => {
+      rendered.push({ url, marks: JSON.parse(JSON.stringify(marks)) });
+      return renderFail ? Promise.reject(renderFail) : Promise.resolve({ size: 99, type: "image/png" });
+    };
+    const circle = { kind: "circle", w: 6, cx: 40, cy: 30, rx: 12, ry: 8 };
+    const arrow = { kind: "arrow", w: 6, x1: 90, y1: 90, x2: 50, y2: 50 };
+    const b = makeBox({ directory: () => null });
+    b.ta.focus(); type(b.ta, "Look here");
+    const from = calls.fetch.length, apiFrom = calls.api.length;
+    paste(b.ta);
+    const base = b.composer.attachments[0];
+    assert.equal(b.composer.markable(base), false, "a picture still uploading takes no marks");
+    const baseId = completeUpload(calls.fetch[from]);
+    await settle();
+    assert.equal(b.composer.markable(base), true);
+    const view = b.box.querySelector(".attach-view");
+    assert.ok(view._marking && view._marking.attachment === base && view._marking.composer === b.composer,
+      "the thumbnail carries what the viewer needs to mark it");
+    assert.deepEqual(JSON.parse(JSON.stringify(view._marking.marks)), []);
+    assert.equal(view._marking.source, "", "an unmarked picture opens as itself");
+
+    // the marked copy takes the picture's place at once, and a send waits for it
+    assert.equal(b.composer.applyMarks(base, [circle]), true);
+    let marked = b.composer.attachments[0];
+    assert.ok(marked !== base && marked.original === base && marked.uploading);
+    assert.equal(b.composer.attachments.length, 1);
+    assert.equal(marked.name, "shot-marked.png");
+    assert.equal(b.composer.sendBlocker(), "Wait for file uploads to finish");
+    await settle();
+    assert.deepEqual(rendered.at(-1), { url: base.url, marks: [circle] }, "drawn from the picture itself");
+    const upload = calls.fetch.at(-1);
+    assert.equal(upload.init.headers["Content-Type"], "image/png");
+    assert.equal(upload.init.headers["X-Puppy-Filename"], "shot-marked.png");
+    const markedId = completeUpload(upload);
+    await settle();
+    assert.equal(b.composer.sendBlocker(), "");
+    assert.ok(b.composer.message().includes(`/${markedId}/shot-marked.png`) &&
+      !b.composer.message().includes(`/${baseId}/`), "the message carries the marked copy alone");
+    assert.deepEqual(deletes(apiFrom), [], "the picture under the marks is kept for the next change");
+    const markedView = b.box.querySelector(".attach-view");
+    assert.deepEqual(JSON.parse(JSON.stringify(markedView._marking.marks)), [circle]);
+    assert.equal(markedView._marking.source, base.url, "a marked picture opens as it was, its marks laid over it");
+
+    // marked again: drawn from the original, the earlier copy spent once the new one lands
+    b.composer.applyMarks(marked, [circle, arrow]);
+    const again = b.composer.attachments[0];
+    assert.ok(again.original === base && again.previous === marked);
+    await settle();
+    assert.deepEqual(rendered.at(-1), { url: base.url, marks: [circle, arrow] });
+    completeUpload(calls.fetch.at(-1));
+    await settle();
+    assert.deepEqual(deletes(apiFrom), [`sessions/10/upload/${markedId}`], "the earlier marked copy goes");
+    assert.ok(again.previous === null && !base.removed);
+
+    // no marks left: the picture comes back as it was
+    const againId = again.uploadId;
+    assert.equal(b.composer.applyMarks(again, []), true);
+    assert.ok(b.composer.attachments[0] === base && !base.removed);
+    assert.ok(deletes(apiFrom).includes(`sessions/10/upload/${againId}`));
+    assert.equal(b.composer.applyMarks(base, []), false, "an unmarked picture has nothing to take back");
+
+    // a copy that cannot be drawn, or uploaded, leaves the box as it was and says so
+    calls.toasts.length = 0;
+    renderFail = new Error("the picture could not be read");
+    b.composer.applyMarks(base, [circle]);
+    await settle();
+    renderFail = null;
+    assert.ok(b.composer.attachments[0] === base && !base.removed);
+    assert.deepEqual(calls.toasts.map(t => t.text), ["Could not mark shot.png · the picture could not be read"]);
+    b.composer.applyMarks(base, [circle]);
+    await settle();
+    calls.fetch.at(-1).resolve({ ok: false, status: 413, json: async () => ({ error: "too large" }) });
+    await settle();
+    assert.ok(b.composer.attachments[0] === base && !base.removed);
+    assert.equal(calls.toasts.at(-1).text, "Could not mark shot.png · too large");
+    assert.equal(b.composer.sendBlocker(), "");
+
+    // removing a marked picture takes the one under its marks with it
+    b.composer.applyMarks(base, [arrow]);
+    await settle();
+    const lastId = completeUpload(calls.fetch.at(-1));
+    await settle();
+    b.box.querySelector(".attach-x").onclick();
+    assert.equal(b.composer.attachments.length, 0);
+    assert.ok(deletes(apiFrom).includes(`sessions/10/upload/${baseId}`) &&
+      deletes(apiFrom).includes(`sessions/10/upload/${lastId}`));
+
+    // a sent marked picture lets its original go; a busy box marks nothing
+    paste(b.ta);
+    const next = b.composer.attachments[0];
+    const nextId = completeUpload(calls.fetch.at(-1));
+    await settle();
+    b.composer.applyMarks(next, [circle]);
+    await settle();
+    completeUpload(calls.fetch.at(-1));
+    await settle();
+    b.composer.take();
+    assert.ok(deletes(apiFrom).includes(`sessions/10/upload/${nextId}`), "the unsent original goes with the send");
+    paste(b.ta);
+    completeUpload(calls.fetch.at(-1));
+    await settle();
+    b.composer.setBusy(true);
+    assert.equal(b.composer.markable(b.composer.attachments[0]), false);
+    assert.equal(b.composer.applyMarks(b.composer.attachments[0], [circle]), false);
+    b.composer.setBusy(false);
+    b.composer.destroy();
+    delete context.imageWithMarks;
+  }
+  console.log("PASS: marks on a waiting picture: a marked PNG takes its place at once and a send waits for it, the " +
+              "picture under the marks is kept to mark again or to come back, failures leave the box as it was, " +
+              "and removing or sending lets the kept picture go");
+
   console.log("PASS: folder paths: \"./\" and \"../\" open the box's folder list - folders only with the way up, " +
               "nothing lit until the arrows, Enter sends until then, picks move between folders, Tab completes, " +
               "Escape dismisses, and the folder is the session's own (a linked workspace's on its own backend)");

@@ -323,6 +323,30 @@ function downloadIcon(size) {
 
 /* A chevron pointing left or right on the same 12-box: the image viewer's
    previous and next. */
+/* The image viewer's marking tools, on the download glyph's 12-grid and
+   stroke: a circle, an arrow pointing up and to the left, and undo. */
+function markToolIcon(kind, size = 14) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", {
+    circle: "M10.25 6 A4.25 3.75 0 1 1 1.75 6 A4.25 3.75 0 1 1 10.25 6 Z",
+    arrow: "M9.5 9.5 L2.75 2.75 M2.75 7 L2.75 2.75 7 2.75",
+    undo: "M4.25 2.5 L2.25 4.5 4.25 6.5 M2.5 4.5 H7.25 A2.5 2.5 0 0 1 7.25 9.5 H5",
+  }[kind]);
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.5");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  p.setAttribute("fill", "none");
+  svg.appendChild(p);
+  return svg;
+}
+
 function chevronIcon(size, direction = "right") {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -15176,7 +15200,7 @@ class Composer {
     this.locallyEdited = false;
     spellLearnSent(this.ta.value);   // the marked words of a sent message count
     const message = this.message();
-    this.attachments.forEach(a => this.retireSentAttachment(a));
+    this.attachments.forEach(a => { this.releaseOriginal(a); this.retireSentAttachment(a); });
     this.attachments = [];
     this.renderAttachments(false);
     this.ta.value = "";
@@ -15463,6 +15487,8 @@ class Composer {
     document.removeEventListener("visibilitychange", this._onTypingVisibility);
     this.hideMention();
     const staged = new Set([...(this.histAttach || []), ...this.attachments]);
+    for (const attachment of [...staged])
+      for (const kept of [attachment.original, attachment.previous]) if (kept) staged.add(kept);
     this.histAttach = null;
     this.attachments = [];
     for (const attachment of staged) {
@@ -15503,6 +15529,7 @@ class Composer {
       attachment.size = source.size;
       attachment.sizeText = source.sizeText;
       attachment.contentType = source.contentType;
+      if (source.original) { attachment.original = source.original; attachment.marks = source.marks; }
     }
     const uploading = [];
     for (const source of sources) {
@@ -15511,6 +15538,7 @@ class Composer {
         continue;
       }
       if (reused.has(source)) continue;
+      if (source.original) this.releaseAttachment(source.original);
       source.removed = true;
       if (source.controller) source.controller.abort();
       if (replaceUploading && source.uploadId)
@@ -16555,6 +16583,19 @@ class Composer {
     };
     this.attachments.push(attachment);
     this.renderAttachments();
+    const failure = await this.sendUpload(attachment, file);
+    if (failure && !attachment.removed) {
+      this.removeAttachment(attachment, true);
+      if (!failure.aborted)
+        toast(`Could not upload ${attachment.name || "the file"} · ${failure.error.message}`,
+          "bad", TOAST_LONG);
+    }
+  }
+
+  /* One staged file onto the node, filling in its attachment: nothing once
+     it is there (or once the box let it go meanwhile), else what went wrong. */
+  async sendUpload(attachment, file) {
+    const controller = attachment.controller;
     try {
       const response = await fetch(apiPath(this.host.bid, `sessions/${this.host.sid}/upload`), {
         method: "POST",
@@ -16576,7 +16617,7 @@ class Composer {
         throw new Error("backend returned an invalid upload response");
       if (attachment.removed) {
         if (result.upload_id) this.discardServerUpload(result.upload_id, true);
-        return;
+        return null;
       }
       attachment.path = result.path;
       attachment.uploadId = result.upload_id || "";
@@ -16589,14 +16630,9 @@ class Composer {
       attachment.uploading = false;
       attachment.controller = null;
       this.renderAttachments();
+      return null;
     } catch (error) {
-      if (!attachment.removed) {
-        const wasAborted = !!(controller && controller.signal.aborted);
-        this.removeAttachment(attachment, true);
-        if (!wasAborted)
-          toast(`Could not upload ${attachment.name || "the file"} · ${error.message}`,
-            "bad", TOAST_LONG);
-      }
+      return { error, aborted: !!(controller && controller.signal.aborted) };
     }
   }
 
@@ -16611,6 +16647,16 @@ class Composer {
 
   removeAttachment(attachment, quiet = false) {
     if (!attachment || attachment.removed) return;
+    this.attachments = this.attachments.filter(item => item !== attachment);
+    this.releaseAttachment(attachment, quiet);
+    this.releaseOriginal(attachment);
+    this.renderAttachments();
+  }
+
+  /* An attachment the box has let go: its upload stopped, its own preview
+     released, and its bytes discarded where they belong to this box alone. */
+  releaseAttachment(attachment, quiet = true) {
+    if (!attachment || attachment.removed) return;
     attachment.removed = true;
     if (attachment.controller) attachment.controller.abort();
     if (attachment.url) {
@@ -16618,14 +16664,91 @@ class Composer {
       if (attachment.ownsUrl) URL.revokeObjectURL(attachment.url);
       attachment.url = "";
     }
-    this.attachments = this.attachments.filter(item => item !== attachment);
-    this.renderAttachments();
     /* Only a host whose staged files belong to this box alone may delete
        the bytes: another browser may still hold a local draft or have sent
        a later edit which contains this marker. Session deletion cleans staged
        bytes otherwise. */
     if (attachment.uploadId && this.host.privateUploads())
       this.discardServerUpload(attachment.uploadId, quiet);
+  }
+
+  /* A marked picture keeps the one under its marks so the marks stay
+     changeable; when the marked copy goes, that one goes with it. */
+  releaseOriginal(attachment) {
+    if (!attachment) return;
+    if (attachment.original) this.releaseAttachment(attachment.original);
+    if (attachment.previous) this.releaseAttachment(attachment.previous);
+  }
+
+  /* ---- marks on a waiting picture ---- */
+  /* Whether a staged picture can take marks: one this box still waits to
+     send, uploaded, with uploads open to replace it. */
+  markable(attachment) {
+    if (this.closed || this.busy || !attachment || attachment.removed || attachment.uploading ||
+        !attachment.preview || !this.attachments.includes(attachment)) return false;
+    if (this.host.uploadsBlocked && this.host.uploadsBlocked()) return false;
+    if (!backendSupportsFileUploads(this.host.bid)) return false;
+    const policy = this.uploadPolicy || uploadSettingsFor(this.host.bid);
+    return !(policy && !policy.enabled);
+  }
+
+  attachmentPreview(attachment) {
+    return attachment.url || (attachment.path ? uploadPreviewUrl(this.host.bid, attachment.path) : "");
+  }
+
+  /* The viewer closed on new marks for `attachment`: a marked copy of the
+     picture under them takes its place in the box - uploading at once, so a
+     send waits for it - and the picture itself is kept for the next change.
+     No marks left puts that picture back. A copy that cannot be made or
+     uploaded leaves the box as it was, and says so. */
+  applyMarks(attachment, marks) {
+    if (!this.markable(attachment)) return false;
+    const base = attachment.original || attachment;
+    const at = this.attachments.indexOf(attachment);
+    if (!marks.length) {
+      if (!attachment.original) return false;
+      this.attachments.splice(at, 1, base);
+      this.releaseAttachment(attachment);
+      this.renderAttachments();
+      return true;
+    }
+    const marked = {
+      name: markedImageName(base.name), size: 0, contentType: "image/png",
+      path: "", uploadId: "", url: attachment.url, ownsUrl: false, sizeText: "", line: "",
+      preview: true, uploading: true, removed: false,
+      controller: typeof AbortController !== "undefined" ? new AbortController() : null,
+      original: base, marks: marks.map(mark => ({ ...mark })),
+      // an earlier marked copy this one replaces, until this one has landed
+      previous: attachment !== base ? attachment : null,
+    };
+    this.attachments.splice(at, 1, marked);
+    this.renderAttachments();
+    const restore = reason => {
+      if (marked.removed) return;
+      const place = this.attachments.indexOf(marked);
+      marked.original = marked.previous = null;   // both stay with the box's own copy
+      if (place >= 0) this.attachments.splice(place, 1, attachment);
+      this.releaseAttachment(marked);
+      this.renderAttachments();
+      toast(`Could not mark ${base.name || "the image"} · ${reason}`, "bad", TOAST_LONG);
+    };
+    imageWithMarks(this.attachmentPreview(base), marks).then(async blob => {
+      if (marked.removed) return;
+      const file = typeof File === "function" ? new File([blob], marked.name, { type: "image/png" }) : blob;
+      marked.size = blob.size;
+      marked.url = URL.createObjectURL(blob);
+      marked.ownsUrl = true;
+      this.renderAttachments();
+      const failure = await this.sendUpload(marked, file);
+      if (failure) {
+        if (!failure.aborted) restore(failure.error.message);
+        return;
+      }
+      // an earlier marked copy is spent; the picture under the marks is kept
+      if (marked.previous) this.releaseAttachment(marked.previous);
+      marked.previous = null;
+    }, error => restore((error && error.message) || "the image could not be drawn"));
+    return true;
   }
 
   renderAttachments(persist = true) {
@@ -16636,6 +16759,10 @@ class Composer {
       const chip = attachmentChipNode(a, a.preview
         ? (a.url || uploadPreviewUrl(this.host.bid, a.path)) : "", a.uploading,
         {checkUrl: a.path ? uploadPreviewUrl(this.host.bid, a.path) : ""});
+      const view = chip.querySelector(".attach-view");
+      if (view && this.markable(a))
+        view._marking = { composer: this, attachment: a, marks: a.marks || [],
+          source: a.original ? this.attachmentPreview(a.original) : "" };
       const x = el("button", "attach-x");
       x.type = "button";
       x.appendChild(xIcon(12));
@@ -17750,6 +17877,137 @@ function imageViewerVisibleBox(node) {
   return box;
 }
 
+/* ---- marks on a waiting picture ----
+   A picture waiting in a prompt box can carry red marks for the agent: a
+   circle around something, an arrow pointing at it. Marks are kept in the
+   picture's own pixels and sized for the picture rather than the zoom they
+   were drawn at, so the copy the agent receives shows them as they looked. */
+const IMAGE_MARK_COLOR = "#ff2b2b";   // burned into the picture, so no theme token
+const IMAGE_MARK_TRAVEL = 4;          // screen px a press must move to be a drag
+
+function imageMarkSizes(width, height) {
+  const side = Math.max(1, Math.min(width, height));
+  return {
+    stroke: Math.min(14, Math.max(3, side * 0.006)),
+    arrow: Math.min(360, Math.max(48, side * 0.14)),   // an arrow's whole length
+    circle: Math.min(240, Math.max(18, side * 0.06)),  // a clicked circle's radius
+  };
+}
+
+/* The circle a drag draws: the ellipse its box holds - a round one with
+   `round` (Shift) - or, for a press that did not travel, a circle of the
+   picture's own size around the press. */
+function imageMarkCircle(from, to, sizes, moved = true, round = false) {
+  const base = { kind: "circle", w: sizes.stroke };
+  if (!moved) return { ...base, cx: from.x, cy: from.y, rx: sizes.circle, ry: sizes.circle };
+  const dx = to.x - from.x, dy = to.y - from.y;
+  if (round) {
+    const r = Math.max(Math.abs(dx), Math.abs(dy)) / 2;
+    return { ...base, cx: from.x + (dx < 0 ? -r : r), cy: from.y + (dy < 0 ? -r : r), rx: r, ry: r };
+  }
+  return { ...base, cx: from.x + dx / 2, cy: from.y + dy / 2, rx: Math.abs(dx) / 2, ry: Math.abs(dy) / 2 };
+}
+
+/* The arrow a press draws: its point on the press, its tail toward wherever
+   the pointer is let go - any way round - at the picture's own length. A
+   press that did not travel points up and to the left, like a pointer. */
+function imageMarkArrow(tip, toward, sizes, moved = true) {
+  let dx = toward.x - tip.x, dy = toward.y - tip.y;
+  let length = Math.hypot(dx, dy);
+  if (!moved || length < 0.5) { dx = 1; dy = 1; length = Math.SQRT2; }
+  return { kind: "arrow", w: sizes.stroke, x1: tip.x + dx / length * sizes.arrow,
+           y1: tip.y + dy / length * sizes.arrow, x2: tip.x, y2: tip.y };
+}
+
+/* An arrow as drawn: its shaft from the tail to the head's base, and the
+   head's three corners, the first its point. */
+function imageArrowShape(mark) {
+  const dx = mark.x2 - mark.x1, dy = mark.y2 - mark.y1;
+  const length = Math.max(0.001, Math.hypot(dx, dy));
+  const ux = dx / length, uy = dy / length;
+  const head = Math.min(length * 0.6, mark.w * 4.2), half = mark.w * 2.6;
+  const bx = mark.x2 - ux * head, by = mark.y2 - uy * head;
+  return { shaft: [mark.x1, mark.y1, bx + ux * mark.w * 0.5, by + uy * mark.w * 0.5],
+           head: [[mark.x2, mark.y2], [bx - uy * half, by + ux * half], [bx + uy * half, by - ux * half]] };
+}
+
+/* The marks as SVG, for the viewer's layer over the picture. */
+function drawImageMarks(svg, marks) {
+  const NS = "http://www.w3.org/2000/svg";
+  svg.replaceChildren();
+  const add = (tag, attrs) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    svg.appendChild(node);
+  };
+  for (const mark of marks) {
+    if (mark.kind === "circle") {
+      add("ellipse", { cx: mark.cx, cy: mark.cy, rx: Math.max(0.5, mark.rx), ry: Math.max(0.5, mark.ry),
+        fill: "none", stroke: IMAGE_MARK_COLOR, "stroke-width": mark.w });
+    } else if (mark.kind === "arrow") {
+      const shape = imageArrowShape(mark);
+      add("line", { x1: shape.shaft[0], y1: shape.shaft[1], x2: shape.shaft[2], y2: shape.shaft[3],
+        stroke: IMAGE_MARK_COLOR, "stroke-width": mark.w, "stroke-linecap": "round" });
+      add("polygon", { points: shape.head.map(([x, y]) => x + "," + y).join(" "),
+        fill: IMAGE_MARK_COLOR, stroke: IMAGE_MARK_COLOR, "stroke-width": mark.w * 0.5,
+        "stroke-linejoin": "round" });
+    }
+  }
+}
+
+/* The same marks onto a canvas, for the copy the agent receives. */
+function paintImageMarks(ctx, marks) {
+  ctx.strokeStyle = ctx.fillStyle = IMAGE_MARK_COLOR;
+  ctx.lineCap = ctx.lineJoin = "round";
+  for (const mark of marks) {
+    if (mark.kind === "circle") {
+      ctx.lineWidth = mark.w;
+      ctx.beginPath();
+      ctx.ellipse(mark.cx, mark.cy, Math.max(0.5, mark.rx), Math.max(0.5, mark.ry), 0, 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (mark.kind === "arrow") {
+      const shape = imageArrowShape(mark);
+      ctx.lineWidth = mark.w;
+      ctx.beginPath();
+      ctx.moveTo(shape.shaft[0], shape.shaft[1]);
+      ctx.lineTo(shape.shaft[2], shape.shaft[3]);
+      ctx.stroke();
+      ctx.lineWidth = mark.w * 0.5;
+      ctx.beginPath();
+      shape.head.forEach(([x, y], at) => at ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+}
+
+/* The picture at `url` with its marks, as a PNG at the picture's own size. */
+function imageWithMarks(url, marks) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        paintImageMarks(ctx, marks);
+        canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error("the marks could not be drawn")), "image/png");
+      } catch (error) { reject(error); }
+    };
+    img.onerror = () => reject(new Error("the picture could not be read"));
+    img.src = url;
+  });
+}
+
+/* A marked copy's name: the picture's own, said to be marked, as a PNG. */
+function markedImageName(name) {
+  const stem = String(name || "image").replace(/\.[^./]*$/, "").replace(/-marked$/, "") || "image";
+  return stem + "-marked.png";
+}
+
 class ImageViewer {
   constructor(items, index = 0) {
     this.items = items;
@@ -17768,6 +18026,8 @@ class ImageViewer {
     this.bare = false;
     this.lastTap = null;
     this.timers = new Set();
+    this.tool = "";                // the marking tool that is on: "", "circle" or "arrow"
+    this.draft = null;             // the mark a press is drawing
   }
 
   open(thumb = null) {
@@ -17819,6 +18079,38 @@ class ImageViewer {
     this.nextButton.appendChild(chevronIcon(18, "right"));
     this.outButton.appendChild(minusIcon(14));
     this.inButton.appendChild(plusIcon(14));
+    /* the marks over the picture, in its own pixels, moved with it */
+    this.marksLayer = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    this.marksLayer.classList.add("iv-marks");
+    this.marksLayer.setAttribute("aria-hidden", "true");
+    this.stage.insertBefore(this.marksLayer, this.status);
+    /* A picture waiting in a prompt box takes marks for the agent, so its
+       tools lead the bar; a sent picture, or one the box has let go since,
+       is only looked at. */
+    for (const item of this.items)
+      if (item.marking && !item.marking.composer.markable(item.marking.attachment)) item.marking = null;
+    if (this.items.some(item => item.marking)) {
+      const tool = (kind, label) => {
+        const button = el("button", "icon-btn iv-tool iv-" + kind);
+        button.type = "button";
+        button.setAttribute("aria-label", label);
+        button.appendChild(markToolIcon(kind));
+        return button;
+      };
+      this.circleButton = tool("circle", "Draw a circle");
+      this.arrowButton = tool("arrow", "Draw an arrow");
+      this.undoButton = tool("undo", "Undo the last mark");
+      this.circleButton.setAttribute("aria-pressed", "false");
+      this.arrowButton.setAttribute("aria-pressed", "false");
+      this.circleButton.onclick = () => this.setTool(this.tool === "circle" ? "" : "circle");
+      this.arrowButton.onclick = () => this.setTool(this.tool === "arrow" ? "" : "arrow");
+      this.undoButton.onclick = () => this.undoMark();
+      const sep = el("span", "iv-sep");
+      sep.setAttribute("aria-hidden", "true");
+      const first = this.bar.firstElementChild;
+      for (const node of [this.circleButton, this.arrowButton, this.undoButton, sep])
+        this.bar.insertBefore(node, first);
+    }
     this.prevButton.onclick = () => this.go(this.index - 1);
     this.nextButton.onclick = () => this.go(this.index + 1);
     this.outButton.onclick = () => this.zoomTo(this.s / IMAGE_VIEWER_STEP);
@@ -17880,8 +18172,11 @@ class ImageViewer {
     this.index = index;
     this.ready = false;
     this.gesture = null;
+    this.draft = null;
     this.pointers.clear();
     this.width = this.height = 0;
+    this.drawMarks();
+    this.syncTools();
     this.name.textContent = item.name || "Image";
     this.img.alt = item.name || "";
     this.downloadLink.href = item.url;
@@ -17931,6 +18226,7 @@ class ImageViewer {
     this.enable(this.inButton, false);
     this.enable(this.level, false);
     this.downloadLink.removeAttribute("href");
+    this.syncTools();
   }
 
   loaded(direction, thumb) {
@@ -17939,6 +18235,12 @@ class ImageViewer {
     this.height = img.naturalHeight;
     img.style.width = this.width + "px";
     img.style.height = this.height + "px";
+    const layer = this.marksLayer;
+    layer.setAttribute("viewBox", `0 0 ${this.width} ${this.height}`);
+    layer.setAttribute("width", this.width);
+    layer.setAttribute("height", this.height);
+    layer.style.width = this.width + "px";
+    layer.style.height = this.height + "px";
     this.meta.textContent = this.counter();
     this.m.classList.remove("iv-loading");
     this.status.classList.add("hidden");
@@ -17946,6 +18248,8 @@ class ImageViewer {
     this.measure();
     this.placeFit();
     this.ready = true;
+    this.drawMarks();
+    this.syncTools();
     const box = imageViewerMotion() ? imageViewerVisibleBox(thumb) : null;
     if (box) this.flyFrom(box);
     else if (direction && imageViewerMotion()) this.slideIn(direction);
@@ -18027,6 +18331,7 @@ class ImageViewer {
     img.style.transform = `translate3d(${this.x}px,${this.y}px,0) scale(${this.s})`;
     img.style.borderRadius = IMAGE_VIEWER_RADIUS / this.s + "px";
     img.classList.toggle("iv-crisp", this.s >= IMAGE_VIEWER_CRISP);
+    this.followPicture();
     const zoomed = this.s > this.fit * 1.001;
     this.m.classList.toggle("iv-zoomed", zoomed);
     this.m.classList.toggle("iv-pannable", this.pannable());
@@ -18045,6 +18350,85 @@ class ImageViewer {
     img.style.clipPath = "";
     this.s = shown.s; this.x = shown.x; this.y = shown.y;
     this.apply(false);
+  }
+
+  /* The marks layer wears the picture's transform and its motion classes,
+     so marks move, slide and fade with the picture they are on. */
+  followPicture() {
+    const img = this.img, layer = this.marksLayer;
+    if (!layer) return;
+    layer.style.transform = img.style.transform;
+    for (const name of ["iv-anim", "iv-leaving"])
+      layer.classList.toggle(name, img.classList.contains(name));
+  }
+
+  /* ---- marks ---- */
+  markItem() {
+    const item = this.items[this.index];
+    return item && item.marking ? item : null;
+  }
+
+  sizes() { return imageMarkSizes(this.width, this.height); }
+
+  /* A point on the stage in the picture's own pixels, held inside it. */
+  imagePoint(p) {
+    return { x: Math.min(this.width, Math.max(0, (p.x - this.x) / this.s)),
+             y: Math.min(this.height, Math.max(0, (p.y - this.y) / this.s)) };
+  }
+
+  drawMarks() {
+    if (!this.marksLayer) return;
+    const item = this.markItem();
+    const marks = item && this.ready ? item.marks.slice() : [];
+    if (this.draft && item && this.ready) marks.push(this.draft);
+    drawImageMarks(this.marksLayer, marks);
+  }
+
+  /* The tools answer for the picture shown: drawing needs a loaded picture
+     the box still waits to send, undo a mark to take back. */
+  syncTools() {
+    if (!this.circleButton) return;
+    const item = this.markItem(), on = !!item && this.ready;
+    this.enable(this.circleButton, on);
+    this.enable(this.arrowButton, on);
+    this.enable(this.undoButton, on && item.marks.length > 0);
+    if (!on && this.tool) this.setTool("");
+  }
+
+  setTool(tool) {
+    this.tool = tool;
+    this.m.classList.toggle("iv-marking", !!tool);
+    if (!this.circleButton) return;
+    this.circleButton.setAttribute("aria-pressed", String(tool === "circle"));
+    this.arrowButton.setAttribute("aria-pressed", String(tool === "arrow"));
+    this.circleButton.classList.toggle("on", tool === "circle");
+    this.arrowButton.classList.toggle("on", tool === "arrow");
+  }
+
+  undoMark() {
+    const item = this.markItem();
+    if (!item || !item.marks.length) return;
+    item.marks.pop();
+    this.drawMarks();
+    this.syncTools();
+  }
+
+  /* What a press is drawing, from where it began to where the pointer is. */
+  draftMark(g, p, round = false) {
+    const to = this.imagePoint(p);
+    return this.tool === "circle" ? imageMarkCircle(g.from, to, this.sizes(), g.moved, round) :
+      imageMarkArrow(g.from, to, this.sizes(), g.moved);
+  }
+
+  /* Closing hands every picture whose marks changed to its prompt box, which
+     puts the marked copy where the picture was. */
+  commitMarks() {
+    for (const item of this.items) {
+      if (!item.marking) continue;
+      const before = JSON.stringify(item.marking.marks || []);
+      if (JSON.stringify(item.marks) === before) continue;
+      item.marking.composer.applyMarks(item.marking.attachment, item.marks);
+    }
   }
 
   zoomTarget() {
@@ -18090,7 +18474,7 @@ class ImageViewer {
   }
 
   doubleClick(event) {
-    if (!this.ready || this.pointerType !== "mouse") return;
+    if (!this.ready || this.pointerType !== "mouse" || this.tool) return;
     const p = this.point(event);
     if (this.hits(p)) this.toggleZoom(p.x, p.y);
   }
@@ -18101,6 +18485,12 @@ class ImageViewer {
         !String(window.getSelection ? window.getSelection() : "")) {
       event.preventDefault();
       this.copy();
+      return;
+    }
+    if (!event.defaultPrevented && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey &&
+        (event.key === "z" || event.key === "Z") && this.markItem()) {
+      event.preventDefault();
+      this.undoMark();
       return;
     }
     if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
@@ -18184,6 +18574,13 @@ class ImageViewer {
     if (this.pointerType === "mouse") event.preventDefault();
     if (this.pointers.size === 2) return this.pinchStart();
     if (this.pointers.size > 2) return;
+    if (this.tool && this.ready && this.markItem() && this.hits(p)) {
+      this.gesture = { kind: "mark", start: p, from: this.imagePoint(p), moved: false, type: this.pointerType,
+        track: [{ t: event.timeStamp, x: p.x, y: p.y }] };
+      this.draft = this.draftMark(this.gesture, p, event.shiftKey);
+      this.drawMarks();
+      return;
+    }
     this.gesture = {
       kind: "press", start: p, s: this.s, x: this.x, y: this.y, dx: 0, dy: 0,
       at: event.timeStamp, onImage: this.hits(p), type: this.pointerType,
@@ -18198,6 +18595,12 @@ class ImageViewer {
     const g = this.gesture;
     if (!g) return;
     if (g.kind === "pinch") return this.pinchMove();
+    if (g.kind === "mark") {
+      if (Math.hypot(p.x - g.start.x, p.y - g.start.y) >= IMAGE_MARK_TRAVEL) g.moved = true;
+      this.draft = this.draftMark(g, p, event.shiftKey);
+      this.drawMarks();
+      return;
+    }
     g.track.push({ t: event.timeStamp, x: p.x, y: p.y });
     if (g.track.length > 8) g.track.shift();
     const dx = g.dx = p.x - g.start.x, dy = g.dy = p.y - g.start.y;
@@ -18245,6 +18648,14 @@ class ImageViewer {
     this.gesture = null;
     this.m.classList.remove("iv-dragging");
     const cancelled = event.type === "pointercancel";
+    if (g.kind === "mark") {
+      const item = this.markItem();
+      if (!cancelled && item && this.draft) item.marks.push(this.draft);
+      this.draft = null;
+      this.drawMarks();
+      this.syncTools();
+      return;
+    }
     const velocity = imageViewerVelocity(g.track, event.timeStamp);
     if (g.kind === "press") { if (!cancelled) this.tap(g); }
     else if (g.kind === "pan") this.glide(cancelled ? { x: 0, y: 0 } : velocity);
@@ -18295,6 +18706,7 @@ class ImageViewer {
   }
 
   pinchStart() {
+    if (this.draft) { this.draft = null; this.drawMarks(); }
     const [a, b] = [...this.pointers.values()];
     this.scrim.style.opacity = "";
     this.pinchMid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
@@ -18396,28 +18808,32 @@ class ImageViewer {
     const scrim = el("div", "iv-scrim");
     scrim.style.opacity = this.scrim.style.opacity;
     const img = this.img, shown = this.rendered();
+    const marks = this.marksLayer && this.marksLayer.children.length ? this.marksLayer : null;
+    const moving = marks ? [img, marks] : [img];
     const left = this.origin.left, top = this.origin.top;
     const place = (s, x, y) => {
-      img.style.transform = `translate3d(${x + left}px,${y + top}px,0) scale(${s})`;
+      for (const node of moving) node.style.transform = `translate3d(${x + left}px,${y + top}px,0) scale(${s})`;
     };
-    img.classList.remove("iv-anim", "iv-leaving");
-    img.style.clipPath = "";
+    for (const node of moving) {
+      node.classList.remove("iv-anim", "iv-leaving");
+      node.style.clipPath = "";
+    }
     img.alt = "";
     place(shown.s, shown.x, shown.y);
     img.style.borderRadius = IMAGE_VIEWER_RADIUS / shown.s + "px";
-    layer.append(scrim, img);
+    layer.append(scrim, ...moving);
     document.body.appendChild(layer);
     void img.offsetWidth;
     layer.classList.add("iv-going");
-    img.classList.add("iv-anim");
+    for (const node of moving) node.classList.add("iv-anim");
     if (box) {
       const end = imageViewerCover(box, this.width, this.height, this.origin);
       place(end.s, end.x, end.y);
-      img.style.clipPath = imageViewerInset(end.inset, IMAGE_VIEWER_RADIUS / shown.s);
+      for (const node of moving) node.style.clipPath = imageViewerInset(end.inset, IMAGE_VIEWER_RADIUS / shown.s);
     } else {
       const shrink = 0.94, w = this.width * shown.s, h = this.height * shown.s;
       place(shown.s * shrink, shown.x + w * (1 - shrink) / 2, shown.y + h * (1 - shrink) / 2);
-      img.classList.add("iv-leaving");
+      for (const node of moving) node.classList.add("iv-leaving");
     }
     setTimeout(() => layer.remove(), imageViewerMs("--t-slow") + 60);
   }
@@ -18425,6 +18841,7 @@ class ImageViewer {
   teardown() {
     this.closed = true;
     this.generation++;
+    this.commitMarks();
     window.removeEventListener("resize", this.resize);
     for (const timer of this.timers) clearTimeout(timer);
     this.timers.clear();
@@ -18450,7 +18867,12 @@ function openImageViewerFrom(button) {
   const buttons = strip ? [...strip.querySelectorAll(".attach-view")] : [button];
   const items = buttons.map(node => {
     const img = node.querySelector(".attach-thumb");
-    return { url: img ? img.dataset.imagePreview || img.currentSrc || img.src : "", name: img ? img.alt : "", thumb: img };
+    const shown = img ? img.dataset.imagePreview || img.currentSrc || img.src : "";
+    /* a picture waiting in a prompt box opens as it was before its marks,
+       with the marks laid over it again to change */
+    const marking = node._marking || null;
+    return { url: marking && marking.source ? marking.source : shown, name: img ? img.alt : "", thumb: img,
+             marking, marks: marking ? marking.marks.map(mark => ({ ...mark })) : [] };
   });
   return openImageViewer(items, Math.max(0, buttons.indexOf(button)));
 }

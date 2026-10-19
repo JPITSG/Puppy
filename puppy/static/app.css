@@ -3173,6 +3173,21 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
    stays smooth */
 .iv-img.iv-crisp{image-rendering:pixelated}
 .image-viewer.iv-loading .iv-img,.image-viewer.iv-failed .iv-img,.image-viewer.iv-failed .iv-bar{visibility:hidden}
+/* Marks on a waiting picture: a layer on the picture's own box and transform,
+   moving, sliding and fading with it, never taking a press. */
+.iv-marks{
+  position:absolute;left:0;top:0;display:block;overflow:visible;
+  transform-origin:0 0;pointer-events:none;
+}
+.iv-marks.iv-anim{
+  transition:transform var(--t-slow) var(--ease),clip-path var(--t-slow) var(--ease),
+    opacity var(--t-base) var(--ease);
+}
+.iv-marks.iv-leaving{opacity:0}
+.iv-marks.iv-anim.iv-leaving{transition-duration:var(--t-fast)}
+.image-viewer.iv-loading .iv-marks,.image-viewer.iv-failed .iv-marks{visibility:hidden}
+/* a tool that is on says so in the bar */
+.iv-bar .iv-tool.on{background:var(--acc-dim);color:var(--acc2)}
 .image-viewer.iv-dragging .iv-img{will-change:transform}
 .image-viewer.iv-dragging .iv-scrim{transition:none}
 /* a fitted picture invites a zoom, a zoomed one that still fits takes it
@@ -3181,6 +3196,8 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .image-viewer.iv-zoomed:not(.iv-pannable) .iv-img{cursor:zoom-out}
 .image-viewer.iv-pannable .iv-stage{cursor:grab}
 .image-viewer.iv-pannable.iv-dragging .iv-stage{cursor:grabbing}
+/* with a marking tool on, the picture draws where the pointer lands */
+.image-viewer.iv-marking .iv-stage .iv-img{cursor:crosshair}
 .iv-status{
   position:absolute;inset:0;display:grid;place-items:center;margin:0;pointer-events:none;
   color:var(--txt2);font-size:var(--fs-md);
@@ -3251,7 +3268,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   .iv-next{right:8px}
 }
 @media (prefers-reduced-motion:reduce){
-  .iv-img.iv-anim,.iv-scrim,.image-viewer .modal-head,.iv-bar,.iv-nav,
+  .iv-img.iv-anim,.iv-marks.iv-anim,.iv-scrim,.image-viewer .modal-head,.iv-bar,.iv-nav,
   .attach-chip .attach-view .attach-thumb{transition:none}
 }
 .engine-pick{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;margin-bottom:10px}
