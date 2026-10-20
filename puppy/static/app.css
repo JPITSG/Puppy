@@ -2825,6 +2825,12 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .backup-history .timer-row{gap:10px 14px}
 .backup-history .timer-row-name{overflow-wrap:anywhere}
 .backup-download{font-family:var(--sans);font-size:var(--fs-sm);white-space:nowrap}
+/* a saved copy's verbs: Download (or why there is none), then its bin, which
+   alone takes the error tone under the pointer like the task strip's */
+.backup-actions{display:flex;align-items:center;gap:6px;min-width:0}
+.backup-history .backup-delete{width:28px;height:28px;color:var(--txt3)}
+@media (hover:hover){.backup-history .backup-delete:hover{color:var(--err)}}
+.backup-history .backup-delete:active{color:var(--err)}
 .engine-updates-section{
   margin-top:15px;padding-top:16px;border-top:1px solid var(--line);
 }

@@ -40,7 +40,17 @@ that could not be removed remain listed.
 **Recent backups** shows the next scheduled run or current waiting/running state,
 the last 20 outcomes, and any older copies still retained. **Download** links are
 authenticated and can be used repeatedly. Missing or changed files are marked
-**Unavailable**; copies removed by rotation are marked **Rotated**. The card
+**Unavailable**; copies removed by rotation are marked **Rotated**. Each saved
+copy's row ends with a bin that deletes it after a destructive confirmation
+naming its time, size, file and directory: only the catalogued file with its
+recorded identity is unlinked, and the copy leaves the catalogue and the outcome
+history together, so it is never shown as rotated. A copy whose file is already
+gone, or whose name now holds another file (or whose directory can no longer be
+trusted), only leaves the list - nothing at its place is touched - and the notice
+says which. A file that cannot be removed stays listed, with the reason inline.
+Deleting is refused while a backup, export or restore runs, and a scheduled or
+manual backup waits for a delete in progress, so neither writes over the other's
+catalogue. The card
 refreshes while visible, preserving unsaved settings and an unchanged history's
 scroll and focus. Browser Back/Forward preserves the form and never runs a backup
 or replays Save.
@@ -106,7 +116,13 @@ Routes, all authenticated and uncached:
   together; `GET` answers `archive_limit_mib` and its `archive_limit` range
   (`min`, `max`, `default`).
 - `POST /api/snapshot/backups/run`: enqueue one saved backup; returns 202.
-- `GET /api/snapshot/saved/{id}`: download one retained file.
+- `GET /api/snapshot/saved/{id}`: download one retained file; each listed copy
+  also carries its `directory`.
+- `DELETE /api/snapshot/saved/{id}`: delete one saved copy and forget it; answers
+  the new listing plus `deleted`: `deleted`, `missing` (its file was gone) or
+  `kept` (another file stands at its name and was left alone). 404 for a copy not
+  in the list, 409 while a backup, export or another delete runs (or when the
+  file cannot be removed), 503 during a restore.
 
 Manual export and the scheduler share the snapshot freeze and archive builder.
 Publication records the completed temporary file before linking its final name,

@@ -6,13 +6,15 @@ const fs = require("node:fs"), vm = require("node:vm");
 const { FakeDocument, FakeEvent } = require("./fake_dom.js");
 const source = fs.readFileSync(require("node:path").join(__dirname, "../puppy/static/app.js"), "utf8");
 const between = (a,b) => source.slice(source.indexOf(a), source.indexOf(b,source.indexOf(a)));
-const document = new FakeDocument(), requests = [], timers = new Map();
+const document = new FakeDocument(), requests = [], timers = new Map(), confirms = [], toasts = [];
 const state = {clockFormat:"24h"};
 let timerId = 0;
 const context = vm.createContext({document, state, console, Number, JSON, Promise, Set, Map,
   el: (tag,cls,text) => {const n = document.createElement(tag); n.className = cls || ""; if(text !== undefined)n.textContent = text; return n;},
   setTimeout: fn => {timers.set(++timerId,fn); return timerId;}, clearTimeout: id => timers.delete(id),
   fmtBytes: n => `${n} B`, fmtStamp: n => `stamp ${n}`, toast: () => {},
+  trashIcon: () => document.createElement("svg"),
+  modalConfirm: (title, text, options) => new Promise(resolve => confirms.push({title, text, options, resolve})),
   api: (bid,route,options) => new Promise((resolve,reject) => requests.push({bid,route,options,resolve,reject})),
 });
 vm.runInContext(between("function fmtClockSetting(", "/* One stamp for"), context);
@@ -95,6 +97,62 @@ const same = (a,b) => assert.equal(JSON.stringify(a),JSON.stringify(b));
   assert.match($("#backup-history").textContent,/Unavailable/); assert.match($("#backup-history").textContent,/Rotated/);
   link.focus(); read=view.backupRefresh(); reply("snapshot/backups",data); await read;
   assert.equal($(".backup-download"),link); assert.equal(document.activeElement,link);
+
+  // Each saved copy ends its row with a bin, after Download; a rotated or failed one has none.
+  context.toast = (text, tone) => toasts.push([text, tone]);
+  const where = {directory:"/home/mira/backups"};
+  const kept = payload({files:[{...file,...where},{...file,...where,id:"b",available:false,download:null}],
+    history:data.history});
+  read=view.backupRefresh(); reply("snapshot/backups",kept); await read;
+  let bins=card.querySelectorAll(".backup-delete");
+  same(bins.map(b=>b.getAttribute("aria-label")),["Delete backup from stamp 400","Delete backup from stamp 400"]);
+  const firstActions=bins[0].parentNode;
+  assert.equal(firstActions.className,"backup-actions");
+  same(firstActions.children.map(n=>n.className),["backup-download","icon-btn backup-delete"]);
+  assert.equal(bins[0].disabled,false);
+  // it asks first, naming the copy and its file; Cancel sends nothing
+  bins[0].onclick(); await tick();
+  let ask=confirms.shift();
+  assert.equal(ask.title,"Delete backup?");
+  assert.equal(ask.text,"Its archive backup.tar.gz is deleted from /home/mira/backups and cannot be recovered.");
+  same(ask.options,{confirmLabel:"Delete",destructive:true,subject:"stamp 400 · 900 B"});
+  ask.resolve(false); await tick();
+  assert.equal(requests.length,0);
+  // confirmed: one request, the bins held while it runs, the focus handed on
+  bins[0].onclick(); await tick(); confirms.shift().resolve(true); await tick();
+  request=requests.shift();
+  assert.equal(request.route,"snapshot/saved/a"); same(request.options,{method:"DELETE"});
+  assert.ok(card.querySelectorAll(".backup-delete").every(b=>b.disabled),"no second delete while one runs");
+  assert.equal(run.disabled,true);
+  const afterA=payload({files:[{...file,...where,id:"b",available:false,download:null}],history:data.history.slice(1),deleted:"deleted"});
+  request.resolve(afterA); await tick();
+  same(toasts.pop(),["Backup deleted","ok"]);
+  bins=card.querySelectorAll(".backup-delete");
+  assert.equal(bins.length,1); assert.equal(bins[0].disabled,false);
+  assert.equal(document.activeElement,bins[0],"the focus passes to the row that took its place");
+  assert.doesNotMatch($("#backup-history").textContent,/Download/);
+  // a copy whose file is gone only leaves the list, and says so
+  bins[0].onclick(); await tick(); ask=confirms.shift();
+  assert.match(ask.text,/missing or was replaced, so it only leaves this list/);
+  ask.resolve(true); await tick();
+  request=requests.shift(); assert.equal(request.route,"snapshot/saved/b");
+  request.reject(new Error("Could not delete the backup · Permission denied")); await tick();
+  assert.equal(error.textContent,"Could not delete the backup · Permission denied","a refusal stays inline");
+  assert.equal(card.querySelectorAll(".backup-delete").length,1); assert.equal(toasts.length,0);
+  card.querySelector(".backup-delete").onclick(); await tick(); confirms.shift().resolve(true); await tick();
+  requests.shift().resolve(payload({history:data.history.slice(2),deleted:"missing"})); await tick();
+  same(toasts.pop(),["Backup removed from the list · its file was already gone","ok"]);
+  assert.equal(card.querySelectorAll(".backup-delete").length,0);
+  assert.equal(document.activeElement,run,"with no copy left the focus goes to Run now");
+  // a replaced file is left alone, and the notice says so
+  read=view.backupRefresh(); reply("snapshot/backups",kept); await read;
+  card.querySelector(".backup-delete").onclick(); await tick(); confirms.shift().resolve(true); await tick();
+  requests.shift().resolve(payload({files:kept.files.slice(1),history:data.history,deleted:"kept"})); await tick();
+  same(toasts.pop(),["Backup removed from the list · the file at its place was replaced, so it was left alone","warn"]);
+  // a running backup holds every bin
+  read=view.backupRefresh(); reply("snapshot/backups",{...kept,status:"running"}); await read;
+  assert.ok(card.querySelectorAll(".backup-delete").every(b=>b.disabled));
+  context.toast = () => {};
   read=view.backupRefresh(); reply("snapshot/backups",payload({status:"running"})); await read;
   assert.equal(save.disabled,true); assert.equal(run.disabled,true); assert.equal(dir.disabled,true);
   assert.equal(limit.disabled,true);
@@ -106,5 +164,5 @@ const same = (a,b) => assert.equal(JSON.stringify(a),JSON.stringify(b));
   view.backupRetire(); assert.equal(timers.size,0);
   request.resolve(payload()); await read; assert.equal(dir.value,oldDirectory);
   await view.backupRefresh(); assert.equal(requests.length,0);
-  console.log("PASS: backup settings and the archive limit, saved-only Run now, local-clock parsing, inline failures, edit/read races, stable downloads and polling lifecycle");
+  console.log("PASS: backup settings and the archive limit, saved-only Run now, local-clock parsing, inline failures, edit/read races, stable downloads, deleting a saved copy behind its confirm, and polling lifecycle");
 })().catch(error=>{console.error(error);process.exitCode=1;});

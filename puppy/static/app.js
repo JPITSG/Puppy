@@ -30621,6 +30621,9 @@ class SettingsView {
         "Waiting for idle time" + (payload.waiting ? ` · ${payload.waiting}` : "") :
         payload.settings.enabled ? `Next backup · ${fmtStamp(payload.next_at)}` : "Scheduled backups are off";
       status.classList.toggle("busy", running || payload.status === "waiting");
+      // a saved copy is deleted only while nothing else touches the catalogue
+      const syncDeletes = () => history.querySelectorAll(".backup-delete")
+        .forEach(button => { button.disabled = busy || running; });
       const files = new Map(payload.files.map(item => [item.id, item]));
       const entries = payload.history.concat(payload.files.filter(item => !payload.history.some(h => h.id === item.id))
         .map(item => ({...item, tone: "ok", message: "Backup saved", source: ""})))
@@ -30628,7 +30631,7 @@ class SettingsView {
       /* Key the rendered history: polling must preserve a reader's scroll,
          focus and download link rather than replace an unchanged list. */
       const key = JSON.stringify([entries, payload.files]);
-      if (history.dataset.signature === key) return;
+      if (history.dataset.signature === key) { syncDeletes(); return; }
       history.dataset.signature = key;
       history.replaceChildren();
       if (!entries.length) history.appendChild(el("p", "help", "No saved backups yet"));
@@ -30641,14 +30644,63 @@ class SettingsView {
         if (file) detail.push(fmtBytes(file.size));
         copy.appendChild(el("div", "timer-row-description", detail.filter(Boolean).join(" · ")));
         row.appendChild(copy);
+        /* the row's verbs end with its destructive one: Download (or why
+           there is none), then the bin for a copy the catalogue still holds */
+        const actions = el("div", "backup-actions");
         if (file && file.available) {
           const link = el("a", "backup-download", "Download");
           link.href = file.download; link.download = file.filename;
           link.setAttribute("aria-label", `Download backup from ${fmtStamp(file.at)}`);
-          row.appendChild(link);
-        } else if (file) row.appendChild(el("span", "help", "Unavailable"));
-        else if (item.tone !== "bad") row.appendChild(el("span", "help", "Rotated"));
+          actions.appendChild(link);
+        } else if (file) actions.appendChild(el("span", "help", "Unavailable"));
+        else if (item.tone !== "bad") actions.appendChild(el("span", "help", "Rotated"));
+        if (file) {
+          const remove = el("button", "icon-btn backup-delete");
+          remove.type = "button";
+          remove.appendChild(trashIcon(14));
+          remove.setAttribute("aria-label", `Delete backup from ${fmtStamp(file.at)}`);
+          remove.onclick = () => deleteBackup(file, remove);
+          actions.appendChild(remove);
+        }
+        if (actions.childElementCount) row.appendChild(actions);
         history.appendChild(row);
+      }
+      syncDeletes();
+    };
+    /* Deleting a saved copy takes its archive off the disk for good, so it
+       asks first, naming the copy and where its file is; a copy whose file
+       is gone or was replaced only leaves the list. One press, one request;
+       the focus the bin held passes to the row that took its place. */
+    const deleteBackup = async (file, button) => {
+      if (button.disabled || busy) return;
+      const confirmed = await modalConfirm("Delete backup?", file.available ?
+        `Its archive ${file.filename} is deleted from ${file.directory} and cannot be recovered.` :
+        "Its archive is missing or was replaced, so it only leaves this list; " +
+          "nothing at its place is touched.",
+        { confirmLabel: "Delete", destructive: true, subject: `${fmtStamp(file.at)} · ${fmtBytes(file.size)}` });
+      if (!confirmed || !current() || busy) return;
+      const place = [...history.querySelectorAll(".backup-delete")].indexOf(button);
+      busy = true; ++serial; showError(""); paint();
+      try {
+        const result = await api(0, `snapshot/saved/${file.id}`, { method: "DELETE" });
+        if (!current()) return;
+        const changed = dirty(); payload = result;
+        if (!changed) hydrate();
+        if (result.deleted === "kept")
+          toast("Backup removed from the list · the file at its place was replaced, so it was left alone", "warn");
+        else toast(result.deleted === "missing" ? "Backup removed from the list · its file was already gone" :
+          "Backup deleted", "ok");
+      } catch (error) { if (current()) showError(error.message); }
+      finally {
+        busy = false;
+        if (current()) {
+          paint();
+          const active = document.activeElement;
+          if (!active || !active.isConnected || active === document.body) {
+            const rest = [...history.querySelectorAll(".backup-delete")];
+            (rest[place] || rest[place - 1] || run).focus();
+          }
+        }
       }
     };
     const load = async () => {

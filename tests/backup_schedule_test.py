@@ -4,6 +4,7 @@ import asyncio
 import datetime
 import json
 import os
+import secrets
 from pathlib import Path
 import shutil
 import sqlite3
@@ -175,6 +176,87 @@ async def main():
                 await replacement.tick()
             assert backups._load()["pending"] is None and (folder / entry["filename"]).is_file()
             print("PASS: busy waits, failures keep good copies, replaced files are refused and journalled publication resumes after restart", flush=True)
+
+            # Deleting a saved copy by hand: its file, its entry and its history line
+            # go; a replaced file or a missing one only leaves the list.
+            def catalogue(content=b"saved archive"):
+                ident = secrets.token_hex(16)
+                path = folder / "puppy-backup-{}.tar.gz".format(ident)
+                path.write_bytes(content)
+                path.chmod(0o600)
+                info = path.stat()
+                current = backups._load()
+                current["files"].append({"id": ident, "at": time.time(), "directory": str(folder),
+                    "filename": path.name, "size": info.st_size, "device": info.st_dev,
+                    "inode": info.st_ino, "protection": "none"})
+                current["history"] = (current["history"] + [{"id": ident, "at": time.time(),
+                    "source": "manual", "tone": "ok", "message": "Backup saved"}])[-backups.HISTORY_LIMIT:]
+                backups._save(current)
+                return ident, path
+
+            ident, path = catalogue()
+            listed = await request("GET", "backups")
+            mine = next(item for item in listed["files"] if item["id"] == ident)
+            assert mine["directory"] == str(folder) and mine["available"], "the list says where each copy lives"
+            app["puppy_snapshot_busy"] = "restore"
+            await request("DELETE", "saved/" + ident, status=503)
+            app["puppy_snapshot_busy"] = "export"
+            await request("DELETE", "saved/" + ident, status=409)
+            app["puppy_snapshot_busy"] = None
+            scheduler.running = True
+            refusal = await request("DELETE", "saved/" + ident, status=409)
+            assert "current backup" in refusal["error"]
+            scheduler.running = False
+            await request("DELETE", "saved/" + "f" * 32, status=404)
+            async with http.delete(url + "saved/" + ident) as response:
+                assert response.status in (302, 401), "signed-in only"
+            assert path.exists()
+            answer = await request("DELETE", "saved/" + ident)
+            assert answer["deleted"] == "deleted" and not path.exists()
+            assert ident not in {item["id"] for item in answer["files"]}
+            assert ident not in {item["id"] for item in answer["history"]}, "never listed as rotated"
+            assert ident not in {item["id"] for item in backups._load()["files"]}
+            await request("DELETE", "saved/" + ident, status=404)
+            async with http.get(url + "saved/" + ident, headers=headers) as response:
+                assert response.status == 404
+            assert unrelated.read_bytes() == b"never rotate this"
+
+            # a file replaced under its name is left alone; the entry still goes
+            ident, path = catalogue()
+            moved = folder / "kept-original"
+            path.rename(moved)
+            path.symlink_to(unrelated)
+            answer = await request("DELETE", "saved/" + ident)
+            assert answer["deleted"] == "kept" and path.is_symlink() and unrelated.exists() and moved.exists()
+            assert ident not in {item["id"] for item in backups._load()["files"]}
+            path.unlink()
+            moved.unlink()
+            # a file already gone only leaves the list
+            ident, path = catalogue()
+            path.unlink()
+            assert (await request("DELETE", "saved/" + ident))["deleted"] == "missing"
+            # a file that cannot be removed stays listed, and says why
+            ident, path = catalogue()
+            with patch.object(backups.os, "unlink", side_effect=PermissionError(13, "Permission denied")):
+                failed = await request("DELETE", "saved/" + ident, status=409)
+            assert failed["error"] == "Could not delete the backup · Permission denied"
+            assert path.exists() and ident in {item["id"] for item in backups._load()["files"]}
+            # a backup never starts while a deletion holds the catalogue
+            scheduler.deleting = True
+            scheduler.queue()
+            await scheduler.tick()
+            assert backups._load()["pending"] is not None, "the backup waits for the deletion"
+            refusal = await request("DELETE", "saved/" + ident, status=409)
+            assert "other backup" in refusal["error"]
+            scheduler.deleting = False
+            await scheduler.tick()
+            assert backups._load()["pending"] is None
+            assert ident in {item["id"] for item in backups._load()["files"]}, "the backup kept the listed copy"
+            await request("DELETE", "saved/" + ident)
+            assert not path.exists()
+            print("PASS: a saved backup deleted by hand - its own file, entry and history line - while a replaced file "
+                  "is left alone, a missing one only leaves the list, a failure keeps it listed, and a delete is "
+                  "refused during a backup, export, restore or another delete", flush=True)
 
             settings["enabled"] = True
             scheduler.settings(body())

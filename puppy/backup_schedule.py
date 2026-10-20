@@ -4,7 +4,8 @@ The schedule and bounded catalogue live in one strictly validated meta record,
 so snapshots carry them without changing the database or configuration schema.
 Archive files themselves are outside snapshot coverage. Publication is journalled:
 a completed private temporary file is recorded before it becomes downloadable.
-Only catalogue-owned files with matching identities may be downloaded or rotated.
+Only catalogue-owned files with matching identities may be downloaded, rotated
+or deleted.
 
 The archive limit every backup and restore is held to sits beside it in its own
 optional, exact-shape `backup_limit` record (`{format, archive_mib}`): absent is
@@ -331,6 +332,33 @@ def rotate(files, keep):
     return retained, errors
 
 
+def remove_saved(entry):
+    """Delete one catalogued archive by hand: only the file the catalogue
+    recorded, never one that has since taken its name. Answers what became of
+    it - "deleted", "missing" (gone already, or its directory with it) or
+    "kept" (something else stands there, or the directory can no longer be
+    trusted, and it was left alone). Any other failure raises and the
+    catalogue keeps the entry."""
+    try:
+        fd = _open_directory(entry["directory"])
+    except (FileNotFoundError, NotADirectoryError):
+        return "missing"
+    except BackupError:
+        return "kept"
+    try:
+        try:
+            info = os.stat(entry["filename"], dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return "missing"
+        if not _identity(info, entry):
+            return "kept"
+        os.unlink(entry["filename"], dir_fd=fd)
+        os.fsync(fd)
+        return "deleted"
+    finally:
+        os.close(fd)
+
+
 class Scheduler:
     def __init__(self, app, exporter, conflict):
         self.app, self.exporter, self.conflict = app, exporter, conflict
@@ -339,6 +367,9 @@ class Scheduler:
         self.running = False
         self.waiting = ""
         self.stopping = False
+        # a hand deletion holds the catalogue: a backup that loaded it before
+        # the deletion finished would write the deleted copy back
+        self.deleting = False
 
     def settings(self, value):
         if self.running or self.app.get("puppy_snapshot_busy"):
@@ -376,6 +407,29 @@ class Scheduler:
             _save(current)
         self.wake.set()
 
+    async def delete(self, identity):
+        """Delete one saved backup and forget it: its file (see remove_saved),
+        its catalogue entry and its line in the history, so the list never
+        calls it rotated. Refused while a backup, export or restore runs."""
+        if self.running or self.app.get("puppy_snapshot_busy"):
+            raise BackupError("Wait for the current backup or restore to finish")
+        if self.deleting:
+            raise BackupError("Wait for the other backup to finish deleting")
+        entry = next((item for item in _load()["files"] if item["id"] == identity), None)
+        if entry is None:
+            raise LookupError(identity)
+        self.deleting = True
+        try:
+            outcome = await operations.to_thread(remove_saved, entry)
+            current = _load()
+            current["files"] = [item for item in current["files"] if item["id"] != identity]
+            current["history"] = [item for item in current["history"] if item["id"] != identity]
+            _save(current)
+        finally:
+            self.deleting = False
+            self.wake.set()   # a backup held off meanwhile goes now
+        return outcome
+
     @staticmethod
     def _pending(source, now):
         return {"id": secrets.token_hex(16), "at": now, "source": source, "file": None}
@@ -391,7 +445,7 @@ class Scheduler:
             except (OSError, BackupError):
                 available = False
             files.append({"id": entry["id"], "at": entry["at"], "filename": entry["filename"],
-                          "size": entry["size"], "available": available,
+                          "directory": entry["directory"], "size": entry["size"], "available": available,
                           "download": "/api/snapshot/saved/" + entry["id"] if available else None})
         return {"settings": current["settings"], "next_at": current["next_at"],
                 "timezone": time.strftime("%Z"), "keep_max": KEEP_MAX,
@@ -402,7 +456,7 @@ class Scheduler:
                 "files": files, "history": list(reversed(current["history"]))}
 
     async def tick(self, now=None):
-        if self.running or self.stopping or self.app.get("puppy_snapshot_busy"):
+        if self.running or self.stopping or self.deleting or self.app.get("puppy_snapshot_busy"):
             return
         now = time.time() if now is None else now
         current = _load()
@@ -544,6 +598,24 @@ async def h_download(request):
     return response
 
 
+async def h_delete(request):
+    if request.app.get("puppy_snapshot_busy") == "restore":
+        return web.json_response({"error": "Puppy restore in progress"}, status=503, headers=HEADERS)
+    scheduler = request.app["puppy_backups"]
+    try:
+        outcome = await scheduler.delete(request.match_info["identity"])
+    except LookupError:
+        return web.json_response({"error": "That backup is no longer in the list"}, status=404, headers=HEADERS)
+    except BackupError as exc:
+        return web.json_response({"error": str(exc)}, status=409, headers=HEADERS)
+    except OSError as exc:
+        return web.json_response({"error": "Could not delete the backup · " + (exc.strerror or str(exc))},
+                                 status=409, headers=HEADERS)
+    payload = await scheduler.payload()
+    payload["deleted"] = outcome
+    return web.json_response(payload, headers=HEADERS)
+
+
 def register(app, exporter, conflict):
     scheduler = Scheduler(app, exporter, conflict)
     app["puppy_backups"] = scheduler
@@ -551,5 +623,6 @@ def register(app, exporter, conflict):
     app.router.add_put("/api/snapshot/backups", h_settings)
     app.router.add_post("/api/snapshot/backups/run", h_run)
     app.router.add_get("/api/snapshot/saved/{identity:[a-f0-9]{32}}", h_download)
+    app.router.add_delete("/api/snapshot/saved/{identity:[a-f0-9]{32}}", h_delete)
     app.on_startup.append(scheduler.start)
     app.on_shutdown.insert(0, scheduler.stop)
