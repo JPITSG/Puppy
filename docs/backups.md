@@ -50,7 +50,11 @@ trusted), only leaves the list - nothing at its place is touched - and the notic
 says which. A file that cannot be removed stays listed, with the reason inline.
 Deleting is refused while a backup, export or restore runs, and a scheduled or
 manual backup waits for a delete in progress, so neither writes over the other's
-catalogue. The card
+catalogue. A line with no copy behind it - a failed attempt, or a copy rotation
+already removed - ends with the same bin, which clears it from the list at once,
+without a confirmation and touching nothing on disk; it is refused under the
+same conditions, and a line whose copy is still listed goes only with that copy.
+The card
 refreshes while visible, preserving unsaved settings and an unchanged history's
 scroll and focus. Browser Back/Forward preserves the form and never runs a backup
 or replays Save.
@@ -123,6 +127,10 @@ Routes, all authenticated and uncached:
   `kept` (another file stands at its name and was left alone). 404 for a copy not
   in the list, 409 while a backup, export or another delete runs (or when the
   file cannot be removed), 503 during a restore.
+- `DELETE /api/snapshot/history/{id}`: clear one outcome with no saved copy
+  behind it (failed or rotated) from the history; answers the new listing. 404
+  for an outcome not in the list, 409 for one whose copy is still listed or while
+  a backup, export or delete runs, 503 during a restore.
 
 Manual export and the scheduler share the snapshot freeze and archive builder.
 Publication records the completed temporary file before linking its final name,

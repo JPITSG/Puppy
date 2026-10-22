@@ -258,6 +258,43 @@ async def main():
                   "is left alone, a missing one only leaves the list, a failure keeps it listed, and a delete is "
                   "refused during a backup, export, restore or another delete", flush=True)
 
+            # Clearing a line with no copy behind it - a failed attempt, a
+            # rotated copy - takes it off the list and touches nothing on disk;
+            # a line whose copy is still saved goes only with its file.
+            state = backups._load()
+            listed_ids = {item["id"] for item in state["files"]}
+            failed_line = next(item for item in state["history"] if item["tone"] == "bad")
+            rotated_line = next(item for item in state["history"]
+                                if item["tone"] != "bad" and item["id"] not in listed_ids)
+            saved_line = next(item for item in state["history"] if item["id"] in listed_ids)
+            assert failed_line["id"] not in listed_ids
+            on_disk = sorted(p.name for p in folder.iterdir())
+            app["puppy_snapshot_busy"] = "restore"
+            await request("DELETE", "history/" + failed_line["id"], status=503)
+            app["puppy_snapshot_busy"] = "export"
+            await request("DELETE", "history/" + failed_line["id"], status=409)
+            app["puppy_snapshot_busy"] = None
+            for flag in ("running", "deleting"):
+                setattr(scheduler, flag, True)
+                refusal = await request("DELETE", "history/" + failed_line["id"], status=409)
+                assert "current backup" in refusal["error"]
+                setattr(scheduler, flag, False)
+            async with http.delete(url + "history/" + failed_line["id"]) as response:
+                assert response.status in (302, 401), "signed-in only"
+            await request("DELETE", "history/" + "f" * 32, status=404)
+            for line in (failed_line, rotated_line):
+                answer = await request("DELETE", "history/" + line["id"])
+                assert line["id"] not in {item["id"] for item in answer["history"]}
+                assert line not in backups._load()["history"]
+                await request("DELETE", "history/" + line["id"], status=404)
+            refusal = await request("DELETE", "history/" + saved_line["id"], status=409)
+            assert refusal["error"] == "That backup is still saved · delete the copy instead"
+            assert saved_line in backups._load()["history"]
+            assert backups._load()["files"] == state["files"]
+            assert sorted(p.name for p in folder.iterdir()) == on_disk
+            print("PASS: a failed or rotated line cleared from the list with nothing on disk touched, a saved copy's "
+                  "line refused, and a clear refused during a backup, export, restore or delete", flush=True)
+
             settings["enabled"] = True
             scheduler.settings(body())
             now = time.time()
@@ -484,5 +521,53 @@ async def main():
         shutil.rmtree(ROOT)
 
 
+def built_before_its_loop():
+    """puppy.main builds the app before aiohttp's run_app makes its own loop:
+    the scheduler must keep ticking there, past its first wait, rather than
+    only under asyncio.run where the app is built inside the loop."""
+    config.load()
+    db.connect()
+    app = build_app()
+    scheduler = app["puppy_backups"]
+    ticks = []
+
+    async def tick(now=None):
+        ticks.append(now)
+        scheduler.stopping = len(ticks) >= 3
+
+    async def run():
+        scheduler.tick = tick
+        with patch.object(backups, "POLL_SECONDS", 0.01):
+            await scheduler.start(app)
+            await asyncio.wait_for(scheduler.task, 5)
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(run())
+    finally:
+        loop.close()
+    assert len(ticks) == 3, ticks
+
+    # a worker that died is reported at shutdown, never raised into the
+    # handlers after it (stop runs first among them)
+    async def died():
+        raise RuntimeError("worker ended")
+
+    async def shutdown():
+        scheduler.task = asyncio.ensure_future(died())
+        await asyncio.sleep(0)
+        await scheduler.stop(app)
+        assert scheduler.task is None
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(shutdown())
+    finally:
+        loop.close()
+    print("PASS: the scheduler keeps ticking on run_app's own loop, built before it like puppy.main, "
+          "and a worker that died never ends the shutdown", flush=True)
+
+
 if __name__ == "__main__":
+    built_before_its_loop()
     asyncio.run(main())

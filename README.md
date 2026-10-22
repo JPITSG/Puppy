@@ -1114,8 +1114,9 @@ with a window of history around it.
   A short history shows outcomes and repeatable **Download** links for saved
   copies, each with a bin that deletes that copy's archive file after a
   confirmation (a copy whose file is missing or was replaced only leaves the
-  list, and the file at its place is left alone); deleting is refused while a
-  backup, export or restore runs. Scheduled backups and Run now include server-side data without
+  list, and the file at its place is left alone); a failed or rotated line's bin
+  clears it from the list without asking. Both are refused while a backup,
+  export or restore runs. Scheduled backups and Run now include server-side data without
   browser-local tabs or drafts. The schedule and history are backed up; saved
   archives themselves are excluded. Backups are not encrypted.
   See [Backup and restore](docs/backups.md) for scheduling, retention and coverage.

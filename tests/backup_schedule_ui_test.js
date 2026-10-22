@@ -98,17 +98,21 @@ const same = (a,b) => assert.equal(JSON.stringify(a),JSON.stringify(b));
   link.focus(); read=view.backupRefresh(); reply("snapshot/backups",data); await read;
   assert.equal($(".backup-download"),link); assert.equal(document.activeElement,link);
 
-  // Each saved copy ends its row with a bin, after Download; a rotated or failed one has none.
+  // Every row ends with a bin: after Download it deletes a saved copy; on a
+  // rotated or failed line, with no copy behind it, it clears the line.
   context.toast = (text, tone) => toasts.push([text, tone]);
   const where = {directory:"/home/mira/backups"};
   const kept = payload({files:[{...file,...where},{...file,...where,id:"b",available:false,download:null}],
     history:data.history});
   read=view.backupRefresh(); reply("snapshot/backups",kept); await read;
   let bins=card.querySelectorAll(".backup-delete");
-  same(bins.map(b=>b.getAttribute("aria-label")),["Delete backup from stamp 400","Delete backup from stamp 400"]);
+  same(bins.map(b=>b.getAttribute("aria-label")),["Delete backup from stamp 400","Delete backup from stamp 400",
+    "Clear stamp 200 from the list","Clear stamp 100 from the list"]);
   const firstActions=bins[0].parentNode;
   assert.equal(firstActions.className,"backup-actions");
   same(firstActions.children.map(n=>n.className),["backup-download","icon-btn backup-delete"]);
+  same(bins[2].parentNode.children.map(n=>n.className),["help","icon-btn backup-delete"]);
+  same(bins[3].parentNode.children.map(n=>n.className),["icon-btn backup-delete"]);
   assert.equal(bins[0].disabled,false);
   // it asks first, naming the copy and its file; Cancel sends nothing
   bins[0].onclick(); await tick();
@@ -128,7 +132,7 @@ const same = (a,b) => assert.equal(JSON.stringify(a),JSON.stringify(b));
   request.resolve(afterA); await tick();
   same(toasts.pop(),["Backup deleted","ok"]);
   bins=card.querySelectorAll(".backup-delete");
-  assert.equal(bins.length,1); assert.equal(bins[0].disabled,false);
+  assert.equal(bins.length,3); assert.equal(bins[0].disabled,false);
   assert.equal(document.activeElement,bins[0],"the focus passes to the row that took its place");
   assert.doesNotMatch($("#backup-history").textContent,/Download/);
   // a copy whose file is gone only leaves the list, and says so
@@ -138,12 +142,32 @@ const same = (a,b) => assert.equal(JSON.stringify(a),JSON.stringify(b));
   request=requests.shift(); assert.equal(request.route,"snapshot/saved/b");
   request.reject(new Error("Could not delete the backup · Permission denied")); await tick();
   assert.equal(error.textContent,"Could not delete the backup · Permission denied","a refusal stays inline");
-  assert.equal(card.querySelectorAll(".backup-delete").length,1); assert.equal(toasts.length,0);
+  assert.equal(card.querySelectorAll(".backup-delete").length,3); assert.equal(toasts.length,0);
   card.querySelector(".backup-delete").onclick(); await tick(); confirms.shift().resolve(true); await tick();
   requests.shift().resolve(payload({history:data.history.slice(2),deleted:"missing"})); await tick();
   same(toasts.pop(),["Backup removed from the list · its file was already gone","ok"]);
-  assert.equal(card.querySelectorAll(".backup-delete").length,0);
-  assert.equal(document.activeElement,run,"with no copy left the focus goes to Run now");
+  bins=card.querySelectorAll(".backup-delete");
+  assert.equal(bins.length,2); assert.equal(document.activeElement,bins[0]);
+  // clearing a line asks nothing and says nothing: one request, the bins held
+  bins[0].onclick(); await tick();
+  assert.equal(confirms.length,0);
+  request=requests.shift();
+  assert.equal(request.route,"snapshot/history/c"); same(request.options,{method:"DELETE"});
+  assert.ok(card.querySelectorAll(".backup-delete").every(b=>b.disabled),"no second press while one runs");
+  request.resolve(payload({history:data.history.slice(3)})); await tick();
+  assert.equal(toasts.length,0); assert.doesNotMatch($("#backup-history").textContent,/Rotated/);
+  bins=card.querySelectorAll(".backup-delete");
+  assert.equal(bins.length,1); assert.equal(document.activeElement,bins[0]);
+  bins[0].onclick(); await tick();
+  request=requests.shift(); assert.equal(request.route,"snapshot/history/d");
+  request.reject(new Error("Wait for the current backup or restore to finish")); await tick();
+  assert.equal(error.textContent,"Wait for the current backup or restore to finish","a refusal stays inline");
+  assert.equal(card.querySelectorAll(".backup-delete").length,1); assert.equal(toasts.length,0);
+  card.querySelector(".backup-delete").onclick(); await tick();
+  requests.shift().resolve(payload({history:[]})); await tick();
+  assert.equal(card.querySelectorAll(".backup-delete").length,0); assert.equal(error.textContent,"");
+  assert.match($("#backup-history").textContent,/No saved backups yet/);
+  assert.equal(document.activeElement,run,"with no row left the focus goes to Run now");
   // a replaced file is left alone, and the notice says so
   read=view.backupRefresh(); reply("snapshot/backups",kept); await read;
   card.querySelector(".backup-delete").onclick(); await tick(); confirms.shift().resolve(true); await tick();
@@ -164,5 +188,5 @@ const same = (a,b) => assert.equal(JSON.stringify(a),JSON.stringify(b));
   view.backupRetire(); assert.equal(timers.size,0);
   request.resolve(payload()); await read; assert.equal(dir.value,oldDirectory);
   await view.backupRefresh(); assert.equal(requests.length,0);
-  console.log("PASS: backup settings and the archive limit, saved-only Run now, local-clock parsing, inline failures, edit/read races, stable downloads, deleting a saved copy behind its confirm, and polling lifecycle");
+  console.log("PASS: backup settings and the archive limit, saved-only Run now, local-clock parsing, inline failures, edit/read races, stable downloads, deleting a saved copy behind its confirm, clearing failed and rotated lines, and polling lifecycle");
 })().catch(error=>{console.error(error);process.exitCode=1;});

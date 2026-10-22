@@ -430,6 +430,21 @@ class Scheduler:
             self.wake.set()   # a backup held off meanwhile goes now
         return outcome
 
+    def forget(self, identity):
+        """Clear one outcome from the history: a failed attempt, or a copy
+        rotation already removed. A copy still listed goes only with its file
+        (delete), never by dropping its line. Refused while a backup, export
+        or restore runs, whose own copy of the record would bring it back."""
+        if self.running or self.deleting or self.app.get("puppy_snapshot_busy"):
+            raise BackupError("Wait for the current backup or restore to finish")
+        current = _load()
+        if not any(item["id"] == identity for item in current["history"]):
+            raise LookupError(identity)
+        if any(item["id"] == identity for item in current["files"]):
+            raise BackupError("That backup is still saved · delete the copy instead")
+        current["history"] = [item for item in current["history"] if item["id"] != identity]
+        _save(current)
+
     @staticmethod
     def _pending(source, now):
         return {"id": secrets.token_hex(16), "at": now, "source": source, "file": None}
@@ -526,14 +541,28 @@ class Scheduler:
     async def start(self, _app):
         validate_persisted(db.connect())
         validate_limit_persisted(db.connect())
+        # The app is built before aiohttp starts its own loop, and an Event
+        # made then belongs to another one on Python 3.9: its first wait
+        # raised RuntimeError and ended this worker after one tick, so a
+        # backup came due only when Puppy restarted. Make it on the loop
+        # that waits, keeping a wake requested before start.
+        requested = self.wake.is_set()
+        self.wake = asyncio.Event()
+        if requested:
+            self.wake.set()
         self.task = asyncio.create_task(self.loop())
 
     async def stop(self, _app):
         self.stopping = True
         self.wake.set()
-        if self.task:
-            await self.task  # finish publication before releasing the process
-            self.task = None
+        task, self.task = self.task, None
+        if task:
+            # This runs first among the shutdown handlers: a worker that died
+            # must be reported here, never end the shutdown of everything else.
+            try:
+                await task  # finish publication before releasing the process
+            except Exception:
+                log.exception("backup scheduler had stopped with an error")
 
     async def loop(self):
         while not self.stopping:
@@ -616,6 +645,19 @@ async def h_delete(request):
     return web.json_response(payload, headers=HEADERS)
 
 
+async def h_forget(request):
+    if request.app.get("puppy_snapshot_busy") == "restore":
+        return web.json_response({"error": "Puppy restore in progress"}, status=503, headers=HEADERS)
+    scheduler = request.app["puppy_backups"]
+    try:
+        scheduler.forget(request.match_info["identity"])
+    except LookupError:
+        return web.json_response({"error": "That entry is no longer in the list"}, status=404, headers=HEADERS)
+    except BackupError as exc:
+        return web.json_response({"error": str(exc)}, status=409, headers=HEADERS)
+    return web.json_response(await scheduler.payload(), headers=HEADERS)
+
+
 def register(app, exporter, conflict):
     scheduler = Scheduler(app, exporter, conflict)
     app["puppy_backups"] = scheduler
@@ -624,5 +666,6 @@ def register(app, exporter, conflict):
     app.router.add_post("/api/snapshot/backups/run", h_run)
     app.router.add_get("/api/snapshot/saved/{identity:[a-f0-9]{32}}", h_download)
     app.router.add_delete("/api/snapshot/saved/{identity:[a-f0-9]{32}}", h_delete)
+    app.router.add_delete("/api/snapshot/history/{identity:[a-f0-9]{32}}", h_forget)
     app.on_startup.append(scheduler.start)
     app.on_shutdown.insert(0, scheduler.stop)

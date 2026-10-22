@@ -30621,7 +30621,7 @@ class SettingsView {
         "Waiting for idle time" + (payload.waiting ? ` · ${payload.waiting}` : "") :
         payload.settings.enabled ? `Next backup · ${fmtStamp(payload.next_at)}` : "Scheduled backups are off";
       status.classList.toggle("busy", running || payload.status === "waiting");
-      // a saved copy is deleted only while nothing else touches the catalogue
+      // a copy is deleted, or a line cleared, only while nothing else touches the catalogue
       const syncDeletes = () => history.querySelectorAll(".backup-delete")
         .forEach(button => { button.disabled = busy || running; });
       const files = new Map(payload.files.map(item => [item.id, item]));
@@ -30645,7 +30645,8 @@ class SettingsView {
         copy.appendChild(el("div", "timer-row-description", detail.filter(Boolean).join(" · ")));
         row.appendChild(copy);
         /* the row's verbs end with its destructive one: Download (or why
-           there is none), then the bin for a copy the catalogue still holds */
+           there is none), then the bin - deleting a copy the catalogue still
+           holds, or clearing a line with none behind it (failed, rotated) */
         const actions = el("div", "backup-actions");
         if (file && file.available) {
           const link = el("a", "backup-download", "Download");
@@ -30654,15 +30655,18 @@ class SettingsView {
           actions.appendChild(link);
         } else if (file) actions.appendChild(el("span", "help", "Unavailable"));
         else if (item.tone !== "bad") actions.appendChild(el("span", "help", "Rotated"));
+        const remove = el("button", "icon-btn backup-delete");
+        remove.type = "button";
+        remove.appendChild(trashIcon(14));
         if (file) {
-          const remove = el("button", "icon-btn backup-delete");
-          remove.type = "button";
-          remove.appendChild(trashIcon(14));
           remove.setAttribute("aria-label", `Delete backup from ${fmtStamp(file.at)}`);
           remove.onclick = () => deleteBackup(file, remove);
-          actions.appendChild(remove);
+        } else {
+          remove.setAttribute("aria-label", `Clear ${fmtStamp(item.at)} from the list`);
+          remove.onclick = () => clearEntry(item, remove);
         }
-        if (actions.childElementCount) row.appendChild(actions);
+        actions.appendChild(remove);
+        row.appendChild(actions);
         history.appendChild(row);
       }
       syncDeletes();
@@ -30679,17 +30683,29 @@ class SettingsView {
           "nothing at its place is touched.",
         { confirmLabel: "Delete", destructive: true, subject: `${fmtStamp(file.at)} · ${fmtBytes(file.size)}` });
       if (!confirmed || !current() || busy) return;
-      const place = [...history.querySelectorAll(".backup-delete")].indexOf(button);
-      busy = true; ++serial; showError(""); paint();
-      try {
-        const result = await api(0, `snapshot/saved/${file.id}`, { method: "DELETE" });
-        if (!current()) return;
-        const changed = dirty(); payload = result;
-        if (!changed) hydrate();
+      await removeRow(button, `snapshot/saved/${file.id}`, result => {
         if (result.deleted === "kept")
           toast("Backup removed from the list · the file at its place was replaced, so it was left alone", "warn");
         else toast(result.deleted === "missing" ? "Backup removed from the list · its file was already gone" :
           "Backup deleted", "ok");
+      });
+    };
+    /* A line with no copy behind it - a failed attempt, or a copy rotation
+       already took - only leaves the list, so its bin asks nothing and says
+       nothing: the row going is the answer. */
+    const clearEntry = async (item, button) => {
+      if (button.disabled || busy) return;
+      await removeRow(button, `snapshot/history/${item.id}`);
+    };
+    const removeRow = async (button, path, landed) => {
+      const place = [...history.querySelectorAll(".backup-delete")].indexOf(button);
+      busy = true; ++serial; showError(""); paint();
+      try {
+        const result = await api(0, path, { method: "DELETE" });
+        if (!current()) return;
+        const changed = dirty(); payload = result;
+        if (!changed) hydrate();
+        if (landed) landed(result);
       } catch (error) { if (current()) showError(error.message); }
       finally {
         busy = false;
