@@ -19,7 +19,7 @@ TEST_ROOT = private_root("timeouts-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from aiohttp.test_utils import TestClient, TestServer
-from puppy import auth, browser, config, db, protocol, terminal
+from puppy import auth, browser, config, db, protocol, terminal, timeouts
 from puppy import web as webui
 from backend.puppy_backend.app import build_app as backend_app
 
@@ -73,6 +73,78 @@ def validation():
     config.set_timeouts(config.TIMEOUT_DEFAULTS)
 
 
+def background_limit():
+    """The seventh field: an optional meta record beside config.json's six,
+    validated and rolled back with them, refused rather than repaired."""
+    db.connect()
+    assert db.meta_get(timeouts.BACKGROUND_KEY) is None
+    assert timeouts.background_wait_seconds() == 86400
+    payload = timeouts.payload()
+    assert payload["values"] == {**config.TIMEOUT_DEFAULTS, "background_wait_seconds": 86400}
+    assert payload["defaults"] == payload["values"] and payload["max_seconds"] == config.MAX_TIMEOUT_SECONDS
+    for value in (-1, True, None, "0", 1.5, float("inf"), config.MAX_TIMEOUT_SECONDS + 1):
+        try:
+            timeouts.update({"background_wait_seconds": value})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(value)
+        assert db.meta_get(timeouts.BACKGROUND_KEY) is None
+    for invalid in ({}, {"unknown": 0}, {"background_wait_seconds": 5, "unknown": 0}, None):
+        try:
+            timeouts.update(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(invalid)
+    # nothing is written when any field of the patch is refused
+    try:
+        timeouts.update({"background_wait_seconds": 5, "turn_seconds": -1})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("partial patch accepted")
+    assert db.meta_get(timeouts.BACKGROUND_KEY) is None and config.get("sessions.turn_timeout") == 7200
+    assert timeouts.update({"background_wait_seconds": 0})["background_wait_seconds"] == 0
+    assert db.meta_get(timeouts.BACKGROUND_KEY) == {"format": 1, "seconds": 0}
+    # config.json failing to save puts the record back as it was
+    with patch.object(config, "_save_locked", side_effect=OSError("disk full")):
+        try:
+            timeouts.update({"background_wait_seconds": 600, "turn_seconds": 60})
+        except OSError:
+            pass
+        else:
+            raise AssertionError("failed persistence reported success")
+    assert db.meta_get(timeouts.BACKGROUND_KEY) == {"format": 1, "seconds": 0}
+    assert config.get("sessions.turn_timeout") == 7200
+    db.meta_del(timeouts.BACKGROUND_KEY)
+    with patch.object(config, "_save_locked", side_effect=OSError("disk full")):
+        try:
+            timeouts.update({"background_wait_seconds": 600, "turn_seconds": 60})
+        except OSError:
+            pass
+    assert db.meta_get(timeouts.BACKGROUND_KEY) is None, "an absent record stays absent"
+    both = timeouts.update({"background_wait_seconds": 43200, "turn_seconds": 3600})
+    assert both["background_wait_seconds"] == 43200 and both["turn_seconds"] == 3600
+    # every other persisted shape is refused, at startup and in a backup
+    for bad in ({"format": 1}, {"format": 2, "seconds": 5}, {"format": 1, "seconds": 1.0},
+                {"format": 1, "seconds": -1}, {"format": 1, "seconds": True},
+                {"format": 1, "seconds": 5, "extra": 1}, [1], 5):
+        db.meta_set(timeouts.BACKGROUND_KEY, bad)
+        for check in (lambda: timeouts.validate_persisted(db.connect()),
+                      timeouts.background_wait_seconds):
+            try:
+                check()
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(bad)
+    db.meta_del(timeouts.BACKGROUND_KEY)
+    timeouts.update(timeouts.defaults())
+    assert timeouts.values() == timeouts.defaults()
+    db.meta_del(timeouts.BACKGROUND_KEY)
+
+
 async def api_contract(factory):
     app = factory()
     # Only exercise the real authenticated routes; no probes, engine CLIs or
@@ -88,7 +160,16 @@ async def api_contract(factory):
         headers = {"X-Puppy-Token": config.get("auth.api_token")}
         response = await client.get("/api/timeouts", headers=headers)
         payload = await response.json()
-        assert response.status == 200 and payload["timeouts"] == config.timeouts_payload()
+        assert response.status == 200 and payload["timeouts"] == timeouts.payload()
+        assert payload["timeouts"]["values"]["background_wait_seconds"] == 86400
+        response = await client.patch("/api/timeouts", headers=headers,
+                                      json={"background_wait_seconds": 0})
+        assert response.status == 200, await response.text()
+        assert (await response.json())["timeouts"]["values"]["background_wait_seconds"] == 0
+        response = await client.patch("/api/timeouts", headers=headers,
+                                      json={"background_wait_seconds": 1.5})
+        assert response.status == 400
+        assert timeouts.background_wait_seconds() == 0
         with patch.object(browser, "idle_settings_changed") as b, patch.object(terminal, "idle_settings_changed") as t:
             response = await client.patch("/api/timeouts", headers=headers, json={
                 "turn_seconds": 0, "spawn_runtime_seconds": 21600,
@@ -107,12 +188,12 @@ async def api_contract(factory):
             return []
         with patch.object(webui, "_engines_payload", engines):
             response = await client.get("/api/engines", headers=headers)
-            assert (await response.json())["timeouts"] == config.timeouts_payload()
+            assert (await response.json())["timeouts"] == timeouts.payload()
             if app["puppy_role"] == "full":
                 for route in ("/api/settings", "/api/state"):
                     response = await client.get(route, headers=headers)
-                    assert (await response.json())["timeouts"] == config.timeouts_payload()
-        config.set_timeouts(config.TIMEOUT_DEFAULTS)
+                    assert (await response.json())["timeouts"] == timeouts.payload()
+        timeouts.update(timeouts.defaults())
 
 
 async def idle_lifecycles():
@@ -156,6 +237,7 @@ async def idle_lifecycles():
 async def main():
     try:
         validation()
+        background_limit()
         db.connect()
         auth.create_user("timeout-test", "test-password")
         await api_contract(webui.build_app)

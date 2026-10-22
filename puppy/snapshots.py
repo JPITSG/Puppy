@@ -796,6 +796,11 @@ def _validate_database(path: Path):
             backup_schedule.validate_limit_persisted(connection)
         except ValueError as exc:
             raise SnapshotError("snapshot database contains an invalid backup archive limit") from exc
+        from puppy import timeouts
+        try:
+            timeouts.validate_persisted(connection)
+        except ValueError as exc:
+            raise SnapshotError("snapshot database contains an invalid background task limit") from exc
         orphan = connection.execute(
             "SELECT 1 FROM events e LEFT JOIN sessions s ON s.id=e.session_id "
             "WHERE s.id IS NULL LIMIT 1").fetchone()

@@ -1037,7 +1037,8 @@ async def exercise_claude_background_turn(root, runner, db, config) -> None:
 
     This pins the wait: stdin stays open across the model's answer while a
     task runs, the CLI's own wake-up continues the same turn, one folded result
-    closes it, a stop or the turn timeout ends the wait through stdin EOF, a
+    closes it, a stop or the background task limit ends the wait through
+    stdin EOF while the turn timeout leaves it alone, a
     stale task reported by a resumed process never closes the prompt's turn
     early, and an error result never waits.
     """
@@ -1338,7 +1339,8 @@ else:
     if "check" in words:
         serve_check(words[words.index("check") + 1])
     if prompt.endswith("background fake turn"):
-        if stdin_eof(0.5):
+        # "slow background": a wait longer than the test's turn timeout
+        if stdin_eof(4 if "slow" in words else 0.5):
             # the runner gave up on the task: a real CLI would kill it now
             flags["early_close"] = True
             system("background_tasks_changed", tasks=[])
@@ -1500,23 +1502,49 @@ finish()
                    message.get("text") == "Ending the wait for background tasks..."
                    for message in capture.messages)
 
-        # the turn timeout ends a wait gracefully instead of killing the engine
-        config.set_value("sessions.turn_timeout", 2)
+        # a wait does not spend the turn timeout: the background task limit
+        # ends it, gracefully instead of killing the engine
+        from puppy import timeouts
+        config.set_value("sessions.turn_timeout", 1)
+        timeouts.update({"background_wait_seconds": 3})
+        started = time.monotonic()
         try:
             assert hub.send_message("timeout while waiting fake turn") == \
                 {"queued": False}
             await finish_turn("timeout while waiting fake turn")
         finally:
             config.set_value("sessions.turn_timeout", original_timeout)
+            timeouts.update({"background_wait_seconds": timeouts.BACKGROUND_DEFAULT_SECONDS})
+        assert time.monotonic() - started >= 3
         events = turn_events("timeout while waiting fake turn")
         assert shape(events) == [
             ("user", ""), ("assistant", ""), ("info", "background_wait"),
             ("info", "background_wait_stopped"), ("info", "task"),
             ("result", "")], shape(events)
-        assert "turn timeout" in events[3]["data"]["text"]
+        assert events[3]["data"]["text"] == (
+            "Stopped waiting for background tasks after 3 seconds; "
+            "the engine is ending them")
         assert events[5]["data"]["ok"] is True
         assert hub.last_completion_status == "ok"
         assert last_invocation()["flags"]["eof_while_waiting"] is True
+
+        # nor does a wait the model wakes from spend the turn's own time: a
+        # four-second wait under a two-second turn timeout finishes as usual
+        config.set_value("sessions.turn_timeout", 2)
+        try:
+            assert hub.send_message("slow background fake turn") == {"queued": False}
+            await finish_turn("slow background fake turn")
+        finally:
+            config.set_value("sessions.turn_timeout", original_timeout)
+        events = turn_events("slow background fake turn")
+        assert shape(events) == [
+            ("user", ""), ("assistant", ""), ("info", "background_wait"),
+            ("info", "task"), ("assistant", ""), ("result", "")], shape(events)
+        assert events[4]["data"]["text"] == "continued after task"
+        assert events[5]["data"]["ok"] is True and events[5]["data"]["wakeups"] == 1
+        assert events[5]["data"]["duration_ms"] >= 3900, events[5]["data"]["duration_ms"]
+        assert not last_invocation()["flags"].get("early_close")
+        assert hub.last_completion_status == "ok"
 
         # a stale task from the previous process never closes the prompt's turn
         assert hub.send_message("stale wakeup fake turn") == {"queued": False}
@@ -1651,16 +1679,17 @@ finish()
         assert runner._ago(59) == "a moment ago" and runner._ago(60) == "1 minute ago"
         assert runner._ago(3599) == "59 minutes ago"
         assert runner._wait_length(3600) == "60 minutes"
+        assert runner._wait_length(86400) == "24 hours"
+        assert runner._wait_length(5400) == "90 minutes"
         assert runner._wait_length(1.5) == "1.5 seconds"
         assert driver.background_guidance.startswith("Background tasks still running")
 
         original_check = (runner.BACKGROUND_CHECK_AFTER, runner.BACKGROUND_CHECK_TIMEOUT,
-                          runner.BACKGROUND_CHECK_AGAIN, runner.BACKGROUND_WAIT_LIMIT,
-                          runner.BACKGROUND_WAIT_POLL)
+                          runner.BACKGROUND_CHECK_AGAIN, runner.BACKGROUND_WAIT_POLL)
         runner.BACKGROUND_CHECK_AFTER = 0.3
         runner.BACKGROUND_CHECK_TIMEOUT = 1.0
         runner.BACKGROUND_CHECK_AGAIN = 30.0
-        runner.BACKGROUND_WAIT_LIMIT = 30.0
+        timeouts.update({"background_wait_seconds": 30})
         runner.BACKGROUND_WAIT_POLL = 0.05
         waiting_row = ("info", "background_wait")
         woke_shape = [("user", ""), ("assistant", ""), waiting_row,
@@ -1799,7 +1828,7 @@ finish()
             assert flags["cancels"] == [checks[0]["id"]]
 
             # no wait after an answer outlasts the limit, KEEP or doubt alike
-            runner.BACKGROUND_WAIT_LIMIT = 1.5
+            timeouts.update({"background_wait_seconds": 2})
             for mode in ("unclear", "limit"):
                 prompt = "check {} fake turn".format(mode)
                 assert hub.send_message(prompt) == {"queued": False}
@@ -1807,12 +1836,12 @@ finish()
                 events = turn_events(prompt)
                 assert shape(events) == ended_shape, (mode, shape(events))
                 assert events[3]["data"]["text"] == (
-                    "Stopped waiting for background tasks after 1.5 seconds; "
+                    "Stopped waiting for background tasks after 2 seconds; "
                     "the engine is ending them"), mode
                 assert events[5]["data"]["ok"] is True
                 assert hub.last_completion_status == "ok"
                 assert len(check_of(prompt)[1]) == 1, mode
-            runner.BACKGROUND_WAIT_LIMIT = 30.0
+            timeouts.update({"background_wait_seconds": 30})
 
             # a prompt waiting in the queue asks at once, and runs next
             runner.BACKGROUND_CHECK_AFTER = 30.0
@@ -1852,8 +1881,8 @@ finish()
             assert order == [flags["user_questions"][0], checks[0]["id"]], order
         finally:
             (runner.BACKGROUND_CHECK_AFTER, runner.BACKGROUND_CHECK_TIMEOUT,
-             runner.BACKGROUND_CHECK_AGAIN, runner.BACKGROUND_WAIT_LIMIT,
-             runner.BACKGROUND_WAIT_POLL) = original_check
+             runner.BACKGROUND_CHECK_AGAIN, runner.BACKGROUND_WAIT_POLL) = original_check
+            timeouts.update({"background_wait_seconds": timeouts.BACKGROUND_DEFAULT_SECONDS})
     finally:
         hub.detach(capture)
         driver.binary = original_binary
@@ -4136,7 +4165,8 @@ async def exercise_controller(url: str, token: str, backend_url: str,
         assert proxied_engines["timeouts"]["defaults"] == {
             "turn_seconds": 7200, "spawn_runtime_seconds": 7200,
             "spawn_idle_seconds": 600, "terminal_idle_seconds": 900,
-            "browser_idle_seconds": 900, "vnc_idle_seconds": 900}
+            "browser_idle_seconds": 900, "vnc_idle_seconds": 900,
+            "background_wait_seconds": 86400}
         async with http.patch(url + f"/api/b/{stored['id']}/timeouts", headers=headers,
                               json={"browser_idle_seconds": 0}) as response:
             timeout_result = await response.json()

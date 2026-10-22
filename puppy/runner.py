@@ -17,7 +17,8 @@ import uuid
 from puppy import (agent_notes, browser_agent, config, db, engine_defaults, handoff, notify, spawn_agent,
                    system_prompts, task_agent, terminal_agent, vnc_agent,
                    session_agent, session_directories, session_git, session_links, uploads, workspace_sync,
-                   workspaces, schedules, session_tasks, session_titles, token_usage, tool_calls)
+                   workspaces, schedules, session_tasks, session_titles, timeouts, token_usage,
+                   tool_calls)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
 from puppy.drivers import messages as engine_messages
@@ -832,11 +833,11 @@ BACKGROUND_WAKE_GRACE = 60.0
 # BACKGROUND_CHECK_TIMEOUT; any doubt keeps waiting, but is asked again
 # BACKGROUND_CHECK_AGAIN later (and at once when a prompt joins the queue
 # after a check asked with none waiting), and no wait after an answer
-# outlasts BACKGROUND_WAIT_LIMIT.
+# outlasts the node's background task limit (Settings → Timeouts,
+# timeouts.background_wait_seconds), which the turn timeout leaves alone.
 BACKGROUND_CHECK_AFTER = 120.0
 BACKGROUND_CHECK_TIMEOUT = 120.0
 BACKGROUND_CHECK_AGAIN = 600.0
-BACKGROUND_WAIT_LIMIT = 3600.0
 # how often a wait looks at the queue and its own clocks
 BACKGROUND_WAIT_POLL = 2.0
 # request ids of Puppy's own checks, apart from the user's side questions
@@ -942,6 +943,9 @@ def _background_check_question(tasks, waited=0.0, prompt_waiting=False, kept=Non
 
 
 def _wait_length(seconds: float) -> str:
+    if seconds >= 7200 and seconds % 3600 == 0:
+        hours = int(seconds // 3600)
+        return "{} hours".format(hours)
     if seconds >= 60 and seconds % 60 == 0:
         minutes = int(seconds // 60)
         return "{} minute{}".format(minutes, "" if minutes == 1 else "s")
@@ -3499,7 +3503,11 @@ class SessionHub:
             self._publish_steering_state(session)
 
             timeout = float(config.get("sessions.turn_timeout", 7200))
+            # A pause on background work after the answer has its own limit
+            # and does not count toward the turn's: its length is added to
+            # the deadline when the model wakes (zero is unlimited for both).
             deadline = time.time() + timeout if timeout else float("inf")
+            bg_limit = float(timeouts.background_wait_seconds())
             # The model's answer once it paused on background work. It becomes
             # the turn's result if the engine leaves before waking the model.
             pending_result = None
@@ -3655,7 +3663,7 @@ class SessionHub:
 
             async def background_check() -> None:
                 """While the model waits on background work after answering:
-                end a wait that has lasted BACKGROUND_WAIT_LIMIT; once it has
+                end a wait that has lasted the background task limit; once it has
                 lasted BACKGROUND_CHECK_AFTER, or at once when a prompt is
                 waiting in the queue, ask the model whether the tasks are
                 still needed - and ask again BACKGROUND_CHECK_AGAIN after a
@@ -3670,12 +3678,11 @@ class SessionHub:
                         self._turn_stopping:
                     return
                 now = time.monotonic()
-                if now - bg_paused_at >= BACKGROUND_WAIT_LIMIT:
+                if bg_limit and now - bg_paused_at >= bg_limit:
                     await withdraw_check("the wait reached its limit")
                     end_wait("limit",
                              "Stopped waiting for background tasks after {}; "
-                             "the engine is ending them".format(
-                                 _wait_length(BACKGROUND_WAIT_LIMIT)))
+                             "the engine is ending them".format(_wait_length(bg_limit)))
                     return
                 live = frozenset(str(row.get("id") or "") for row in self._bg_tasks)
                 if bg_stop is not None:
@@ -3762,28 +3769,29 @@ class SessionHub:
                              "Background tasks finished but the engine did not "
                              "continue; ending the turn")
                 await background_check()
+                # only the background task limit bounds a pause after the answer
+                paused = pending_result is not None and not wait_closed and \
+                    self._bg_wait_since is not None
                 remaining = deadline - time.time()
-                if remaining <= 0:
+                if remaining <= 0 and not paused:
                     if pending_result is not None and not wait_closed:
-                        # only background work kept the engine alive
+                        # the model woke for a finished task and worked on
+                        # past the turn's limit: end it with the answer it has
                         end_wait("timeout",
-                                 "Stopped waiting for background tasks after "
-                                 "{}s (turn timeout); the engine is ending "
-                                 "them".format(int(timeout)))
+                                 "Stopped the turn after {}s (turn timeout); "
+                                 "the engine is ending its background "
+                                 "tasks".format(int(timeout)))
                         continue
                     self._turn_stopping = True
                     self._publish_steering_state(session)
                     self._emit("error", {"text": f"Turn timeout after {int(timeout)}s - killed"})
                     self._signal_if_alive(self.proc, signal.SIGKILL)
                     break
-                read_cap = min(remaining, 60)
+                # a quiet wait still looks at its clocks and the queue
+                read_cap = BACKGROUND_WAIT_POLL if paused else min(remaining, 60)
                 for grace_until in (sq_grace_until, steer_grace_until):
                     if grace_until is not None:
                         read_cap = min(read_cap, max(0.001, grace_until - time.monotonic()))
-                if pending_result is not None and not wait_closed and \
-                        self._bg_wait_since is not None:
-                    # a quiet wait still looks at its clocks and the queue
-                    read_cap = min(read_cap, BACKGROUND_WAIT_POLL)
                 try:
                     if transport is not None:
                         actions = await asyncio.wait_for(
@@ -3822,7 +3830,9 @@ class SessionHub:
                         if self._bg_wait_since is not None and \
                                 isinstance(msg, dict) and msg.get("type") == "turn_init":
                             # the engine woke the model for a finished task:
-                            # its answer continues within this same turn
+                            # its answer continues within this same turn, whose
+                            # own limit the pause did not spend
+                            deadline += max(0.0, time.time() - self._bg_wait_since)
                             self._bg_wait_since = None
                             bg_idle_since = None
                             bg_stop = None

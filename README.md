@@ -578,7 +578,9 @@ ended. Any other reply keeps waiting, and the status line says when Claude
 still needs a task; the question is put again ten minutes later, naming the
 earlier KEEP and how long the wait has lasted, and at once when a prompt
 joins the queue after it. Your own **Ask** waits the few seconds the check
-takes, and no wait after an answer lasts longer than 60 minutes.
+takes, and no wait after an answer lasts longer than the backend's maximum
+background task duration (24 hours by default, under Settings → Timeouts).
+That wait does not count toward the turn's own time limit.
 
 Retries an engine performs inside a running turn (Codex counting a dropped
 response stream back up while it falls back to another transport) appear in the
@@ -1233,14 +1235,17 @@ backend name stays readable; long button labels wrap within the button.
   instance, the controller's polling and synchronization intervals. A backend from before the Git check keeps its
   other timers editable with that row disabled. Validation and save errors
   appear beneath the affected field; edit it or press Escape to clear the error.
-- **Timeouts** – per backend: maximum agent turn duration (2 hours), spawned-agent
-  runtime (2 hours) and inactivity (10 minutes), and unattended terminal, browser
-  and VNC timeouts (15 minutes each). Values are seconds; **0 means unlimited**,
-  though a wait on background tasks after an answer still ends after 60 minutes.
-  Turn and spawn settings initialize new runs; changing an unattended timeout
-  restarts that timer immediately. Agent interaction renews unattended timers.
-  Spawned agents still stop with their owning turn. Each field has an Apply
-  control, and Reset to defaults restores the selected backend's six defaults.
+- **Timeouts** – per backend: maximum agent turn duration (2 hours), maximum
+  background task duration - how long a turn keeps waiting on background tasks
+  after the agent answers (24 hours; that wait does not count toward the turn
+  duration) - spawned-agent runtime (2 hours) and inactivity (10 minutes), and
+  unattended terminal, browser and VNC timeouts (15 minutes each). Values are
+  seconds; **0 means unlimited**. Turn and spawn settings initialize new runs;
+  changing an unattended timeout restarts that timer immediately. Agent
+  interaction renews unattended timers. Spawned agents still stop with their
+  owning turn. Each field has an Apply control, and Reset to defaults restores
+  the selected backend's defaults. A backend from before the background task
+  limit keeps its other timeouts editable with that row disabled.
 - **System prompt** – a custom text added to every turn on that backend, and the
   conditional guidance for remote workspaces, browsers, terminals, remote
   screens, spawned agents and tasks, each with a reset to Puppy's default.

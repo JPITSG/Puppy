@@ -20,7 +20,7 @@ from puppy import (__version__, agent_notes, auth, backends, backup_schedule, bi
                    project_move, prompt_index, spelling, token_usage,
                    live_websockets, localization, protocol, runner, schedules, search, session_git,
                    snapshots, session_titles, spawn_exec,
-                   state_stream, system_prompts, terminal, uploads, vnc,
+                   state_stream, system_prompts, terminal, timeouts, uploads, vnc,
                    usage_refresh, workspace_links, workspace_sync, workspaces)
 from puppy import web_tls
 from puppy.drivers import all_drivers, get_driver
@@ -221,7 +221,7 @@ async def _engines_response(refresh_usage: bool = True,
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
         "timers": config.timers_payload(),
-        "timeouts": config.timeouts_payload(),
+        "timeouts": timeouts.payload(),
     }
 
 
@@ -328,7 +328,7 @@ async def h_state(request: web.Request):
         "usage_refresh": usage_refresh.payload(),
         "auto_upgrade": cli_auto_upgrade.payload(),
         "timers": config.timers_payload(),
-        "timeouts": config.timeouts_payload(),
+        "timeouts": timeouts.payload(),
         "backends": backends.list_backends(),
         "sessions": session_state["sessions"],
         "server_time": session_state["server_time"],
@@ -373,7 +373,7 @@ async def h_timers_get(_request: web.Request):
 
 
 async def h_timeouts_get(_request: web.Request):
-    return web.json_response({"timeouts": config.timeouts_payload()})
+    return web.json_response({"timeouts": timeouts.payload()})
 
 
 async def h_timeouts_patch(request: web.Request):
@@ -381,9 +381,9 @@ async def h_timeouts_patch(request: web.Request):
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid timeout settings request"}, status=400)
-    before = config.timeout_values()
+    before = timeouts.values()
     try:
-        after = config.set_timeouts(body)
+        after = timeouts.update(body)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     except OSError:
@@ -396,7 +396,7 @@ async def h_timeouts_patch(request: web.Request):
     if after["vnc_idle_seconds"] != before["vnc_idle_seconds"]:
         vnc.idle_settings_changed()
     state_stream.wake("engines")
-    return web.json_response({"ok": True, "timeouts": config.timeouts_payload()})
+    return web.json_response({"ok": True, "timeouts": timeouts.payload()})
 
 
 async def h_timers_patch(request: web.Request):
@@ -1312,7 +1312,7 @@ async def h_settings_get(request: web.Request):
         "uptime_seconds": max(0, int(time.monotonic() - started)),
         "usage_refresh": usage_refresh.payload(),
         "timers": config.timers_payload(),
-        "timeouts": config.timeouts_payload(),
+        "timeouts": timeouts.payload(),
         "uploads": uploads.settings_payload(),
         "version": __version__,
     })
@@ -2218,9 +2218,11 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     The full console and the deployable headless backend both call this. Keep
     backend-facing route changes here so the two runtimes cannot silently drift.
     """
-    async def validate_queues(_app):
+    async def validate_records(_app):
         runner.validate_persisted_queues(db.connect())
-    app.on_startup.append(validate_queues)
+        # an unreadable background task limit refuses to start, unrepaired
+        timeouts.validate_persisted(db.connect())
+    app.on_startup.append(validate_records)
     operations.register(app)
     host_metrics.register(app)
     token_usage.register(app)

@@ -9,7 +9,7 @@ const between = (a, b) => source.slice(source.indexOf(a), source.indexOf(b, sour
 const document = new FakeDocument();
 const state = { timeouts: null, remoteTimeouts: {}, backends: [] };
 const requests = [], toasts = [];
-const reachable = new Set([0, 1]);
+const reachable = new Set([0, 1, 4]);
 const context = vm.createContext({
   navigationRemember: () => {}, navigationChanged: () => {}, document, state, console, Number, Map, Set, Promise,
   el: (tag, cls, text) => { const e = document.createElement(tag); e.className = cls; if (text) e.textContent = text; return e; },
@@ -24,8 +24,11 @@ const context = vm.createContext({
 });
 vm.runInContext(between("const TIMEOUT_FIELDS =", "function normalizeTimerSettings"), context);
 vm.runInContext(`class View { ${between("  timeoutSettingsCard(", "  timerSettingsCard(")} }; this.View = View;`, context);
-const keys = ["turn_seconds", "spawn_runtime_seconds", "spawn_idle_seconds", "terminal_idle_seconds", "browser_idle_seconds", "vnc_idle_seconds"];
-const defaults = Object.fromEntries(keys.map((key, index) => [key, [7200, 7200, 600, 900, 900, 900][index]]));
+const keys = ["turn_seconds", "background_wait_seconds", "spawn_runtime_seconds", "spawn_idle_seconds",
+  "terminal_idle_seconds", "browser_idle_seconds", "vnc_idle_seconds"];
+const defaults = Object.fromEntries(keys.map((key, index) =>
+  [key, [7200, 86400, 7200, 600, 900, 900, 900][index]]));
+const older = values => Object.fromEntries(Object.entries(values).filter(([key]) => key !== "background_wait_seconds"));
 const payload = (values = defaults) => ({ values: { ...values }, defaults: { ...defaults }, max_seconds: 2147483647 });
 const tick = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
 const submit = form => form.onsubmit(new FakeEvent("submit"));
@@ -34,12 +37,16 @@ const submit = form => form.onsubmit(new FakeEvent("submit"));
   assert.equal(vm.runInContext('normalizeTimeoutSettings({values:{}, defaults:{}, max_seconds:10})', context), null);
   const view = new context.View(); view.renderGeneration = 1;
   const card = view.timeoutSettingsCard([{ bid: 0, name: "Demo" }, { bid: 1, name: "Peer" },
-    { bid: 2, name: "Offline" }, { bid: 3, name: "Older" }], payload(), 1);
+    { bid: 2, name: "Offline" }, { bid: 3, name: "Older" }, { bid: 4, name: "Before limit" }], payload(), 1);
   document.body.appendChild(card);
   const forms = card.querySelectorAll("form");
   assert.equal(forms.length, keys.length);
   const inputs = forms.map(form => form.querySelector("input"));
-  assert.deepEqual(inputs.map(input => input.value), ["7200", "7200", "600", "900", "900", "900"]);
+  assert.deepEqual(inputs.map(input => input.value), ["7200", "86400", "7200", "600", "900", "900", "900"]);
+  const names = forms.map(form => form.querySelector(".timer-row-name").textContent);
+  assert.equal(names[1], "Maximum background task duration");
+  assert.match(forms[0].querySelector(".timer-row-description").textContent, /not counted/);
+  assert.match(forms[1].querySelector(".timer-row-description").textContent, /after the agent answers/);
   for (const input of inputs) {
     assert.equal(input.min, "0"); assert.equal(input.step, "1");
     assert.match(input.getAttribute("aria-label"), /0 is unlimited/);
@@ -60,6 +67,14 @@ const submit = form => form.onsubmit(new FakeEvent("submit"));
   assert.equal(state.timeouts.values.turn_seconds, 0);
   assert.equal(forms[0].querySelector(".form-error").textContent, "");
   assert.match(toasts[0][0], /unlimited/);
+  // the background task limit saves like any other row
+  inputs[1].value = "3600"; inputs[1].oninput();
+  const backgroundSave = submit(forms[1]);
+  assert.equal(JSON.stringify(requests[0].options.body), JSON.stringify({ background_wait_seconds: 3600 }));
+  requests.shift().resolve({ timeouts: payload({ ...defaults, turn_seconds: 0, background_wait_seconds: 3600 }) });
+  await backgroundSave;
+  assert.equal(state.timeouts.values.background_wait_seconds, 3600);
+  assert.equal(toasts.pop()[0], "Demo: Maximum background task duration set to 3600 seconds");
   for (const invalid of ["", "-1", "1.5", "Infinity"]) {
     inputs[1].value = invalid; inputs[1].oninput(); await submit(forms[1]);
     assert.equal(requests.length, 0);
@@ -87,9 +102,28 @@ const submit = form => form.onsubmit(new FakeEvent("submit"));
     select.value = String(bid); select.onchange();
     assert.ok(inputs.every(input => input.disabled)); assert.equal(requests.length, 0);
   }
+  // a backend from before the limit serves the other six; its row says so
+  assert.equal(vm.runInContext(`normalizeTimeoutSettings(${JSON.stringify({ ...payload(), values: older(defaults) })})`, context), null,
+    "a payload missing the limit from its values alone is refused");
+  select.value = "4"; select.onchange();
+  assert.equal(requests[0].bid, 4);
+  requests.shift().resolve({ timeouts: { values: older(defaults), defaults: older(defaults), max_seconds: 2147483647 } });
+  await tick();
+  assert.equal(inputs[1].disabled, true); assert.equal(inputs[1].value, "");
+  assert.match(forms[1].querySelector(".timer-row-description").textContent, /Not offered by this backend's version\.$/);
+  assert.ok(inputs.filter((_, index) => index !== 1).every(input => !input.disabled));
+  assert.equal(inputs[0].value, "7200");
+  const olderReset = card.querySelector(".timer-actions button").onclick();
+  requests.shift().resolve({ timeouts: { values: older(defaults), defaults: older(defaults), max_seconds: 2147483647 } });
+  await tick();
+  const olderResetRequest = requests.shift();
+  assert.ok(!("background_wait_seconds" in olderResetRequest.options.body), "never sent to a node without it");
+  olderResetRequest.resolve({ timeouts: { values: older(defaults), defaults: older(defaults), max_seconds: 2147483647 } });
+  await olderReset;
   select.value = "0"; select.onchange();
-  inputs[1].onkeydown(new FakeEvent("keydown", { key: "Escape" }));
-  assert.equal(inputs[1].value, "7200");
+  assert.match(forms[1].querySelector(".timer-row-description").textContent, /engine then stops them\.$/);
+  inputs[2].onkeydown(new FakeEvent("keydown", { key: "Escape" }));
+  assert.equal(inputs[2].value, "7200");
   const reset = card.querySelector(".timer-actions button");
   const resetting = reset.onclick();
   assert.equal(reset.disabled, true); assert.equal(select.disabled, true);

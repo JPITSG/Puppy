@@ -7930,7 +7930,9 @@ function quotaTitle(e, selected) {
 
 const TIMEOUT_FIELDS = [
   { key: "turn_seconds", label: "Maximum agent turn duration",
-    description: "Elapsed time for one turn in a chat or task, including approvals and background work." },
+    description: "Elapsed time for one turn in a chat or task, including approvals. Waiting on background tasks after the agent answers is not counted." },
+  { key: "background_wait_seconds", label: "Maximum background task duration",
+    description: "Time a turn keeps waiting on background tasks after the agent answers. The engine then stops them." },
   { key: "spawn_runtime_seconds", label: "Maximum spawned-agent duration",
     description: "Total runtime from a spawned agent’s creation, even while it makes progress." },
   { key: "spawn_idle_seconds", label: "Spawned-agent inactivity timeout",
@@ -7943,11 +7945,17 @@ const TIMEOUT_FIELDS = [
     description: "Time without connected viewers before a VNC connection is dropped. Reopening its tab dials again." },
 ];
 
+/* A timeout a node may not have: a backend from before the background task
+   limit serves the other six and is edited as before, with that row disabled. */
+const TIMEOUT_OPTIONAL_KEYS = Object.freeze(new Set(["background_wait_seconds"]));
+
 function normalizeTimeoutSettings(payload) {
   if (!payload || !payload.values || !payload.defaults ||
       !Number.isSafeInteger(payload.max_seconds) || payload.max_seconds < 1) return null;
   const values = {}, defaults = {};
   for (const { key } of TIMEOUT_FIELDS) {
+    if (TIMEOUT_OPTIONAL_KEYS.has(key) && !(key in payload.values) && !(key in payload.defaults))
+      continue;
     for (const source of [payload.values, payload.defaults]) {
       if (!Number.isInteger(source[key]) || source[key] < 0 || source[key] > payload.max_seconds)
         return null;
@@ -29019,7 +29027,8 @@ class SettingsView {
       form.noValidate = true;  // Keep validation beside this field in .form-error.
       const copy = el("div", "timer-row-copy");
       copy.appendChild(el("div", "timer-row-name", spec.label));
-      copy.appendChild(el("div", "timer-row-description", spec.description));
+      const description = el("div", "timer-row-description", spec.description);
+      copy.appendChild(description);
       const controls = el("div", "timer-row-controls");
       const input = document.createElement("input");
       input.type = "number"; input.min = "0"; input.step = "1";
@@ -29076,7 +29085,7 @@ class SettingsView {
           if (alive()) paint();
         }
       };
-      return { spec, form, input, save, error };
+      return { spec, form, input, save, error, description };
     });
     const actions = el("div", "timer-actions");
     const reset = el("button", "btn btn-sm btn-ghost", "Reset to defaults");
@@ -29101,12 +29110,17 @@ class SettingsView {
       reset.textContent = resetting ? "Resetting…" : "Reset to defaults";
       failure.textContent = resetError || loadErrors.get(activeBid) || "";
       failure.classList.toggle("hidden", !failure.textContent);
-      for (const { spec, form, input, save, error } of rows) {
+      for (const { spec, form, input, save, error, description } of rows) {
         const draft = draftFor(spec.key);
-        if (!draft.dirty) draft.value = payload ? String(payload.values[spec.key]) : "";
+        /* a node from before this timeout serves the others; its row says so */
+        const offered = !payload || spec.key in payload.values;
+        description.textContent = offered ? spec.description :
+          `${spec.description} Not offered by this backend's version.`;
+        if (!draft.dirty) draft.value = payload && offered ? String(payload.values[spec.key]) : "";
         if (input.value !== draft.value) input.value = draft.value;
         if (payload) input.max = String(payload.max_seconds);
-        const disabled = busy || !supported || !reachable || !payload || loading.has(activeBid);
+        const disabled = busy || !supported || !reachable || !payload || loading.has(activeBid) ||
+          !offered;
         input.disabled = disabled; save.disabled = disabled;
         save.textContent = draft.saving ? "Saving…" : "Apply";
         form.setAttribute("aria-busy", String(draft.saving));

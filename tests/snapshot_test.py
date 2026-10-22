@@ -26,7 +26,7 @@ os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from puppy import (auth, backup_schedule, cli_releases, config, db, listener_handoff, notices, notify,
                    schedules, spelling,
-                   runner as session_runner, snapshots, terminal, token_usage, uploads,
+                   runner as session_runner, snapshots, terminal, timeouts, token_usage, uploads,
                    web_tls, workspace_sync,
                    workspaces)  # noqa: E402
 from puppy.web import build_app  # noqa: E402
@@ -223,6 +223,8 @@ async def main() -> None:
             "spawn_idle_seconds": 0, "terminal_idle_seconds": 1800,
             "browser_idle_seconds": 0, "vnc_idle_seconds": 1200,
         })
+        # the background task limit is a meta record, carried by the database
+        timeouts.update({"background_wait_seconds": 5400})
         config.set_timers({
             "cli_release_minutes": 240,
             "model_catalog_minutes": 7,
@@ -743,6 +745,7 @@ async def main() -> None:
         shutil.rmtree(Path(config.DATA_DIR) / "uploads")
         tls_key.write_bytes(b"mutated-private-tls-material")
         project_file.write_text("changed after export", encoding="utf-8")
+        timeouts.update({"background_wait_seconds": 60})
 
         staged = snapshots.stage_import(str(archive_path))
         restored = snapshots.commit_import(staged)
@@ -768,6 +771,19 @@ async def main() -> None:
         assert config.get("engines.usage_refresh_minutes") == 30
         assert config.get("engines.defaults") == saved_engine_defaults
         assert config.timeout_values() == saved_timeouts
+        assert timeouts.background_wait_seconds() == 5400
+        # a background task limit of another shape is refused, never repaired
+        invalid_limit_db = TEST_ROOT / "invalid-background-limit.db"
+        db.backup_to(str(invalid_limit_db))
+        invalid_conn = sqlite3.connect(str(invalid_limit_db))
+        invalid_conn.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE "
+                             "SET value=excluded.value",
+                             (timeouts.BACKGROUND_KEY, '{"format":1,"seconds":1.5}'))
+        invalid_conn.commit()
+        invalid_conn.close()
+        expect_snapshot_error(lambda: snapshots._validate_database(invalid_limit_db),
+                              "background task limit")
+        invalid_limit_db.unlink()
         assert config.timer_values() == {
             "cli_release_minutes": 240,
             "model_catalog_minutes": 7,
