@@ -1,7 +1,8 @@
 /* Generated-title settings and the creation dialogs' choice against the
    shared fake DOM: the Settings card (load, retry, the backend list by
    capability, the engine list by what a backend has installed, the model and
-   effort pickers with Custom…, the prompt and its reset, the unsaved note,
+   effort pickers with Custom…, the prompt and its reset - offered only off
+   the default - the unsaved note,
    Save, the switch, Try it) and the check under a dialog's Name field (shown
    only where a title can be asked for, yielding to a typed name), plus the
    pending shimmer's predicate. No browser, engine, network or quota. */
@@ -110,10 +111,18 @@ const same = (actual, expected) => assert.equal(JSON.stringify(actual), JSON.str
   assert.equal(customWrap.classList.contains("hidden"), false);
   custom.value = "claude-next"; custom.oninput();
   assert.deepEqual(values(effort).map(row => row[0]), ["", "low", "high"]);
-  // the prompt's reset takes the controller's default
+  // the prompt's reset takes the controller's default, offered only while
+  // the prompt as Save would send it differs from that
+  assert.equal(reset.disabled, false, "a prompt of its own can be reset");
   prompt.value = "Mine"; prompt.oninput();
+  assert.equal(reset.disabled, false);
   reset.onclick(); assert.equal(prompt.value, "Default prompt {message}");
+  assert.equal(reset.disabled, true, "the default needs no reset");
+  assert.equal(document.activeElement, prompt, "the caret lands in the prompt it reset");
+  prompt.value = " Default prompt {message}\n"; prompt.oninput();
+  assert.equal(reset.disabled, true, "the edges Save trims are no difference");
   prompt.value = "  Name it: {message}  "; prompt.oninput();
+  assert.equal(reset.disabled, false);
   // Try it runs the entered values, saved or not, with the sample
   sample.value = " Add a footer "; sample.oninput();
   let trying = tryIt.onclick(); await tick();

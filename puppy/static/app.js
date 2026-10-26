@@ -16085,7 +16085,7 @@ class Composer {
     if (withVnc)
       push("new-vnc", "New VNC connection", "a remote screen by host", "");
     if (spawnExecFor(bid))
-      push("new-spawn", "New spawn", "delegate a one-shot agent", "");
+      push("new-spawn", "New spawn", "delegate to a separate agent", "");
     if (taskRole === "main")
       push("new-task", "New task", "have the agent start a task", "");
     if (taskRole === "task")
@@ -16240,7 +16240,7 @@ class Composer {
     if (wizard.step === "count") {
       for (let n = 1; n <= 12; n++)
         step(n === 1 ? "1 agent" : `${n} agents`,
-          n === 1 ? "a single one-shot run" : "parallel one-shot runs",
+          n === 1 ? "a single agent" : "independent parallel agents",
           { count: n, value: String(n) });
     } else if (wizard.step === "node") {
       for (const choice of this.spawnNodeChoices())
@@ -29679,7 +29679,7 @@ class SettingsView {
     spawnCopy.appendChild(el("h3", "", "Spawned agent guidance"));
     const spawnNote = el("p", "",
       "Sent with every model turn on this backend; it governs when the agent " +
-      "may delegate one-shot spawned agents to Puppy's backends.");
+      "may delegate work to spawned agents on Puppy's backends.");
     spawnCopy.appendChild(spawnNote);
     const spawnReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
       "Reset to default");
@@ -29816,12 +29816,15 @@ class SettingsView {
       spawnText.disabled = !editable;
       tasksText.disabled = !editable;
       remoteText.disabled = !editable;
-      remoteReset.disabled = !editable;
-      browserReset.disabled = !editable;
-      terminalReset.disabled = !editable;
-      vncReset.disabled = !editable;
-      spawnReset.disabled = !editable;
-      tasksReset.disabled = !editable;
+      /* a reset is offered only while its field's text truly differs from
+         Puppy's default for it, as the text stands now, saved or not */
+      const offDefault = key => editable && record[key + "Draft"] !== record[key + "Default"];
+      remoteReset.disabled = !offDefault("remoteWorkspace");
+      browserReset.disabled = !offDefault("browser");
+      terminalReset.disabled = !offDefault("terminal");
+      vncReset.disabled = !offDefault("vnc");
+      spawnReset.disabled = !offDefault("spawn");
+      tasksReset.disabled = !(editable && record.hasTasks && offDefault("tasks"));
       tasksSection.classList.toggle("hidden", !(canUse && record && record.loaded && record.hasTasks));
       save.disabled = !canUse || unavailable || (!!record && record.saving);
       status.classList.remove("bad", "dirty");
@@ -30326,6 +30329,9 @@ class SettingsView {
       form.setAttribute("aria-busy", busy ? "true" : "false");
       const ready = loaded && !busy;
       for (const control of [backend, engine, prompt, reset, sample, save]) control.disabled = !ready;
+      /* like the system prompt's resets: offered only while the prompt, as
+         Save would send it, differs from the controller's default */
+      reset.disabled = !ready || prompt.value.trim() === defaultPrompt.trim();
       const info = engineInfo(Number(backend.value) || 0, engine.value);
       model.disabled = !ready || !engine.value || !info ||
         (info.allow_custom_model === false && !(info.model_options || []).length);
@@ -30522,7 +30528,7 @@ class SettingsView {
     effort.onchange = () => { chosen = { ...chosen, effort: effort.value }; paintDirty(); };
     prompt.oninput = paintDirty;
     sample.oninput = paint;
-    reset.onclick = () => { prompt.value = defaultPrompt; paintDirty(); };
+    reset.onclick = () => { prompt.value = defaultPrompt; paintDirty(); prompt.focus(); };
     prompt.addEventListener("keydown", event => {
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
         event.preventDefault();

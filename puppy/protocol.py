@@ -118,10 +118,10 @@ WORKSPACE_MIRROR_CAPABILITY = "workspace-mirror"
 # controller seeds it from the authoritative workspace and acknowledges only
 # after a clean pull, preventing an empty mirror from meaning deletions.
 WORKSPACE_MIRROR_RESET_CAPABILITY = "workspace-mirror-reset"
-# One-shot spawned-agent execution: POST /api/spawn starts a single
-# non-interactive engine run in a named directory on this node, and the
-# job routes poll/cancel it. The controller relays a session's cross-node
-# spawn requests here and never offers them to a node without this marker.
+# Spawned-agent execution: POST /api/spawn starts a non-interactive engine
+# run in a named directory on this node, and the job routes poll/cancel it.
+# The controller relays a session's cross-node spawn requests here and never
+# offers them to a node without this marker.
 SPAWN_EXEC_CAPABILITY = "spawn-exec"
 # Sliding recognized-progress limits and PATCH /api/spawn/{job_id} to replace
 # either live deadline during a run.
@@ -134,6 +134,11 @@ SPAWN_CLIENT_IDS_CAPABILITY = "spawn-client-job-ids"
 # renew it; a job whose controller stops renewing ends as abandoned once its
 # lease lapses. Turn-owned local jobs have no ownership lease.
 SPAWN_OWNER_LEASE_CAPABILITY = "spawn-owner-lease"
+# POST /api/spawn/{job_id}/reply continues a finished relayed agent's own
+# engine conversation as its next round ({message, round, wait_s}; a round
+# already begun answers with that round). Payloads carry ``round`` and, once
+# finished, ``replyable``; a renewed lease keeps a finished agent available.
+SPAWN_REPLY_CAPABILITY = "spawn-reply"
 # GET /api/search searches this node's full transcript history through a
 # rebuildable FTS index. Consoles query online, search-capable nodes only.
 SEARCH_CAPABILITY = "session-search"
@@ -372,6 +377,7 @@ BASE_CAPABILITIES = (
     SPAWN_LIMITS_CAPABILITY,
     SPAWN_CLIENT_IDS_CAPABILITY,
     SPAWN_OWNER_LEASE_CAPABILITY,
+    SPAWN_REPLY_CAPABILITY,
     SEARCH_CAPABILITY,
     SESSION_EVENT_WINDOW_CAPABILITY,
     SESSION_PROMPT_HISTORY_CAPABILITY,

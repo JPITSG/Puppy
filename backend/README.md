@@ -696,9 +696,23 @@ controller renews the lease in the background (`POST /api/spawn/renew` with
 a batch of ids; a poll or limit change renews too), and a job whose
 controller stops renewing - a crash or a partition, never a brief blip - is
 stopped by the node as `abandoned` once the lease lapses instead of running
-unobserved to its own limits. Jobs are
+unobserved to its own limits. A finished agent's answer is normally the
+whole exchange, but its owner may reply: under `spawn-reply`, `POST
+/api/spawn/{job_id}/reply` (`{message, round, wait_s}`, relayed jobs only)
+starts the job's next round, which resumes the agent's own engine
+conversation through the driver's ordinary resume path with one more message
+and runs under the job's limits counted from that round's start. `round`
+names the round the reply begins, so a resend whose first answer was lost
+finds that round instead of starting another, and a poll or a resend that
+arrives while the reply waits for the previous run's process to exit is
+answered with the round it begins. Payloads carry `round` and, once
+finished, `replyable`; a finished leased job stays available for a reply
+while its controller keeps renewing the lease. Jobs are
 in-memory and never part of a snapshot. Engine turns receive a turn-scoped
-`puppy_spawn` stdio MCP bridge (targets/spawn/wait/update_limits/cancel); jobs it starts die with their
+`puppy_spawn` stdio MCP bridge (targets/spawn/wait/reply/update_limits/cancel),
+whose optional `reply` continues a finished agent's conversation from the
+turn - never required, and offered for an agent whose engine started a
+conversation it can resume; jobs it starts die with their
 turn - the runner reaps them synchronously before the post-turn workspace
 sync and the next queued prompt, and a node's shutdown kills its local jobs
 and cancels the ones it relayed while its channels are still open - approval

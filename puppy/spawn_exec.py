@@ -1,10 +1,19 @@
-"""One-shot spawned-agent execution and its shared HTTP surface.
+"""Spawned-agent execution and its shared HTTP surface.
 
-A spawned agent is a single non-interactive engine run: one prompt in, one
-final answer out, executed by the same pinned driver contracts that power
-ordinary session turns but without a session, transcript, or approval UI.
-Approval requests that still arrive are denied with an explanation so the
-spawned model adapts instead of blocking forever.
+A spawned agent is a non-interactive engine run: one prompt in, one final
+answer out, executed by the same pinned driver contracts that power ordinary
+session turns but without a session, transcript, or approval UI. Approval
+requests that still arrive are denied with an explanation so the spawned
+model adapts instead of blocking forever.
+
+That answer is normally the whole exchange. Its owner may optionally reply:
+the job's next round resumes the same engine conversation (the native id
+the driver reported, through the same resume path an ordinary session's next
+turn takes) with one more message, so the agent keeps everything it already
+read and worked out. A round is one more engine run under the job's limits,
+counted from its own start; a finished job stays available for replies for
+as long as its owner still wants it - the turn that spawned it, or a relaying
+controller that keeps renewing its lease.
 
 Jobs are node-owned and deliberately short-lived. A job started by a local
 engine turn belongs to that turn: the result must be collected before the
@@ -61,8 +70,15 @@ MAX_SPAWN_COUNT = 12
 MAX_WAIT_JOBS = 16
 MAX_RUNNING_JOBS = 24
 _JOB_ID_RE = re.compile(r"[a-f0-9]{8}")
-# Finished jobs stay readable for a while, then disappear with their output.
+# Finished jobs stay readable for a while, then disappear with their output -
+# never while their owner still wants them for a reply (see _Manager._kept).
 PURGE_AFTER_S = 1200
+# A reply resumes the engine conversation only once the previous round's
+# process is gone (its transcript complete). That teardown normally takes a
+# moment; this bounds the wait, inside the bridge's 55 s call deadline, and
+# what is left of that deadline is spent waiting for the new answer.
+REPLY_SETTLE_S = 25.0
+REPLY_BUDGET_S = 45.0
 SWEEP_INTERVAL_S = 10
 # A turn's end reaps what it spawned before the session moves on; this bounds
 # how long that transition may wait on a wedged process or an unreachable
@@ -188,6 +204,24 @@ def _validated_seconds(value, name: str, low: int = MIN_TIMEOUT_S,
         raise SpawnError("{} must be between {} and {}".format(
             name, low, high))
     return seconds
+
+
+def _validated_message(value) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise SpawnError("reply requires a non-empty message")
+    if len(value) > MAX_PROMPT_CHARS:
+        raise SpawnError("a reply cannot exceed {} characters".format(
+            MAX_PROMPT_CHARS))
+    return value
+
+
+def _round_of(job) -> int:
+    """A payload's round; one from a node that predates replies."""
+    try:
+        value = int((job or {}).get("round") or 1)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, value)
 
 
 def _validated_limit_update(body: dict) -> dict:
@@ -331,10 +365,21 @@ class SpawnJob:
         self.task = None
         self.done = asyncio.Event()
         self.limits_changed = asyncio.Event()
+        # the conversation this job can continue: the engine-native id its
+        # driver reported, and which round of it is the current one
+        self.native_id = ""
+        self.round = 1
+        # set while a reply waits out the previous round's teardown; a poll
+        # or a second reply waits for it (_Manager.settle_reply)
+        self._reply_settled = None
 
     @property
     def running(self) -> bool:
         return self.status == "running"
+
+    @property
+    def replying(self) -> bool:
+        return self._reply_settled is not None
 
     @property
     def idle_deadline(self) -> float:
@@ -356,8 +401,9 @@ class SpawnJob:
         return deadline
 
     def renew_lease(self) -> None:
-        """Any contact from the owning controller renews its lease."""
-        if self.lease_s and self.running:
+        """Any contact from the owning controller renews its lease: a running
+        job's deadline, and a finished one's place for a reply."""
+        if self.lease_s:
             self.lease_clock = time.monotonic()
 
     def expiry(self, now=None) -> tuple:
@@ -500,6 +546,7 @@ class SpawnJob:
             "last_progress_kind": self.last_progress_kind,
             "progress_seq": self.progress_seq,
             "denials": self.denials, "tool_calls": self.tool_calls,
+            "round": self.round,
         }
         if self.running:
             value["idle_remaining_s"] = max(
@@ -512,10 +559,42 @@ class SpawnJob:
                     0, int(self.lease_deadline - now))
         if not self.running:
             value.update(answer=self.answer, error=self.error,
-                         usage=dict(self.usage))
+                         usage=dict(self.usage),
+                         replyable=bool(self.native_id))
             if self.stop_reason:
                 value["stop_reason"] = self.stop_reason
         return value
+
+    def next_round(self, message: str) -> None:
+        """Begin the next round of this conversation: one more message to the
+        same engine conversation, under the job's limits counted from now.
+        The caller has checked the job is finished with a conversation to
+        continue and its previous run is gone."""
+        now_wall, now_clock = time.time(), time.monotonic()
+        self.round += 1
+        self.prompt = message
+        self.created_at = now_wall
+        self.created_clock = now_clock
+        self.lease_clock = now_clock
+        self.last_progress_at = now_wall
+        self.last_progress_clock = now_clock
+        self.last_progress_kind = "reply sent"
+        self._last_progress_values = {}
+        self.finished_at = 0.0
+        self.finished_clock = 0.0
+        self.status = "running"
+        self.answer = ""
+        self._candidate_answer = ""
+        self._interim_output = ""
+        self.error = ""
+        self.stop_reason = ""
+        self.usage = {}
+        self.denials = 0
+        self.tool_calls = 0
+        self.cancel_status = ""
+        self.proc = None
+        self.done.clear()
+        self.limits_changed.clear()
 
     def _finish(self, status: str, error: str = "") -> None:
         if not self.running:
@@ -531,7 +610,7 @@ class SpawnJob:
         token_usage.record_job(self)
         self.done.set()
 
-    # ---- the one-shot engine run ----
+    # ---- one engine run: the first round, or a reply resuming it ----
 
     @staticmethod
     def _append_bounded(current: str, text: str) -> str:
@@ -657,22 +736,25 @@ class SpawnJob:
         limit_task = None
         try:
             driver = get_driver(self.engine)
+            # a reply resumes the conversation the first round started,
+            # exactly as an ordinary session's next turn resumes its own
             fake_session = {
                 "engine": self.engine, "cwd": self.cwd, "model": self.model,
                 "effort": self.effort, "permission_mode": self.permission_mode,
-                "native_session_id": "",
+                "native_session_id": self.native_id,
             }
+            first = not self.native_id
             pinned = str(uuid.uuid4())
             prompt_text = system_prompts.turn_prompt() if self.guidance else ""
-            argv = driver.build_cmd(fake_session, True, self.prompt, pinned,
+            argv = driver.build_cmd(fake_session, first, self.prompt, pinned,
                                     system_prompt=prompt_text)
             env = clean_env(dict(os.environ))
             runtime_home = os.path.expanduser("~")
             if runtime_home and runtime_home != "~":
                 env.setdefault("HOME", runtime_home)
-            env.update(driver.build_env(fake_session, True, self.prompt,
+            env.update(driver.build_env(fake_session, first, self.prompt,
                                         pinned, system_prompt=prompt_text))
-            ctx = driver.turn_context(fake_session, True, self.prompt, pinned,
+            ctx = driver.turn_context(fake_session, first, self.prompt, pinned,
                                       system_prompt=prompt_text)
             if not isinstance(ctx, dict):
                 ctx = {}
@@ -733,6 +815,9 @@ class SpawnJob:
                     self._note_progress("token progress", usage_after)
                 for act in actions:
                     self._note_action_progress(act)
+                    if act.get("a") == "native_id" and act.get("id"):
+                        # the conversation a reply would continue
+                        self.native_id = str(act["id"])[:200]
                     if act.get("a") == "turn_pause":
                         pending_result = act.get("data") or {}
                         continue
@@ -765,7 +850,7 @@ class SpawnJob:
                             self.stop_reason or "output limit"))
                 elif result.get("ok") and self._candidate_answer.strip():
                     # Only assistant text produced after the last tool or
-                    # approval is the one-shot agent's final answer.
+                    # approval is this round's final answer.
                     self.answer = self._candidate_answer
                     self._finish("done")
                 elif result.get("ok"):
@@ -874,12 +959,99 @@ class _Manager:
     def get(self, job_id: str):
         return self.jobs.get(str(job_id or ""))
 
+    @staticmethod
+    def _owner_active(job: SpawnJob) -> bool:
+        if job.owner[0] != "turn":
+            return True
+        from puppy import runner
+        return runner.hub(job.owner[1]).tool_turn_active(job.owner[2])
+
+    def check_reply(self, job: SpawnJob) -> None:
+        """Refuse a reply this job cannot take, before anything is sent."""
+        if job.running or job.replying:
+            raise SpawnError(
+                "spawned agent '{}' is still working on its answer - wait for "
+                "it before replying".format(job.id), 409)
+        if not job.native_id:
+            raise SpawnError(
+                "spawned agent '{}' has no conversation to continue: its "
+                "engine never started one (it {} before it began) - spawn a "
+                "new agent instead".format(job.id, job.status), 409)
+
+    async def reply(self, job: SpawnJob, message: str) -> SpawnJob:
+        """Continue a finished agent's conversation with one more message, as
+        the job's next round. The previous round's process is waited out
+        first, so the engine resumes a complete transcript, and nothing
+        awaits between the last checks and the job counting as running."""
+        self.check_reply(job)
+        settled = job._reply_settled = asyncio.Event()
+        try:
+            previous = job.task
+            if previous is not None and not previous.done():
+                await asyncio.wait({previous}, timeout=REPLY_SETTLE_S)
+                if not previous.done():
+                    raise SpawnError(
+                        "spawned agent '{}' is still shutting down its "
+                        "previous run - try the reply again shortly".format(
+                            job.id), 409)
+            if self.jobs.get(job.id) is not job:
+                raise SpawnError("spawned agent '{}' was cancelled".format(
+                    job.id), 404)
+            if not self._owner_active(job):
+                raise SpawnError("the turn that spawned agent '{}' has "
+                                 "ended".format(job.id), 409)
+            from puppy import cli_upgrade
+            if cli_upgrade.is_running(job.engine):
+                raise SpawnError(
+                    "{} is being upgraded on this node right now - retry "
+                    "shortly".format(get_driver(job.engine).label), 409)
+            self.ensure_capacity(1)
+            job.next_round(message)
+        finally:
+            job._reply_settled = None
+            settled.set()
+        job.task = asyncio.ensure_future(job.run())
+        job.task.add_done_callback(lambda _finished: _state_changed())
+        _state_changed()
+        self.ensure_sweeper()
+        log.info("spawn %s round %d started: reply to its own conversation",
+                 job.id, job.round)
+        return job
+
+    @staticmethod
+    async def settle_reply(job: SpawnJob, timeout=None) -> None:
+        """Wait out a reply still waiting for the previous round's teardown,
+        so what is read next is the round it began - or, refused, the round
+        before. Bounded by that wait (REPLY_SETTLE_S) or ``timeout``."""
+        settled = job._reply_settled
+        if settled is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(settled.wait()),
+                                   timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+
+    def _kept(self, job: SpawnJob, now: float) -> bool:
+        """A finished job its owner may still reply to: one its spawning turn
+        still runs, or a relayed one whose controller keeps renewing it."""
+        if job.owner[0] == "turn":
+            return self._owner_active(job)
+        return bool(job.lease_s) and now < job.lease_deadline
+
     async def wait(self, job: SpawnJob, wait_s: float) -> None:
-        if wait_s <= 0 or not job.running:
+        """Up to ``wait_s`` for the job's current round to finish; a reply
+        still on its way to its round counts as that round."""
+        if wait_s <= 0:
+            return
+        deadline = time.monotonic() + wait_s
+        await self.settle_reply(job, timeout=wait_s)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not job.running:
             return
         try:
             await asyncio.wait_for(asyncio.shield(job.done.wait()),
-                                   timeout=wait_s)
+                                   timeout=remaining)
         except asyncio.TimeoutError:
             pass
 
@@ -972,7 +1144,8 @@ class _Manager:
                 status, error = job.expiry(now)
                 reap.append(self.cancel(job, error, status=status))
             elif not job.running and job.finished_at and \
-                    wall_now - job.finished_at > PURGE_AFTER_S:
+                    wall_now - job.finished_at > PURGE_AFTER_S and \
+                    not job.replying and not self._kept(job, now):
                 self.jobs.pop(job.id, None)
         if reap:
             # one wedged process must not hold the others' cleanup
@@ -980,9 +1153,12 @@ class _Manager:
         for job_id, handle in list(self.remote.items()):
             if handle.get("final") is not None:
                 # a settled verdict stays readable for a while, like a
-                # finished local job, then goes the same way
+                # finished local job, then goes the same way - kept as long
+                # as its turn runs, which may still reply to it
                 if wall_now - float(handle.get("finished_at") or wall_now) > \
-                        PURGE_AFTER_S:
+                        PURGE_AFTER_S and not runner.hub(
+                            handle["session_id"]).tool_turn_active(
+                                handle["turn_id"]):
                     self.remote.pop(job_id, None)
                 continue
             if runner.hub(handle["session_id"]).tool_turn_active(
@@ -1004,15 +1180,18 @@ class _Manager:
             self._renew_task = asyncio.ensure_future(self._renew_leases())
 
     def _leased_handles(self) -> dict:
-        """Live relayed jobs whose turn still wants them, by node. A handle
-        whose turn ended is deliberately left out: the cancel is retried
-        separately, and letting the lease lapse ends the job even on a node
-        the cancel cannot reach."""
+        """Relayed jobs whose turn still wants them, by node: running ones,
+        and finished ones the turn may still reply to (a node keeps those
+        while their lease is renewed). A handle whose turn ended is
+        deliberately left out: the cancel is retried separately, and letting
+        the lease lapse ends the job even on a node the cancel cannot reach."""
         from puppy import runner
         by_node = {}
         for job_id, handle in self.remote.items():
-            if not handle.get("lease") or handle.get("final") is not None or \
-                    handle.get("abandoning"):
+            final = handle.get("final")
+            if not handle.get("lease") or handle.get("abandoning") or \
+                    (final is not None and (str(final.get("status")) == "lost" or
+                                            not final.get("replyable"))):
                 continue
             if not runner.hub(handle["session_id"]).tool_turn_active(
                     handle["turn_id"]):
@@ -1338,8 +1517,9 @@ def job_text(job: dict, node_name: str, answer_limit=None) -> str:
     """One shared rendering for local payloads and relayed remote payloads.
     ``answer_limit`` caps the answer text when a combined result has to be
     shortened to fit one bridge response; the cut names the way back."""
-    head = "Spawned agent {} on {} · {}".format(
+    head = "Spawned agent {} on {}{} · {}".format(
         job.get("id"), node_name,
+        " (round {})".format(_round_of(job)) if _round_of(job) > 1 else "",
         " · ".join(value for value in (
             job.get("engine"),
             job.get("model_used") or job.get("model") or "default model",
@@ -1347,6 +1527,8 @@ def job_text(job: dict, node_name: str, answer_limit=None) -> str:
             job.get("permission_mode"),
         ) if value))
     lines = [head, "Working directory: {}".format(job.get("cwd") or "")]
+    if job.get("reply_note"):
+        lines.append("Note: {}".format(job["reply_note"]))
     status = str(job.get("status") or "")
     elapsed = int(job.get("elapsed_s") or 0)
     if status == "running":
@@ -1429,11 +1611,14 @@ def jobs_text(entries, answer_limit=None) -> str:
     return "\n".join(lines)
 
 
-def _rendered(entries: list) -> dict:
+def _rendered(entries: list, note: str = "") -> dict:
     """A bridge result: the text plus the entries it was rendered from, so
     the bridge can re-render with shorter answers if the text is too large
-    for one response (the entries themselves never travel)."""
-    return {"text": jobs_text(entries), "entries": entries}
+    for one response (the entries themselves never travel). ``note`` leads
+    the text however it is rendered."""
+    text = jobs_text(entries)
+    return {"text": (note + "\n\n" + text) if note else text,
+            "entries": entries, "note": note}
 
 
 def _relayed_job(data: dict, node_name: str) -> dict:
@@ -1448,6 +1633,8 @@ def _register_remote(session: dict, turn_id: str, target: dict,
                      job_id: str, lease: bool = False) -> dict:
     handle = {
         "bid": target["bid"], "node": target["name"],
+        # the round of its conversation the turn is waiting on
+        "round": 1,
         "session_id": int(session["id"]), "turn_id": str(turn_id),
         "registered_clock": time.monotonic(), "retry_at": 0.0,
         "abandoning": False,
@@ -1464,13 +1651,35 @@ def _register_remote(session: dict, turn_id: str, target: dict,
 
 
 def _note_remote_outcome(job: dict) -> None:
-    """Record a relayed job's terminal payload on its handle."""
+    """Record a relayed job's terminal payload on its handle - never an
+    earlier round's, which is not the answer the turn is waiting for."""
     if str(job.get("status") or "running") == "running":
         return
     handle = manager().remote.get(str(job.get("id") or ""))
-    if handle is not None and handle.get("final") is None:
+    if handle is not None and handle.get("final") is None and \
+            _round_of(job) >= int(handle.get("round") or 1):
         handle["final"] = dict(job)
         handle["finished_at"] = time.time()
+
+
+def _settled_round(handle: dict, job: dict) -> dict:
+    """A finished payload from an earlier round than the one the turn waits
+    on means a reply never reached the agent: it was sent while the node
+    could not be reached, and the node has since answered for the round
+    before. The handle goes back to that round with the way forward named,
+    rather than the old answer passing for the new one."""
+    if str(job.get("status") or "running") == "running" or \
+            _round_of(job) >= int(handle.get("round") or 1):
+        return job
+    stale = dict(job, reply_note=(
+        "your last reply did not reach this agent - its node could not be "
+        "reached when it was sent - so this is its previous answer; send "
+        "the reply again"))
+    stale.pop("wait_note", None)
+    handle["round"] = _round_of(job)
+    handle["final"] = stale
+    handle["finished_at"] = time.time()
+    return stale
 
 
 def _discard_remote(job_id: str, handle: dict) -> None:
@@ -1673,33 +1882,140 @@ def _turn_entries(session: dict, turn_id: str, ids: list) -> list:
     return entries
 
 
+async def _settle_entry(kind: str, job_id: str, ref, wait_s: float,
+                        alone: bool, base=None, timeout_s=None) -> tuple:
+    """One of the turn's agents observed for up to ``wait_s``: a local job
+    directly, a relayed one from its settled verdict or the node."""
+    if kind == "local":
+        await manager().wait(ref, wait_s)
+        return (ref.payload(), _local_node_name())
+    if ref.get("final") is not None:
+        return (ref["final"], ref["node"])
+    current = dict(base) if base else {
+        "id": job_id, "status": "running", "round": ref.get("round") or 1}
+    try:
+        channel = _spawn_channel(ref["bid"])
+    except SpawnError as exc:
+        if alone:
+            raise
+        return (dict(current, elapsed_s=current.get("elapsed_s") or 0,
+                     wait_note="status unavailable ({}) - wait again".format(
+                         exc)), ref["node"])
+    job = await _refresh_remote(channel, current, wait_s, timeout_s=timeout_s)
+    job = _settled_round(ref, job)
+    _note_remote_outcome(job)
+    return (job, ref["node"])
+
+
 async def wait_for_turn(session: dict, turn_id: str, params: dict) -> dict:
     entries = _turn_entries(session, turn_id,
                             _validated_job_ids(params))
     wait_s = _clamp_wait(params.get("wait_s"))
-
-    async def settle(kind, job_id, ref):
-        if kind == "local":
-            await manager().wait(ref, wait_s)
-            return (ref.payload(), _local_node_name())
-        if ref.get("final") is not None:
-            return (ref["final"], ref["node"])
-        try:
-            channel = _spawn_channel(ref["bid"])
-        except SpawnError as exc:
-            if len(entries) == 1:
-                raise
-            return ({"id": job_id, "status": "running", "elapsed_s": 0,
-                     "wait_note": "status unavailable ({}) - wait again"
-                     .format(exc)}, ref["node"])
-        job = await _refresh_remote(
-            channel, {"id": job_id, "status": "running"}, wait_s)
-        _note_remote_outcome(job)
-        return (job, ref["node"])
-
     results = await asyncio.gather(
-        *(settle(kind, job_id, ref) for kind, job_id, ref in entries))
+        *(_settle_entry(kind, job_id, ref, wait_s, len(entries) == 1)
+          for kind, job_id, ref in entries))
     return _rendered(list(results))
+
+
+def _reply_channel(bid: int) -> dict:
+    channel = _spawn_channel(bid)
+    if protocol.SPAWN_REPLY_CAPABILITY not in \
+            (channel.get("capabilities") or []):
+        raise SpawnError(
+            "node '{}' cannot continue a spawned agent's conversation yet - "
+            "upgrade its Puppy backend".format(channel.get("name") or bid), 409)
+    return channel
+
+
+async def _reply_remote(channel: dict, job_id: str, handle: dict,
+                        message: str) -> dict:
+    """Relay one reply. The handle moves to the round it asks for before
+    transmission, so a lost answer still leaves the turn waiting on the right
+    round: the node's own report then says whether the reply arrived."""
+    previous = handle.get("final")
+    previous_round = int(handle.get("round") or 1)
+    previous_finished = handle.get("finished_at") or 0.0
+    expected = max(previous_round, _round_of(previous)) + 1
+    handle.update(final=None, finished_at=0.0, round=expected)
+    try:
+        data = await _node_request(
+            channel, "POST", "spawn/{}/reply".format(job_id),
+            body={"message": message, "round": expected, "wait_s": 0},
+            timeout_s=REPLY_SETTLE_S + 15.0)
+        job = _relayed_job(data, handle["node"])
+    except SpawnError as exc:
+        if exc.unreached:
+            return {"id": job_id, "status": "running", "round": expected,
+                    "elapsed_s": 0, "last_progress_kind": "reply not yet confirmed",
+                    "wait_note": "the node has not confirmed this reply ({}); "
+                                 "wait reports whether the agent took it".format(exc)}
+        handle.update(final=previous, finished_at=previous_finished,
+                      round=previous_round)
+        if _node_forgot(exc):
+            handle["final"] = dict(_lost_job(dict(previous or {"id": job_id}),
+                                             handle["node"]), replyable=False)
+            raise SpawnError(
+                "node '{}' no longer has spawned agent '{}' (it restarted or "
+                "let the agent go) - spawn a new agent instead".format(
+                    handle["node"], job_id), 404)
+        raise
+    if str(job.get("id")) != job_id:
+        raise SpawnError("node returned an unexpected spawned-agent id")
+    _note_remote_outcome(job)
+    return job
+
+
+async def reply_for_turn(session: dict, turn_id: str, params: dict) -> dict:
+    """Continue finished agents' conversations: each agent named gets the
+    message as the next round of its own conversation, and the new answers
+    are collected like wait's for what is left of the bridge call."""
+    started = time.monotonic()
+    message = _validated_message(params.get("message"))
+    entries = _turn_entries(session, turn_id, _validated_job_ids(params))
+    wait_s = _clamp_wait(params.get("wait_s"))
+    # what this node can know already refuses the call before any agent is
+    # sent anything
+    channels = {}
+    for kind, job_id, ref in entries:
+        if kind == "local":
+            manager().check_reply(ref)
+            continue
+        final = ref.get("final")
+        if final is None:
+            raise SpawnError(
+                "spawned agent '{}' is still working on its answer - wait for "
+                "it before replying".format(job_id), 409)
+        if ref["bid"] not in channels:
+            channels[ref["bid"]] = _reply_channel(ref["bid"])
+        if str(final.get("status")) == "lost" or not final.get("replyable"):
+            raise SpawnError(
+                "spawned agent '{}' on '{}' has no conversation to continue - "
+                "spawn a new agent instead".format(job_id, ref["node"]), 409)
+
+    async def send(kind, job_id, ref):
+        try:
+            if kind == "local":
+                await manager().reply(ref, message)
+                return None, None
+            return None, await _reply_remote(channels[ref["bid"]], job_id,
+                                              ref, message)
+        except SpawnError as exc:
+            return "Could not reply to spawned agent {}{}: {}".format(
+                job_id, "" if kind == "local" else " on " + ref["node"],
+                exc), None
+
+    outcomes = await asyncio.gather(*(send(*entry) for entry in entries))
+    failures = [failure for failure, _base in outcomes if failure]
+    if len(failures) == len(entries):
+        raise SpawnError("\n".join(failures), 409)
+    sent = [(entry, base) for entry, (failure, base) in zip(entries, outcomes)
+            if not failure]
+    wait = min(wait_s, max(0.0, REPLY_BUDGET_S - (time.monotonic() - started)))
+    results = await asyncio.gather(
+        *(_settle_entry(kind, job_id, ref, wait, len(sent) == 1, base=base,
+                        timeout_s=wait + 8.0)
+          for (kind, job_id, ref), base in sent))
+    return _rendered(list(results), note="\n".join(failures))
 
 
 async def update_limits_for_turn(session: dict, turn_id: str,
@@ -1916,6 +2232,9 @@ async def h_spawn_get(request):
     if job is None:
         return web.json_response({"error": "unknown spawn job"}, status=404)
     job.renew_lease()
+    # a reply on its way is answered with the round it begins, never the
+    # previous one as if the reply had not arrived
+    await manager().settle_reply(job)
     await manager().wait(job, _clamp_wait(request.query.get("wait_s"),
                                           default=0))
     return web.json_response({"job": job.payload()})
@@ -1943,6 +2262,49 @@ async def h_spawn_patch(request):
     return web.json_response({"ok": True, "job": job.payload()})
 
 
+async def h_spawn_reply(request):
+    """A relaying controller's reply to one of its finished agents. ``round``
+    names the round the reply begins, so a reply already begun is answered
+    with that round instead of a second one."""
+    from aiohttp import web
+    job_id = request.match_info["job_id"]
+    await manager().settle_start(job_id)
+    job = manager().get(job_id)
+    if job is None or job.owner != ("remote",):
+        return web.json_response({"error": "unknown spawn job"}, status=404)
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid spawn reply"}, status=400)
+    job.renew_lease()
+    wait_s = _clamp_wait(body.get("wait_s"), default=0)
+    try:
+        message = _validated_message(body.get("message"))
+        expected = body.get("round")
+        if expected is not None:
+            if isinstance(expected, bool) or not isinstance(expected, int) or \
+                    expected < 2:
+                raise SpawnError("round must be a whole number above 1")
+            # the same reply sent again while the first is still on its way
+            # finds the round that one began
+            await manager().settle_reply(job)
+            if expected == job.round:
+                # this reply already began: its round is the one to follow
+                await manager().wait(job, wait_s)
+                return web.json_response({"ok": True, "job": job.payload()})
+            if expected != job.round + 1:
+                raise SpawnError(
+                    "spawned agent '{}' is at round {}, so round {} cannot "
+                    "begin".format(job.id, job.round, expected), 409)
+        await manager().reply(job, message)
+    except SpawnError as exc:
+        return web.json_response({"error": str(exc)}, status=exc.status)
+    await manager().wait(job, wait_s)
+    return web.json_response({"ok": True, "job": job.payload()})
+
+
 async def h_spawn_renew(request):
     """Bulk lease renewal from the controller that relayed these jobs. Ids
     the node does not know are reported back so the controller can settle
@@ -1967,6 +2329,9 @@ async def h_spawn_renew(request):
             outcome["starting" if job_id in mgr._start_locks
                     else "unknown"].append(job_id)
         elif not job.running:
+            # a finished agent stays available for its controller's reply
+            # for as long as the controller keeps renewing it
+            job.renew_lease()
             outcome["finished"].append(job_id)
         else:
             job.renew_lease()
@@ -1991,6 +2356,7 @@ def register(app) -> None:
     app.router.add_get("/api/spawn/{job_id:[a-f0-9]{8}}", h_spawn_get)
     app.router.add_patch("/api/spawn/{job_id:[a-f0-9]{8}}", h_spawn_patch)
     app.router.add_delete("/api/spawn/{job_id:[a-f0-9]{8}}", h_spawn_delete)
+    app.router.add_post("/api/spawn/{job_id:[a-f0-9]{8}}/reply", h_spawn_reply)
 
     async def on_startup(_app):
         manager().ensure_sweeper()

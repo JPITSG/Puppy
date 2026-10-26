@@ -11,12 +11,21 @@ verdicts, the updater launch gate and teardown blocker, bridge frame sizing
 with shortened combined results, ownership leases (lapse, renewal by
 contact and by the controller's bulk round, precedence of the job's own
 limits), one real Unix-socket round trip, and the HTTP job routes including
-idempotent client ids.
+idempotent client ids. Optional replies continue a finished agent's own
+conversation through a stub engine that keeps one: the next round resumed
+with every earlier message, each round counted on its own in the ledger,
+refusals before anything is sent, a reply waiting out the previous run's
+exit (and a poll or a second reply waiting for it in turn), a turn ending or a
+cancel in that wait, retention while the owner may still reply, and the
+relayed path - the node's capability, the round a reply begins, a reply lost
+on the way never passing the previous answer off as the new one, a node that
+forgot the agent - with its route's idempotent rounds and lease renewal.
 No real engine is invoked, no network is reached, and no quota is spent.
 """
 import asyncio
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -40,7 +49,26 @@ def out(value):
 start = json.loads(sys.stdin.readline())
 assert start.get("start") is True and start.get("prompt")
 mode = os.environ.get("STUB_MODE", "ok")
-if mode == "ok":
+if mode in ("chat", "chatlinger", "chathang"):
+    # a conversation the engine keeps by its own id: a resumed run (the
+    # driver passes the id back) sees every earlier message
+    resumed = os.environ.get("STUB_SESSION", "")
+    conversation = resumed or "conv-" + os.urandom(6).hex()
+    store = os.path.join(os.environ["STUB_DIR"], conversation + ".json")
+    if resumed and not os.path.exists(store):
+        out({"t": "result", "ok": False, "error": "no conversation " + resumed})
+        sys.exit(0)
+    history = json.load(open(store)) if resumed else []
+    history.append(start["prompt"])
+    json.dump(history, open(store, "w"))
+    out({"t": "native", "id": conversation})
+    if mode == "chathang" and len(history) > 1:
+        time.sleep(600)
+    out({"t": "a", "text": "round {}: {}".format(len(history), " | ".join(history))})
+    out({"t": "result", "ok": True, "usage": {"output_tokens": len(history)}})
+    if mode == "chatlinger":
+        time.sleep(1.5)     # the process is still on its way out after the answer
+elif mode == "ok":
     out({"t": "model", "model": "stub-1"})
     out({"t": "a", "text": "Working on it."})
     out({"t": "approval", "id": "ap1"})
@@ -94,7 +122,8 @@ class FakeDriver(Driver):
 
     def model_options(self):
         return [{"value": "", "label": "Default", "hint": ""},
-                {"value": "ok", "label": "Scripted run", "hint": ""}]
+                {"value": "ok", "label": "Scripted run", "hint": ""},
+                {"value": "chat", "label": "Conversation", "hint": ""}]
 
     def effort_options(self):
         return [{"value": "", "label": "Default", "hint": ""},
@@ -108,7 +137,11 @@ class FakeDriver(Driver):
     def build_env(self, session, first_turn, prompt, pinned_id,
                   browser_mcp=None, system_prompt="", terminal_mcp=None,
                   vnc_mcp=None, spawn_mcp=None):
-        return {"STUB_MODE": session.get("model") or "ok"}
+        # a resumed run gets back the conversation id it reported
+        assert first_turn == (not session.get("native_session_id"))
+        return {"STUB_MODE": session.get("model") or "ok",
+                "STUB_SESSION": session.get("native_session_id") or "",
+                "STUB_DIR": TEST_ROOT}
 
     def initial_stdin(self, session, prompt):
         return [{"start": True, "prompt": prompt}]
@@ -119,6 +152,8 @@ class FakeDriver(Driver):
         except ValueError:
             return []
         kind = ev.get("t")
+        if kind == "native":
+            return [{"a": "native_id", "id": ev["id"]}]
         if kind == "model":
             return [{"a": "model", "model": ev["model"]}]
         if kind == "a":
@@ -710,6 +745,53 @@ def set_remote_capabilities(bid, capabilities):
                (json.dumps(capabilities), bid))
 
 
+class quiet_sweeper:
+    """Keep the background sweeper out of a test that runs it by hand."""
+
+    def __enter__(self):
+        self.interval = spawn_exec.SWEEP_INTERVAL_S
+        spawn_exec.SWEEP_INTERVAL_S = 3600
+        self._restart()
+        return self
+
+    def __exit__(self, *_exc):
+        spawn_exec.SWEEP_INTERVAL_S = self.interval
+        self._restart()
+
+    @staticmethod
+    def _restart():
+        mgr = spawn_exec.manager()
+        if mgr._sweeper is not None:
+            mgr._sweeper.cancel()
+            mgr._sweeper = None
+        mgr.ensure_sweeper()
+
+
+def conversation_of(job):
+    """Every message the stub engine's conversation for this job holds."""
+    with open(os.path.join(TEST_ROOT, job.native_id + ".json"),
+              encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def spawn_refs(job_id):
+    """The ledger refs a job's runs were counted under."""
+    refs = set()
+    for row in db.query("SELECT value FROM meta WHERE key GLOB 'token_usage.*'"):
+        refs.update(item[0] for item in json.loads(row[0])["rows"]
+                    if item[0].startswith("spawn:{}:".format(job_id)))
+    return refs
+
+
+async def reply_refused(session, turn_id, params, needle):
+    try:
+        await spawn_exec.reply_for_turn(session, turn_id, params)
+    except spawn_exec.SpawnError as exc:
+        assert needle in str(exc), (needle, str(exc))
+        return exc
+    raise AssertionError("reply accepted: " + needle)
+
+
 async def test_turn_end_reaping(cwd):
     """A turn's end reaps its delegates synchronously, before the runner
     moves on to the next queued prompt, and shutdown tells relayed jobs to
@@ -1130,6 +1212,428 @@ async def test_relay_start(cwd):
     print("relayed start tracking, lost jobs, and fleet compensation ok")
 
 
+async def test_replies(cwd):
+    """A finished agent's own conversation continues only when its turn
+    replies: the engine resumes it with every earlier message, each round is
+    a run of its own, and what cannot take a reply refuses before anything is
+    sent."""
+    mgr = spawn_exec.manager()
+    sid = db.create_session("reply test", "fake", cwd, "", "", "blue",
+                            "standard")
+    hub = runner.hub(sid)
+    hub.status = "running"
+    hub._active_turn_id = "turn-c"
+    session = db.get_session(sid)
+
+    def started_with(prompt):
+        return [job for job in mgr.jobs.values()
+                if job.owner == ("turn", sid, "turn-c") and job.native_id and
+                conversation_of(job)[0] == prompt]
+
+    with quiet_sweeper():
+        try:
+            assert any(tool["name"] == "reply" and
+                       tool["inputSchema"]["required"] == ["jobs", "message"]
+                       for tool in spawn_agent.TOOLS)
+            first = await spawn_exec.start_for_turn(
+                session, "turn-c", {"prompt": "Remember kiwi.", "model": "chat",
+                                    "wait_s": 20})
+            assert "round 1: Remember kiwi." in first["text"], first
+            assert "(round" not in first["text"]
+            job = started_with("Remember kiwi.")[0]
+            assert job.native_id.startswith("conv-") and job.round == 1
+            assert job.payload()["round"] == 1 and job.payload()["replyable"]
+            first_ref = "spawn:{}:{}".format(job.id, int(job.created_at))
+            await asyncio.wait({job.task}, timeout=10)
+            # taking its time over the first round costs the next one nothing:
+            # each round's runtime counts from its own start
+            job.created_clock -= 100000
+
+            # the reply resumes the same conversation, through the bridge, and
+            # its answer is collected like wait's
+            replied = await spawn_agent._dispatch({
+                "session_id": sid, "turn_id": "turn-c", "method": "reply",
+                "params": {"jobs": [job.id], "message": "Which fruit?",
+                           "wait_s": 20}})
+            assert "Spawned agent {} on {} (round 2)".format(
+                job.id, config.get("instance_name")) in replied["text"], replied
+            assert "round 2: Remember kiwi. | Which fruit?" in replied["text"]
+            assert job.round == 2 and job.status == "done", job.status
+            assert job.usage == {"output_tokens": 2}
+            assert conversation_of(job) == ["Remember kiwi.", "Which fruit?"]
+            assert spawn_refs(job.id) == {first_ref, "spawn:{}:{}#2".format(
+                job.id, int(job.created_at))}, spawn_refs(job.id)
+            again = await spawn_exec.wait_for_turn(
+                session, "turn-c", {"jobs": [job.id], "wait_s": 1})
+            assert "round 2: Remember kiwi. | Which fruit?" in again["text"]
+
+            # what this node can tell refuses the call before anything is sent
+            await reply_refused(session, "turn-c",
+                                {"jobs": [job.id], "message": "  "},
+                                "non-empty message")
+            await reply_refused(session, "turn-c", {"jobs": [job.id]},
+                                "non-empty message")
+            await reply_refused(
+                session, "turn-c",
+                {"jobs": [job.id],
+                 "message": "x" * (spawn_exec.MAX_PROMPT_CHARS + 1)},
+                "cannot exceed")
+            await reply_refused(session, "turn-other",
+                                {"jobs": [job.id], "message": "hi"},
+                                "belongs to this turn")
+            await spawn_exec.start_for_turn(
+                session, "turn-c", {"prompt": "One-shot question",
+                                    "model": "ok", "wait_s": 20})
+            plain = [item for item in mgr.jobs.values()
+                     if item.owner == ("turn", sid, "turn-c") and
+                     item.model == "ok"][0]
+            assert plain.payload()["replyable"] is False
+            await reply_refused(session, "turn-c",
+                                {"jobs": [plain.id], "message": "More?"},
+                                "has no conversation to continue")
+            await reply_refused(session, "turn-c",
+                                {"jobs": [job.id, plain.id], "message": "More?"},
+                                "has no conversation to continue")
+            assert job.round == 2 and conversation_of(job) == \
+                ["Remember kiwi.", "Which fruit?"]
+
+            # an agent still working takes no reply until its answer is in
+            await spawn_exec.start_for_turn(
+                session, "turn-c", {"prompt": "Start.", "model": "chathang",
+                                    "wait_s": 20})
+            hanging = started_with("Start.")[0]
+            assert hanging.status == "done"
+            busy = await spawn_exec.reply_for_turn(
+                session, "turn-c", {"jobs": [hanging.id], "message": "Go on.",
+                                    "wait_s": 1})
+            assert "(round 2)" in busy["text"] and "Status: running" in \
+                busy["text"], busy
+            assert hanging.payload()["hard_remaining_s"] > 7000
+            await reply_refused(session, "turn-c",
+                                {"jobs": [hanging.id], "message": "And?"},
+                                "still working on its answer")
+            assert "Cancelled spawned agent" in (await spawn_exec.cancel_for_turn(
+                session, "turn-c", {"jobs": [hanging.id]}))["text"]
+            assert hanging.status == "cancelled"
+            await reply_refused(session, "turn-c",
+                                {"jobs": [hanging.id], "message": "And?"},
+                                "belongs to this turn")
+
+            # a reply waits out the previous run's exit, so the engine resumes
+            # a complete conversation; meanwhile a second reply is refused and
+            # a wait follows the reply to the round it begins
+            await spawn_exec.start_for_turn(
+                session, "turn-c", {"prompt": "Note mango.",
+                                    "model": "chatlinger", "wait_s": 20})
+            linger = started_with("Note mango.")[0]
+            assert linger.status == "done" and not linger.task.done()
+            began = time.monotonic()
+            pending = asyncio.ensure_future(spawn_exec.reply_for_turn(
+                session, "turn-c", {"jobs": [linger.id],
+                                    "message": "Which fruit?", "wait_s": 20}))
+            await asyncio.sleep(0.2)
+            assert linger.replying and linger.round == 1
+            await reply_refused(session, "turn-c",
+                                {"jobs": [linger.id], "message": "Twice?"},
+                                "still working on its answer")
+            waited = await spawn_exec.wait_for_turn(
+                session, "turn-c", {"jobs": [linger.id], "wait_s": 20})
+            assert "round 2: Note mango. | Which fruit?" in waited["text"], \
+                waited
+            answered = await pending
+            assert time.monotonic() - began >= 1.0
+            assert "round 2: Note mango. | Which fruit?" in answered["text"]
+
+            # the turn ending while a reply waits ends that reply
+            pending = asyncio.ensure_future(spawn_exec.reply_for_turn(
+                session, "turn-c", {"jobs": [linger.id], "message": "Lost?",
+                                    "wait_s": 20}))
+            await asyncio.sleep(0.2)
+            assert linger.replying
+            hub._active_turn_id = ""
+            try:
+                await pending
+            except spawn_exec.SpawnError as exc:
+                assert "has ended" in str(exc), str(exc)
+            else:
+                raise AssertionError("a reply began after its turn ended")
+            hub._active_turn_id = "turn-c"
+            assert linger.round == 2 and not linger.replying
+
+            # and so does a cancel
+            third = await spawn_exec.reply_for_turn(
+                session, "turn-c", {"jobs": [linger.id], "message": "Third?",
+                                    "wait_s": 20})
+            assert "round 3: Note mango. | Which fruit? | Third?" in \
+                third["text"], third
+            pending = asyncio.ensure_future(spawn_exec.reply_for_turn(
+                session, "turn-c", {"jobs": [linger.id], "message": "Fourth?",
+                                    "wait_s": 20}))
+            await asyncio.sleep(0.2)
+            assert linger.replying
+            await spawn_exec.cancel_for_turn(session, "turn-c",
+                                             {"jobs": [linger.id]})
+            try:
+                await pending
+            except spawn_exec.SpawnError as exc:
+                assert "was cancelled" in str(exc), str(exc)
+            else:
+                raise AssertionError("a cancelled agent took a reply")
+            assert linger.round == 3 and mgr.get(linger.id) is None
+            await asyncio.wait({linger.task}, timeout=10)
+            assert conversation_of(linger) == \
+                ["Note mango.", "Which fruit?", "Third?"]
+
+            # several agents take one message, each in its own conversation
+            await spawn_exec.start_for_turn(
+                session, "turn-c", {"prompt": "Pick a number.", "model": "chat",
+                                    "count": 2, "wait_s": 20})
+            pair = started_with("Pick a number.")
+            assert len(pair) == 2
+            both = await spawn_exec.reply_for_turn(
+                session, "turn-c", {"jobs": [item.id for item in pair],
+                                    "message": "Explain it.", "wait_s": 20})
+            assert "2 of 2 finished." in both["text"], both
+            assert both["text"].count(
+                "round 2: Pick a number. | Explain it.") == 2, both
+            assert len({item.native_id for item in pair}) == 2
+
+            # one agent that cannot take it is named ahead of the answers of
+            # those that did
+            await spawn_exec.start_for_turn(
+                session, "turn-c", {"prompt": "Name a tree.",
+                                    "model": "chatlinger", "wait_s": 20})
+            slow_exit = started_with("Name a tree.")[0]
+            quick = started_with("Remember kiwi.")[0]
+            settle = spawn_exec.REPLY_SETTLE_S
+            spawn_exec.REPLY_SETTLE_S = 0.2
+            try:
+                mixed = await spawn_exec.reply_for_turn(
+                    session, "turn-c", {"jobs": [slow_exit.id, quick.id],
+                                        "message": "Why?", "wait_s": 20})
+            finally:
+                spawn_exec.REPLY_SETTLE_S = settle
+            assert mixed["text"].startswith(
+                "Could not reply to spawned agent {}: spawned agent '{}' is "
+                "still shutting down".format(slow_exit.id, slow_exit.id)), mixed
+            assert "round 3: Remember kiwi. | Which fruit? | Why?" in \
+                mixed["text"], mixed
+            assert slow_exit.round == 1 and not slow_exit.replying
+            await reply_refused(
+                session, "turn-c", {"jobs": [slow_exit.id, hanging.id],
+                                    "message": "?"}, "belongs to this turn")
+
+            # a finished agent stays while its turn may still reply, and goes
+            # the usual way once the turn is over
+            await asyncio.wait({slow_exit.task}, timeout=10)
+            quick.finished_at = time.time() - spawn_exec.PURGE_AFTER_S - 5
+            await mgr._sweep_once()
+            assert mgr.get(quick.id) is quick
+            hub._active_turn_id = ""
+            hub.status = "idle"
+            await mgr._sweep_once()
+            assert mgr.get(quick.id) is None
+        finally:
+            hub.status = "idle"
+            hub._active_turn_id = ""
+            for item in list(mgr.jobs.values()):
+                if item.owner[:2] == ("turn", sid):
+                    await mgr.cancel(item, "test over")
+                    mgr.jobs.pop(item.id, None)
+    print("optional replies to local agents ok")
+
+
+async def test_relay_replies(cwd):
+    """A relayed agent is replied to through its node under the round the
+    reply begins; a reply lost on the way never passes the previous answer
+    off as the new one."""
+    mgr = spawn_exec.manager()
+    remote_bid = spawn_exec.resolve_target("build-node.lan")["bid"]
+    backends._mark_backend_online(remote_bid)
+    capable = [protocol.SPAWN_EXEC_CAPABILITY, protocol.SPAWN_LIMITS_CAPABILITY,
+               protocol.SPAWN_CLIENT_IDS_CAPABILITY,
+               protocol.SPAWN_OWNER_LEASE_CAPABILITY]
+    set_remote_capabilities(remote_bid, capable)
+    sid = db.create_session("relay reply test", "fake", cwd, "", "", "blue",
+                            "standard")
+    hub = runner.hub(sid)
+    hub.status = "running"
+    hub._active_turn_id = "turn-y"
+    session = db.get_session(sid)
+    node = {"bid": remote_bid, "name": "BUILD-NODE.LAN"}
+    calls, behaviour = [], {}
+    original_node_request = spawn_exec._node_request
+    spawn_exec._node_request = fake_requests(behaviour, calls)
+
+    def answered(job_id, answer, round_=1, replyable=True):
+        handle = spawn_exec._register_remote(session, "turn-y", node, job_id,
+                                             lease=True)
+        handle["final"] = finished_job(job_id, answer, round=round_,
+                                       replyable=replyable)["job"]
+        handle["finished_at"] = time.time()
+        return handle
+
+    def reply_post(path, body):
+        assert path.startswith("spawn/") and path.endswith("/reply"), path
+        return running_job(path.split("/")[1], round=body["round"])
+
+    def ask(job_ids, message, wait_s=5):
+        return spawn_exec.reply_for_turn(
+            session, "turn-y", {"jobs": job_ids, "message": message,
+                                "wait_s": wait_s})
+
+    with quiet_sweeper():
+        mgr._next_renew = time.monotonic() + 3600
+        try:
+            handle = answered("ae000001", "first answer")
+            # a node from before replies is named and sent nothing
+            await reply_refused(session, "turn-y",
+                                {"jobs": ["ae000001"], "message": "Why?"},
+                                "upgrade its Puppy backend")
+            assert calls == []
+            set_remote_capabilities(
+                remote_bid, capable + [protocol.SPAWN_REPLY_CAPABILITY])
+
+            behaviour["POST"] = reply_post
+            behaviour["GET"] = lambda path, body: finished_job(
+                "ae000001", "second answer", round=2, replyable=True)
+            replied = await ask(["ae000001"], "Why?")
+            assert calls[0]["method"] == "POST" and \
+                calls[0]["path"] == "spawn/ae000001/reply"
+            assert calls[0]["body"] == {"message": "Why?", "round": 2,
+                                        "wait_s": 0}, calls[0]
+            assert calls[0]["timeout_s"] <= 45
+            assert calls[1]["method"] == "GET" and \
+                calls[1]["path"] == "spawn/ae000001?wait_s=5", calls[1]
+            assert "Spawned agent ae000001 on BUILD-NODE.LAN (round 2)" in \
+                replied["text"] and "second answer" in replied["text"], replied
+            assert handle["round"] == 2 and \
+                handle["final"]["answer"] == "second answer"
+
+            # the reply never reached the node: its report of the round
+            # before says so, and the way forward is named
+            calls.clear()
+            behaviour["POST"] = lambda path, body: unreached()
+            lost = await ask(["ae000001"], "Sure?")
+            assert calls[0]["body"]["round"] == 3
+            assert "your last reply did not reach this agent" in \
+                lost["text"] and "second answer" in lost["text"], lost
+            assert handle["round"] == 2 and handle["final"]["reply_note"]
+            # sent again, it begins the same round
+            calls.clear()
+            behaviour["POST"] = reply_post
+            behaviour["GET"] = lambda path, body: finished_job(
+                "ae000001", "third answer", round=3, replyable=True)
+            resent = await ask(["ae000001"], "Sure?")
+            assert calls[0]["body"]["round"] == 3
+            assert "third answer" in resent["text"] and \
+                "did not reach" not in resent["text"], resent
+            assert "reply_note" not in handle["final"]
+
+            # it did arrive although its answer did not: still working
+            calls.clear()
+            behaviour["POST"] = lambda path, body: unreached()
+            behaviour["GET"] = lambda path, body: running_job(
+                "ae000001", round=4)
+            unsure = await ask(["ae000001"], "More?", wait_s=1)
+            assert "Status: running" in unsure["text"] and \
+                "did not reach" not in unsure["text"], unsure
+            assert handle["final"] is None and handle["round"] == 4
+            await reply_refused(session, "turn-y",
+                                {"jobs": ["ae000001"], "message": "Again?"},
+                                "still working on its answer")
+            assert spawn_exec.turn_job_ids(sid, "turn-y") == ["ae000001"]
+            # a late report of an earlier round is never this round's answer
+            spawn_exec._note_remote_outcome(finished_job(
+                "ae000001", "third answer", round=3)["job"])
+            assert handle["final"] is None
+            behaviour["GET"] = lambda path, body: finished_job(
+                "ae000001", "fourth answer", round=4, replyable=True)
+            settled = await spawn_exec.wait_for_turn(
+                session, "turn-y", {"jobs": ["ae000001"], "wait_s": 1})
+            assert "fourth answer" in settled["text"] and \
+                handle["final"]["round"] == 4
+
+            # a node that forgot the agent ends its conversation for good
+            calls.clear()
+            behaviour["POST"] = lambda path, body: spawn_exec.SpawnError(
+                "unknown spawn job", 404)
+            await reply_refused(session, "turn-y",
+                                {"jobs": ["ae000001"], "message": "Still there?"},
+                                "no longer has spawned agent")
+            assert handle["final"]["status"] == "lost" and \
+                handle["final"]["replyable"] is False and handle["round"] == 4
+            calls.clear()
+            await reply_refused(session, "turn-y",
+                                {"jobs": ["ae000001"], "message": "Still there?"},
+                                "has no conversation to continue")
+            assert calls == []
+
+            # a refusal the node answered leaves the agent as it was
+            refused_one = answered("ae000002", "b answer")
+            behaviour["POST"] = lambda path, body: spawn_exec.SpawnError(
+                "this node is already running too many spawned agents", 429)
+            await reply_refused(session, "turn-y",
+                                {"jobs": ["ae000002"], "message": "x"},
+                                "too many")
+            assert refused_one["final"]["answer"] == "b answer" and \
+                refused_one["round"] == 1
+
+            # one refusal is named ahead of the others' new answers
+            answered("ae000003", "c answer")
+            behaviour["POST"] = lambda path, body: (
+                spawn_exec.SpawnError("busy", 429) if "ae000002" in path
+                else reply_post(path, body))
+            behaviour["GET"] = lambda path, body: finished_job(
+                "ae000003", "c second", round=2, replyable=True)
+            mixed = await ask(["ae000002", "ae000003"], "Both?")
+            assert mixed["text"].startswith(
+                "Could not reply to spawned agent ae000002 on BUILD-NODE.LAN: "
+                "busy"), mixed
+            assert "c second" in mixed["text"] and "(round 2)" in mixed["text"]
+
+            # nothing is sent while any agent named cannot take it
+            answered("ae000004", "no conversation", replyable=False)
+            spawn_exec._register_remote(session, "turn-y", node, "ae000005",
+                                        lease=True)
+            calls.clear()
+            await reply_refused(session, "turn-y",
+                                {"jobs": ["ae000003", "ae000004"], "message": "?"},
+                                "has no conversation to continue")
+            await reply_refused(session, "turn-y",
+                                {"jobs": ["ae000005"], "message": "?"},
+                                "still working on its answer")
+            assert calls == []
+
+            # the leases renewed are the running agents' and the finished
+            # ones that may still be replied to
+            held = mgr._leased_handles()[remote_bid]
+            assert sorted(held) == ["ae000002", "ae000003", "ae000005"], held
+            mgr.remote.pop("ae000005")
+
+            # a finished agent's verdict stays while its turn runs
+            third = mgr.remote["ae000003"]
+            third["finished_at"] = time.time() - spawn_exec.PURGE_AFTER_S - 5
+            await mgr._sweep_once()
+            assert mgr.remote.get("ae000003") is third
+            hub._active_turn_id = ""
+            hub.status = "idle"
+            calls.clear()
+            await mgr._sweep_once()
+            assert "ae000003" not in mgr.remote and calls == []
+            assert mgr.remote["ae000002"]["final"]["answer"] == "b answer"
+        finally:
+            spawn_exec._node_request = original_node_request
+            set_remote_capabilities(remote_bid, capable)
+            mgr._next_renew = 0.0
+            for job_id in list(mgr.remote):
+                if mgr.remote[job_id]["session_id"] == sid:
+                    mgr.remote.pop(job_id)
+            hub.status = "idle"
+            hub._active_turn_id = ""
+    print("optional replies to relayed agents ok")
+
+
 async def test_upgrade_gate(cwd):
     """An engine updater and a spawn launch can no longer interleave, and a
     job still tearing down keeps blocking that engine's updater."""
@@ -1222,6 +1726,13 @@ def test_bridge_sizing():
     single = spawn_agent._wire_response(
         {"ok": True, "result": spawn_exec._rendered(entries[:1])})
     assert "shortened" not in json.loads(single)["result"]["text"]
+    # a reply's note on an agent it could not reach leads the text however
+    # it is rendered
+    note = "Could not reply to spawned agent ffffffff: gone"
+    noted = json.loads(spawn_agent._wire_response(
+        {"ok": True, "result": spawn_exec._rendered(entries, note=note)}))
+    assert noted["result"]["text"].startswith(note + "\n\nSpawned agents: ")
+    assert "Answers were shortened" in noted["result"]["text"]
     print("bridge sizing and shortened results ok")
 
 
@@ -1415,6 +1926,128 @@ async def test_http_routes(cwd):
     print("spawn HTTP routes ok")
 
 
+async def test_reply_routes(cwd):
+    """The node's reply route: a controller's own finished agents only, the
+    round a reply begins answered again rather than begun twice, a poll and a
+    second reply waiting for a reply on its way, and a renewed lease keeping a
+    finished agent for a reply."""
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+    app = web.Application()
+    spawn_exec.register(app)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    mgr = spawn_exec.manager()
+
+    async def start(job_id, model, prompt):
+        response = await client.post("/api/spawn", json={
+            "engine": "fake", "model": model, "prompt": prompt, "cwd": cwd,
+            "wait_s": 20, "lease_s": spawn_exec.MIN_LEASE_S, "job_id": job_id})
+        body = await response.json()
+        assert response.status == 200 and body["job"]["status"] == "done", body
+        return body["job"]
+
+    async def reply(job_id, body):
+        response = await client.post("/api/spawn/{}/reply".format(job_id),
+                                     json=body)
+        return response.status, await response.json()
+
+    with quiet_sweeper():
+        try:
+            first = await start("c4a70001", "chat", "Remember plum.")
+            assert first["round"] == 1 and first["replyable"] is True
+            job = mgr.get("c4a70001")
+            await asyncio.wait({job.task}, timeout=10)
+            status, body = await reply("c4a70001", {
+                "message": "Which fruit?", "round": 2, "wait_s": 20})
+            assert status == 200 and body["job"]["round"] == 2, body
+            assert body["job"]["answer"] == \
+                "round 2: Remember plum. | Which fruit?", body
+            # the same round asked again is that round, not a third run
+            status, body = await reply("c4a70001", {
+                "message": "Which fruit?", "round": 2})
+            assert status == 200 and body["job"]["round"] == 2 and \
+                job.round == 2
+            assert conversation_of(job) == ["Remember plum.", "Which fruit?"]
+            status, body = await reply("c4a70001", {"message": "Skip",
+                                                    "round": 4})
+            assert status == 409 and "is at round 2" in body["error"], body
+            for bad in ({"message": "x", "round": True},
+                        {"message": "x", "round": "3"},
+                        {"message": "x", "round": 1},
+                        {"message": " ", "round": 3}, {"round": 3}):
+                status, body = await reply("c4a70001", bad)
+                assert status == 400, (bad, body)
+            response = await client.post("/api/spawn/c4a70001/reply",
+                                         data="nope")
+            assert response.status == 400
+            status, body = await reply("00000000", {"message": "x"})
+            assert status == 404
+            # a turn's own agent is that turn's to reply to, not a controller's
+            mine = mgr.start_job(dict(request_for("chat", cwd),
+                                      prompt="Turn work."),
+                                 ("turn", 1, "t"), job_id="c4a70002")
+            await wait_done(mine)
+            status, body = await reply("c4a70002", {"message": "x",
+                                                    "round": 2})
+            assert status == 404
+            mgr.jobs.pop("c4a70002", None)
+
+            # a finished agent stays while its controller renews the lease
+            job.finished_at = time.time() - spawn_exec.PURGE_AFTER_S - 5
+            job.lease_clock -= spawn_exec.MIN_LEASE_S + 1
+            response = await client.post("/api/spawn/renew",
+                                         json={"jobs": ["c4a70001"]})
+            assert (await response.json())["finished"] == ["c4a70001"]
+            await mgr._sweep_once()
+            assert mgr.get("c4a70001") is job
+            job.lease_clock -= spawn_exec.MIN_LEASE_S + 1
+            await mgr._sweep_once()
+            assert mgr.get("c4a70001") is None
+
+            # a poll and the same reply again, while a reply waits out the
+            # previous run's exit, both meet the round it begins
+            await start("c4a70003", "chatlinger", "Remember fig.")
+            lingering = mgr.get("c4a70003")
+            assert not lingering.task.done()
+            sent = asyncio.ensure_future(reply("c4a70003", {
+                "message": "Which?", "round": 2, "wait_s": 0}))
+            await asyncio.sleep(0.2)
+            assert lingering.replying
+            again = asyncio.ensure_future(reply("c4a70003", {
+                "message": "Which?", "round": 2, "wait_s": 0}))
+            response = await client.get("/api/spawn/c4a70003?wait_s=0")
+            polled = await response.json()
+            assert polled["job"]["round"] == 2, polled
+            for status, body in (await sent, await again):
+                assert status == 200 and body["job"]["round"] == 2, body
+            await wait_done(lingering)
+            assert lingering.round == 2 and \
+                conversation_of(lingering) == ["Remember fig.", "Which?"]
+
+            # an agent still working takes no reply
+            await start("c4a70004", "chathang", "Start.")
+            hanging = mgr.get("c4a70004")
+            await asyncio.wait({hanging.task}, timeout=10)
+            status, body = await reply("c4a70004", {"message": "Go on.",
+                                                    "round": 2})
+            assert status == 200 and body["job"]["status"] == "running"
+            status, body = await reply("c4a70004", {"message": "And?",
+                                                    "round": 3})
+            assert status == 409 and "still working" in body["error"], body
+            response = await client.delete("/api/spawn/c4a70004")
+            assert response.status == 200
+            assert hanging.status == "cancelled"
+        finally:
+            for job_id in ("c4a70001", "c4a70003", "c4a70004"):
+                job = mgr.get(job_id)
+                if job is not None:
+                    await mgr.cancel(job, "test over")
+                    mgr.jobs.pop(job_id, None)
+            await client.close()
+    print("spawn reply route ok")
+
+
 async def test_unlimited(cwd):
     job = spawn_exec.manager().start_job(
         request_for("hang", cwd, idle_timeout_s=0, max_runtime_s=0), ("remote",))
@@ -1468,11 +2101,15 @@ async def main():
         await test_parallel(cwd)
         await test_turn_end_reaping(cwd)
         await test_relay_start(cwd)
+        await test_replies(cwd)
+        await test_relay_replies(cwd)
         await test_upgrade_gate(cwd)
         test_bridge_sizing()
         await test_http_routes(cwd)
+        await test_reply_routes(cwd)
     finally:
         await spawn_exec.manager().shutdown()
+        shutil.rmtree(TEST_ROOT, ignore_errors=True)
     print("spawn tests passed")
 
 

@@ -47,7 +47,9 @@ One exact-shape meta record per UTC day, `token_usage.<YYYY-MM-DD>`:
 
 - `ref` is `turn:<session>:<seq>` for a turn (the result event's own
   sequence number) or `spawn:<job>:<created>` for a spawned agent or title
-  job, at most 200 characters.
+  job, at most 200 characters. A spawned agent's later rounds - a reply that
+  continued its conversation - are runs of their own,
+  `spawn:<job>:<created>#<round>` with `<created>` that round's start.
 - `at` is the run's end in epoch seconds, inside the record's own UTC day.
 - `session` is the session's id, or `null` for a run that belongs to none.
 - `source` is `turn`, `spawn` or `title`.

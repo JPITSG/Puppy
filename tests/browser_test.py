@@ -3503,7 +3503,7 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
                 "agent works the screens Puppy is connected to over VNC.")
     assert vnc_copy in ui_source.replace('" +\n      "', "")
     spawn_copy = ("Sent with every model turn on this backend; it governs when "
-                  "the agent may delegate one-shot spawned agents to Puppy's backends.")
+                  "the agent may delegate work to spawned agents on Puppy's backends.")
     assert spawn_copy in ui_source.replace('" +\n      "', "")
     assert "browserNote.textContent = `Sent only for turns on ${node.name}" not in ui_source
     assert 'body.remote_workspace = record.remoteWorkspaceDraft' in ui_source
@@ -5409,6 +5409,13 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
         {"required": ["max_runtime_s"]},
     ]
     assert spawn_tools["cancel"]["inputSchema"]["required"] == ["jobs"]
+    # replying to a finished agent is offered, and offered as optional
+    reply_schema = spawn_tools["reply"]["inputSchema"]
+    assert reply_schema["required"] == ["jobs", "message"]
+    assert reply_schema["properties"]["message"]["maxLength"] == \
+        spawn_tools["spawn"]["inputSchema"]["properties"]["prompt"]["maxLength"]
+    assert spawn_tools["reply"]["description"].startswith("Optionally continue")
+    assert "Replying is optional, never required" in spawn_agent.TOOL_INSTRUCTIONS
 
 
 def check_smooth_wheel_swipe(ui_source: str, css_source: str) -> None:

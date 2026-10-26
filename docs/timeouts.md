@@ -45,7 +45,8 @@ Spawn limits are captured at job creation. An omitted limit uses the executing
 backend's setting, including on relayed starts. Explicit `idle_timeout_s` and
 `max_runtime_s` still override those defaults, and the ownership-checked live
 PATCH can change either limit. Progress renews only a positive inactivity
-limit; absolute runtime always counts from job creation. For a disabled limit,
+limit; absolute runtime always counts from job creation, or from the start of
+the round when the spawning turn replies to a finished agent. For a disabled limit,
 its `*_remaining_s` field is JSON null and the MCP text says unlimited.
 Unlimited jobs remain owned by their spawning turn, block engine updates,
 and are cancelled when that turn ends. Remote ownership leases and their

@@ -60,9 +60,10 @@ The **Session titles** card:
   offer, exactly as in the engine-defaults editor. The choices are saved as
   typed and validated by the backend that runs the job, which refuses a model
   or effort its engine does not offer.
-- **Prompt** is the instruction the model receives, with **Reset to default**.
-  Up to 4,000 characters; the default asks for the title alone, at most six
-  words, without tools.
+- **Prompt** is the instruction the model receives, with **Reset to default**,
+  offered only while the prompt (as Save would send it, trimmed) differs from
+  the default. Up to 4,000 characters; the default asks for the title alone,
+  at most six words, without tools.
 - **Try it** titles the sample message with the values entered on the card,
   saved or not, even while titles are off, and shows the title, the model that
   answered and how long it took. It is cancellable like any long operation.

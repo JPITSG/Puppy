@@ -145,6 +145,18 @@ still contain a value written before that release.
   With `timeout-settings`, omitted limits use the executing node's settings;
   zero removes a deadline and positive limits may exceed two hours. Older
   peers retain their advertised spawn contract. Ownership leases still apply.
+- `spawn-reply` adds `POST /api/spawn/{job_id}/reply` (`{message, round,
+  wait_s}`) for a relayed agent that has finished: its next round resumes the
+  agent's own engine conversation with one more message. `round` names the
+  round the reply begins, so a resend after a lost answer finds that round
+  instead of starting another; any other round is refused with 409, and a
+  turn-owned or unknown job answers 404. Job payloads add `round` and, once
+  finished, `replyable`. A finished leased job stays available while its lease
+  is renewed (`POST /api/spawn/renew` renews finished jobs too, still listed
+  under `finished`). A poll or a resent reply that arrives while a reply waits
+  for the previous run's process to exit is answered with the round that reply
+  begins. Replying is optional; nothing changes for a controller that never
+  replies, and a node without the capability is never sent one.
 - Upgrade readiness and backend availability come from their current owners;
   missing fields are not inferred from session lists or browser polls.
 - The console requires shared drafts, upload IDs, engine defaults, complete

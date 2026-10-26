@@ -14,7 +14,7 @@ own choices. A new task initially selects Main's engine and loads that backend's
 saved model, effort and permissions; changing engines loads its saved defaults.
 The prepared task's choices survive catalog/default refreshes. Engine-native
 defaults remain a separate choice: an empty model or effort lets the engine decide.
-Defaults do not alter the engines' config files or one-shot spawned jobs.
+Defaults do not alter the engines' config files or spawned jobs.
 
 Claude's catalog rows carry driver-owned `aliases`, including their resolved
 model IDs and the CLI's [documented `[1m]` request spellings](https://code.claude.com/docs/en/model-config#extended-context). Every model picker

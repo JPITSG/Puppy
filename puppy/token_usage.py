@@ -11,9 +11,10 @@ per UTC day, ``token_usage.<YYYY-MM-DD>``::
 
 A row is one engine run's tokens on one model: a session's turn (its persisted
 ``result`` event, ``ref`` = ``turn:<session>:<seq>``), a spawned agent or a
-title job (``spawn:<job>:<started>``). A turn that used several models (a
-Claude turn whose subagents or background calls ran on another model) has one
-row per model, all under the one ref. The counts are the drivers' documented
+title job (``spawn:<job>:<started>``; each later round of a continued
+conversation is ``spawn:<job>:<started>#<round>``). A turn that used several
+models (a Claude turn whose subagents or background calls ran on another
+model) has one row per model, all under the one ref. The counts are the drivers' documented
 usage vocabulary made disjoint (see ``counts``): fresh input, cache reads,
 cache writes and output, with reasoning the part of the output spent thinking.
 
@@ -268,7 +269,12 @@ def job_rows(job) -> list:
     source = "title" if owner[:1] == ("title",) else "spawn"
     session = int(owner[1]) if owner[:1] == ("turn",) and len(owner) > 1 else None
     at = job.finished_at or time.time()
-    return _model_rows("spawn:{}:{}".format(job.id, int(job.created_at)), at, session,
+    # every round of a continued conversation is a run of its own, started
+    # (created_at) when its reply was sent
+    rounds = int(getattr(job, "round", 1) or 1)
+    ref = "spawn:{}:{}".format(job.id, int(job.created_at)) + \
+        ("#{}".format(rounds) if rounds > 1 else "")
+    return _model_rows(ref, at, session,
                        source, job.engine, job.model_used or job.model, job.usage,
                        None)
 

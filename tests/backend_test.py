@@ -3008,6 +3008,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "spawn-progress-limits" in ping["capabilities"]
         assert "spawn-client-job-ids" in ping["capabilities"]
         assert "spawn-owner-lease" in ping["capabilities"]
+        assert "spawn-reply" in ping["capabilities"]
         assert "session-search" in ping["capabilities"]
         assert "session-event-window" in ping["capabilities"]
         assert "session-tools" in ping["capabilities"]
@@ -3075,7 +3076,8 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert prompt_defaults["browser_default"] == prompt_defaults["browser"]
         assert "explicitly asks" in prompt_defaults["terminal"]
         assert prompt_defaults["terminal_default"] == prompt_defaults["terminal"]
-        assert "one-shot" in prompt_defaults["spawn"]
+        assert "reply to continue that agent's conversation" in \
+            prompt_defaults["spawn"]
         assert prompt_defaults["spawn_default"] == prompt_defaults["spawn"]
         assert prompt_defaults["max_chars"] == 32768
         async with http.patch(url + "/api/system-prompt", headers=good, ssl=pinned,

@@ -42,7 +42,7 @@ There is no build step, no npm, no daemon besides Puppy itself: Python 3.9+,
   and fold its chat into Main.
 - **A fleet, not a box.** Pair other machines as backends, run sessions there,
   attach shared terminals and managed browsers on any of them, and let agents
-  delegate one-shot jobs or talk to other sessions across the fleet.
+  delegate work to other agents or talk to other sessions across the fleet.
 - **Prompts on a schedule.** A cron for prompts: send one once, every few
   minutes, on chosen days or by a cron expression, on any backend with the
   engine, model, effort and permissions you pick, and get told when a run
@@ -836,7 +836,7 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
 ### Agents that delegate and collaborate
 
 - **Spawned agents.** `@Spawn an agent on build-node using codex at high effort
-  and review the changes` starts a one-shot,
+  and review the changes` starts a
   non-interactive engine run on any backend, or up to twelve in parallel. The
   `@` menu's wizard inserts the selected settings without a trailing “to”,
   leaving the task wording to you. Sent directives render as blue mention
@@ -844,10 +844,15 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   id however the engine spells it (`fable[1m]`, `provider/model:free`); the
   agent takes the task from your surrounding request. A
   session hosted on a backend spawns on that backend only. The spawning turn
-  waits for the answers and acts on them; jobs die with their turn, renew
-  their inactivity timer only on real progress, and use the executing backend's
-  timeout settings unless a limit is explicitly supplied. Defaults are ten
-  minutes without progress and two hours total; either can be set to unlimited.
+  waits for the answers and acts on them. An answer is normally the whole
+  exchange, but the agent may reply to a finished spawned agent to continue
+  that agent's own conversation - a point to clarify, a claim to challenge -
+  rather than spawn a fresh one; replying is the agent's option, never
+  required. Jobs die with their turn, renew their inactivity timer only on
+  real progress, and use the executing backend's timeout settings unless a
+  limit is explicitly supplied. Defaults are ten minutes without progress and
+  two hours total, counted afresh for each reply; either can be set to
+  unlimited.
 - **Session references.** Type `@Session-` to select one, several or all
   sessions, including archived ones. The picker follows your typing:
   `@Session-P` lists names starting with P (case-insensitive). It inserts
@@ -1227,10 +1232,11 @@ backend name stays readable; long button labels wrap within the button.
 - **Session titles** – the switch, then which backend, engine, model and
   effort name unnamed sessions and tasks from their first message, the prompt
   they are given (with `{message}` where the message goes, and a reset to
-  Puppy's default), and **Try it**, which titles a sample message with the
-  values on the card before they are saved. The switch applies immediately;
-  the rest waits for Save. See [Session titles](docs/session-titles.md) for
-  the saved shape and the manual preparation step.
+  Puppy's default, offered while the prompt differs from it), and **Try it**,
+  which titles a sample message with the values on the card before they are
+  saved. The switch applies immediately; the rest waits for Save. See
+  [Session titles](docs/session-titles.md) for the saved shape and the manual
+  preparation step.
 - **Timers** – per backend: release checks, model catalog and sign-in caching,
   and how often the backend re-checks whether each session's directory is a
   Git repository with uncommitted or unpushed work (15 minutes); for this
@@ -1250,7 +1256,8 @@ backend name stays readable; long button labels wrap within the button.
   limit keeps its other timeouts editable with that row disabled.
 - **System prompt** – a custom text added to every turn on that backend, and the
   conditional guidance for remote workspaces, browsers, terminals, remote
-  screens, spawned agents and tasks, each with a reset to Puppy's default.
+  screens, spawned agents and tasks, each with a reset to Puppy's default that
+  is offered only while that field's text differs from the default.
 - **Backends** – add, edit, test, upgrade and auto-upgrade paired machines.
 - **Security** – change your password.
 - **Backup & restore** – export and import the full-instance archive.
@@ -1350,6 +1357,7 @@ node tests/backend_settings_ui_test.js # backend forms, removal errors and retry
 node tests/task_config_ui_test.js    # the New task dialog
 python3 tests/task_agent_test.py     # apply when done, Git's merges into tasks, the task tools, both runtimes
 node tests/task_auto_apply_ui_test.js # apply when done in the console and Settings' Task guidance
+node tests/system_prompt_ui_test.js  # Settings' system prompt resets, offered only off the default
 node tests/operation_ui_test.js      # cancellation, commit races and cleanup feedback
 python3 tests/operations_test.py     # cancellation/rollback on both runtimes
 node tests/task_fold_ui_test.js      # task removal and the folded archive card
@@ -1379,7 +1387,7 @@ python3 tests/backup_schedule_test.py # daily backups, rotation, downloads, reco
 node tests/backup_schedule_ui_test.js # backup settings and the archive limit, status polling and edits
 python3 tests/search_test.py         # the search index and query language
 node tests/search_ui_test.js         # the Search tab's results, Show all pages and their cancellation
-python3 tests/spawn_test.py          # spawned agents against a stub engine
+python3 tests/spawn_test.py          # spawned agents and their optional replies against a stub engine
 python3 tests/session_titles_test.py # generated titles: the record, the job and both runtimes' routes
 node tests/titles_ui_test.js         # the Session titles card and the dialogs' title choice
 python3 tests/mcp_startup_test.py     # source/zipapp MCP startup with filtered environments
