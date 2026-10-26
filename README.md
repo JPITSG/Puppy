@@ -840,8 +840,9 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   non-interactive engine run on any backend, or up to twelve in parallel. The
   `@` menu's wizard inserts the selected settings without a trailing “to”,
   leaving the task wording to you. Sent directives render as blue mention
-  tokens with or without “to”; the agent takes the task from your surrounding
-  request. A
+  tokens with or without “to”, each covering its whole directive with the model
+  id however the engine spells it (`fable[1m]`, `provider/model:free`); the
+  agent takes the task from your surrounding request. A
   session hosted on a backend spawns on that backend only. The spawning turn
   waits for the answers and acts on them; jobs die with their turn, renew
   their inactivity timer only on real progress, and use the executing backend's

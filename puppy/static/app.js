@@ -3335,6 +3335,20 @@ function linkifyInto(node, text) {
   return node;
 }
 
+/* A model id as a spawn or new-task directive names it: however an engine's
+   catalog spells one - `gpt-6-astra`, `provider/model.v2:free`,
+   `llama3:8b`, `fable[1m]` - so any run of characters but space, quotes and
+   brackets, a bracket only as a pair closed inside the id, starting with a
+   letter or digit and never ending on a sentence's punctuation. A period or
+   a closing bracket of the prose around it stays prose, and a connector
+   word is never a model. */
+const MENTION_MODEL = (() => {
+  const any = String.raw`[^\s"'\x60<>()\[\]{}]`;
+  const last = String.raw`[^\s"'\x60<>()\[\]{}.,;:!?]`;
+  const pair = String.raw`\[${any}*\]|\(${any}*\)|\{${any}*\}`;
+  return String.raw`(?!(?:to|and|at|then|for|with)\b)[\p{L}\p{N}_](?:(?:${any}|${pair})*(?:${last}|${pair}))?`;
+})();
+
 /* A sent chat-box mention - inserted by the composer's @ shortcut, or typed by
    hand in the same shape - renders as a token, confirming which Puppy browser,
    terminal, task, or spawn target the message pointed the agent at. A spawn
@@ -3342,8 +3356,7 @@ function linkifyInto(node, text) {
    separator. Common prose connectors are not model ids; punctuation and
    newlines end settings.
    Surrounding prose keeps its ordinary rendering and linkification. */
-const MENTION_TOKEN_RE =
-  /(^|[\s([{'"])(@(?:Session-[\w\p{L}\p{N}-]+-[A-Z0-9]{4}|Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|New task(?: using (?!(?:to|and|at)\b)[\w-]+(?: (?!(?:to|and|at|then|for|with)\b)[\w](?:[\w./:+-]*[\w/+-])?)?(?: at [\w-]+ effort)?)?|All tasks|Apply when done|Task-[\w\p{L}\p{N}-]+-[1-9][0-9]{0,9}|VNC (?:[A-Z0-9]{4}|[\w.\[\]:-]{1,255}(?: (?:"[^"\n]{1,255}"|(?!(?:to|and|then|so|for|with|please|at|but|or)\b)\S{1,255}))?)|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using (?!(?:to|and|at)\b)[\w-]+(?: (?!(?:to|and|at|then|for|with)\b)[\w](?:[\w./:+-]*[\w/+-])?)?(?: at [\w-]+ effort)?))(?=$|[\s.,;:!?)\]}'"])/gu;
+const MENTION_TOKEN_RE = new RegExp(String.raw`(^|[\s([{'"])(@(?:Session-[\w\p{L}\p{N}-]+-[A-Z0-9]{4}|Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|New task(?: using (?!(?:to|and|at)\b)[\w-]+(?: ${MENTION_MODEL})?(?: at [\w-]+ effort)?)?|All tasks|Apply when done|Task-[\w\p{L}\p{N}-]+-[1-9][0-9]{0,9}|VNC (?:[A-Z0-9]{4}|[\w.\[\]:-]{1,255}(?: (?:"[^"\n]{1,255}"|(?!(?:to|and|then|so|for|with|please|at|but|or)\b)\S{1,255}))?)|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using (?!(?:to|and|at)\b)[\w-]+(?: ${MENTION_MODEL})?(?: at [\w-]+ effort)?))(?=$|[\s.,;:!?)\]}'"])`, "gu");
 function decorateMentionsInto(node, text) {
   text = String(text == null ? "" : text);
   MENTION_TOKEN_RE.lastIndex = 0;

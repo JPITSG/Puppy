@@ -5085,7 +5085,7 @@ console.log(JSON.stringify({
         in ui_source
     # The sent-message token regex recognises every spawn directive variant,
     # leaving optional task connectors as ordinary prose.
-    re_start = ui_source.index("const MENTION_TOKEN_RE")
+    re_start = ui_source.index("const MENTION_MODEL")
     re_source = ui_source[re_start:ui_source.index("\nfunction decorateMentionsInto", re_start)]
     token_script = r"""
 %s

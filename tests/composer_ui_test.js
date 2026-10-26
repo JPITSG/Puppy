@@ -164,7 +164,7 @@ const context = vm.createContext({
 vm.runInContext([
   between("const el = ", "/* Close buttons"),
   between("function userMessageReuseButton", "function userMessageCopyButton"),
-  between("const MENTION_TOKEN_RE", "/* ================= tooltips ================= */"),
+  between("const MENTION_MODEL", "/* ================= tooltips ================= */"),
   between("const CARET_MIRROR_STYLES", "/* ctrl+j ->"),
   between("const MENTION_QUERY_MAX", "/* ================= Composer ================="),
   between("/* ================= Composer =================", "/* ================= SessionView ================="),
@@ -287,6 +287,41 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.equal(rendered.querySelector(".mention-token").textContent,
     "@Spawn an agent using codex gpt-6-astra at high effort");
   assert.equal(rendered.textContent, sentence);
+
+  /* A model id is however an engine's catalog spells one - its own bracketed
+     selector included - so two directives in one sentence each render whole,
+     and the prose around them stays prose. */
+  const council = "create a council of 1 @Spawn an agent using codex gpt-6-astra at max effort and 1 " +
+    "@Spawn an agent using claude fable[1m] at max effort as well as your own opinion.";
+  context.mentionSample = council;
+  const councilNode = vm.runInContext('decorateMentionsInto(document.createElement("div"), mentionSample)', context);
+  assert.deepEqual(councilNode.querySelectorAll(".mention-token").map(node => node.textContent),
+    ["@Spawn an agent using codex gpt-6-astra at max effort", "@Spawn an agent using claude fable[1m] at max effort"]);
+  assert.equal(councilNode.textContent, council);
+  const tokensIn = text => {
+    context.mentionSample = text;
+    return JSON.parse(vm.runInContext(
+      "JSON.stringify([...mentionSample.matchAll(MENTION_TOKEN_RE)].map(m => m[2]))", context));
+  };
+  for (const model of ["fable[1m]", "claude-fable-5-1[1m]", "gpt-6-astra", "provider/model.v2:free",
+      "llama3.1:8b-instruct-q4_K_M", "openrouter/vendor/model:beta", "model@2026-01", "o4-mini",
+      "name(preview)", "tier{fast}", "Ünïcode-модель", "7b", "a"]) {
+    for (const lead of ["@Spawn an agent using claude ", "@Spawn 2 agents on node-1 using claude ",
+        "@New task using claude "]) {
+      for (const effort of ["", " at max effort"]) {
+        const directive = lead + model + effort;
+        for (const [before, after] of [["", ""], ["see ", " and review it."], ["(", ")"], ["", "."],
+            ["", ", please"], ["", ": check"], ['"', '"'], ["[", "]"], ["{", "}"], ["", "!\nnext"]])
+          assert.deepEqual(tokensIn(before + directive + after), [directive], before + directive + after);
+      }
+    }
+  }
+  // a bracket the id never closes, a connector word and a stray quote are prose, not a model
+  for (const [text, token] of [["@Spawn an agent using claude fable[1m to check", "@Spawn an agent using claude"],
+      ["@Spawn an agent using claude and check", "@Spawn an agent using claude"],
+      ["@Spawn an agent using claude 'opus' now", "@Spawn an agent using claude"],
+      ["@Spawn an agent using claude opus) now", "@Spawn an agent using claude opus"]])
+    assert.deepEqual(tokensIn(text), [token], text);
 
   /* Finishing a spawn directive leaves task wording to the user and keeps
      the ordinary mention spacing/caret behavior, including existing prose. */

@@ -114,7 +114,7 @@ const context = vm.createContext({
 vm.runInContext([
   between("const el = ", "/* Close buttons"),
   between("function storedStringSet(", "/* Server-side drafts are shared."),
-  between("const MENTION_TOKEN_RE", "/* ================= tooltips ================= */"),
+  between("const MENTION_MODEL", "/* ================= tooltips ================= */"),
   between("const CARET_MIRROR_STYLES", "/* ctrl+j ->"),
   between("const MENTION_QUERY_MAX", "/* ================= Composer ================="),
   between("/* ================= Composer =================", "/* ================= SessionView ================="),
