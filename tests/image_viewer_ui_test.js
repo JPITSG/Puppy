@@ -113,7 +113,7 @@ const api = vm.runInContext(`({ attachmentChipNode, openImageViewer, openImageVi
   fillToolResultInto, toolImageItems, el, checkImagePreviews, imagePreviewUnavailable,
   imageViewerFit, imageViewerRange, imageViewerClamp, imageViewerAround, imageViewerCover,
   imageViewerInset, imageViewerVelocity, IMAGE_VIEWER_MAX_SCALE, IMAGE_VIEWER_TAP_MS,
-  imageMarkSizes, imageMarkCircle, imageMarkArrow, imageArrowShape, markedImageName, IMAGE_MARK_COLOR })`, context);
+  imageMarkSizes, imageMarkBox, imageBoxShape, imageMarkArrow, imageArrowShape, markedImageName, IMAGE_MARK_COLOR })`, context);
 const current = () => vm.runInContext("imageViewerOpen", context);
 const close = (a, b) => Math.abs(a - b) < 1e-6;
 /* values built inside the context carry its own prototypes; compare them as data */
@@ -674,18 +674,22 @@ console.log("PASS: Forward reopens a fresh viewer on the picture last shown, a f
 }
 console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in the head that opens the viewer without folding the card, the sent image's chips under the caption, local and remote, named for the file read, an unknown id or type never a picture");
 
-/* ---- marks on a waiting picture: a circle and an arrow for the agent ---- */
+/* ---- marks on a waiting picture: a box and an arrow for the agent ---- */
 {
   const near = (a, b) => Math.abs(a - b) < 1e-6;
   const sizes = api.imageMarkSizes(2000, 1000);
-  assert.deepEqual(plain(sizes), {stroke: 6, arrow: 140, circle: 60}, "sized for the picture, not the zoom");
-  assert.deepEqual(plain(api.imageMarkSizes(100, 80)), {stroke: 3, arrow: 48, circle: 18}, "never too thin to see");
-  assert.deepEqual(plain(api.imageMarkCircle({x: 10, y: 20}, {x: 50, y: 10}, sizes)),
-    {kind: "circle", w: 6, cx: 30, cy: 15, rx: 20, ry: 5}, "the ellipse the drag's box holds, any way round");
-  assert.deepEqual(plain(api.imageMarkCircle({x: 10, y: 20}, {x: 50, y: 10}, sizes, true, true)),
-    {kind: "circle", w: 6, cx: 30, cy: 0, rx: 20, ry: 20}, "Shift draws it round");
-  assert.deepEqual(plain(api.imageMarkCircle({x: 10, y: 20}, {x: 10, y: 20}, sizes, false)),
-    {kind: "circle", w: 6, cx: 10, cy: 20, rx: 60, ry: 60}, "a click circles the spot");
+  assert.deepEqual(plain(sizes), {stroke: 6, arrow: 140, box: 60, radius: 20}, "sized for the picture, not the zoom");
+  assert.deepEqual(plain(api.imageMarkSizes(100, 80)), {stroke: 3, arrow: 48, box: 18, radius: 5},
+    "never too thin to see");
+  assert.deepEqual(plain(api.imageMarkBox({x: 10, y: 20}, {x: 50, y: 10}, sizes)),
+    {kind: "box", w: 6, x: 10, y: 10, width: 40, height: 10, r: 5},
+    "the box between the press and the release, any way round, its corners no rounder than half its side");
+  assert.deepEqual(plain(api.imageMarkBox({x: 10, y: 20}, {x: 50, y: 10}, sizes, true, true)),
+    {kind: "box", w: 6, x: 10, y: -20, width: 40, height: 40, r: 20}, "Shift draws it square");
+  assert.deepEqual(plain(api.imageMarkBox({x: 10, y: 20}, {x: 10, y: 20}, sizes, false)),
+    {kind: "box", w: 6, x: -50, y: -40, width: 120, height: 120, r: 20}, "a click boxes the spot");
+  assert.deepEqual(plain(api.imageBoxShape({kind: "box", w: 6, x: 5, y: 5, width: 0, height: 30, r: 0})),
+    {x: 5, y: 5, width: 1, height: 30, r: 0}, "a drag along one line still draws, a pixel wide");
   for (const [to, tail] of [[{x: 300, y: 200}, [240, 200]], [{x: 100, y: 50}, [100, 60]], [{x: 50, y: 210}, [-40, 200]]]) {
     const arrow = api.imageMarkArrow({x: 100, y: 200}, to, sizes);
     assert.ok(arrow.x2 === 100 && arrow.y2 === 200, "its point stays on the press");
@@ -734,12 +738,12 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
   const {viewer, box} = waiting();
   const bar = viewer.bar.children;
   assert.deepEqual([...bar].slice(0, 4).map(node => node.className),
-    ["icon-btn iv-tool iv-circle", "icon-btn iv-tool iv-arrow", "icon-btn iv-tool iv-undo", "iv-sep"],
+    ["icon-btn iv-tool iv-box", "icon-btn iv-tool iv-arrow", "icon-btn iv-tool iv-undo", "iv-sep"],
     "the tools lead the bar, set off from the zoom");
-  assert.deepEqual([viewer.circleButton, viewer.arrowButton, viewer.undoButton].map(b => b.getAttribute("aria-label")),
-    ["Draw a circle", "Draw an arrow", "Undo the last mark"]);
-  assert.ok(!viewer.circleButton.disabled && !viewer.arrowButton.disabled && viewer.undoButton.disabled);
-  assert.equal(viewer.circleButton.getAttribute("aria-pressed"), "false");
+  assert.deepEqual([viewer.boxButton, viewer.arrowButton, viewer.undoButton].map(b => b.getAttribute("aria-label")),
+    ["Draw a box", "Draw an arrow", "Undo the last mark"]);
+  assert.ok(!viewer.boxButton.disabled && !viewer.arrowButton.disabled && viewer.undoButton.disabled);
+  assert.equal(viewer.boxButton.getAttribute("aria-pressed"), "false");
   const item = viewer.items[0];
 
   // with no tool on, a drag at the fit marks nothing
@@ -748,30 +752,31 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
   press(viewer, "pointerup", 1, 600, 450);
   assert.equal(item.marks.length, 0);
 
-  // a circle: drawn live from the press, kept on release
-  viewer.circleButton.onclick();
-  assert.ok(viewer.m.classList.contains("iv-marking") && viewer.circleButton.getAttribute("aria-pressed") === "true");
+  // a box: drawn live from the press, kept on release
+  viewer.boxButton.onclick();
+  assert.ok(viewer.m.classList.contains("iv-marking") && viewer.boxButton.getAttribute("aria-pressed") === "true");
   const [ax, ay] = point(viewer, 500, 400), [bx, by] = point(viewer, 600, 450);
   press(viewer, "pointerdown", 1, 500, 400);
   press(viewer, "pointermove", 1, 600, 450);
-  assert.equal(viewer.marksLayer.children.length, 1, "the circle shows while it is drawn");
-  assert.equal(viewer.marksLayer.children[0].tag, "ellipse");
+  assert.equal(viewer.marksLayer.children.length, 1, "the box shows while it is drawn");
+  assert.equal(viewer.marksLayer.children[0].tag, "rect");
+  assert.ok(Number(viewer.marksLayer.children[0].getAttribute("rx")) > 0, "with rounded corners");
   assert.equal(viewer.marksLayer.children[0].getAttribute("stroke"), api.IMAGE_MARK_COLOR);
   press(viewer, "pointerup", 1, 600, 450);
   assert.equal(item.marks.length, 1);
-  const ring = item.marks[0];
-  assert.ok(near(ring.cx, (ax + bx) / 2) && near(ring.cy, (ay + by) / 2) &&
-    near(ring.rx, (bx - ax) / 2) && near(ring.ry, (by - ay) / 2), "in the picture's own pixels");
+  const drawn = item.marks[0];
+  assert.ok(drawn.kind === "box" && near(drawn.x, ax) && near(drawn.y, ay) &&
+    near(drawn.width, bx - ax) && near(drawn.height, by - ay), "in the picture's own pixels");
   assert.ok(!viewer.undoButton.disabled);
   assert.equal(viewer.marksLayer.style.transform, viewer.img.style.transform, "the layer stands on the picture");
-  // a click circles the spot
+  // a click boxes the spot
   press(viewer, "pointerdown", 1, 300, 300);
   press(viewer, "pointerup", 1, 301, 300);
-  assert.equal(item.marks[1].rx, viewer.sizes().circle);
+  assert.equal(item.marks[1].width, viewer.sizes().box * 2);
 
   // an arrow: its point on the press, its tail wherever the pointer is let go
   viewer.arrowButton.onclick();
-  assert.ok(viewer.circleButton.getAttribute("aria-pressed") === "false" &&
+  assert.ok(viewer.boxButton.getAttribute("aria-pressed") === "false" &&
     viewer.arrowButton.getAttribute("aria-pressed") === "true", "one tool at a time");
   const [tx, ty] = point(viewer, 500, 400);
   press(viewer, "pointerdown", 1, 500, 400);
@@ -784,7 +789,7 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
   press(viewer, "pointermove", 1, 500, 300);
   press(viewer, "pointerup", 1, 500, 300);
   assert.ok(near(item.marks[3].x1, tx) && near(item.marks[3].y1, ty - viewer.sizes().arrow), "and from above");
-  assert.equal(viewer.marksLayer.children.length, 2 + 2 * 2, "two circles, two arrows of a shaft and a head");
+  assert.equal(viewer.marksLayer.children.length, 2 + 2 * 2, "two boxes, two arrows of a shaft and a head");
 
   // a second finger is a pinch, never half a mark; a double click is two marks, not a zoom
   press(viewer, "pointerdown", 1, 400, 400, "touch");
@@ -815,7 +820,7 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
   assert.equal(box.applied[0][1].length, 1);
 
   // a marked picture opens as it was, with its marks to change; unchanged, closing changes nothing
-  const before = [{kind: "circle", w: 6, cx: 500, cy: 400, rx: 60, ry: 60}];
+  const before = [{kind: "box", w: 6, x: 440, y: 340, width: 120, height: 120, r: 20}];
   const reopened = waiting({marks: before, source: "blob:original"});
   assert.equal(reopened.viewer.items[0].url, "blob:original", "the picture under the marks");
   assert.equal(reopened.viewer.img.src, "blob:original");
@@ -828,7 +833,7 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
   cleared.viewer.dialog.close();
   assert.deepEqual(cleared.box.applied.map(entry => entry[1]), [[]], "every mark taken back puts the picture back");
 }
-console.log("PASS: marks on a waiting picture - circles and arrows sized for the picture, the tools leading the bar only for a picture a prompt box waits to send, a circle from its drag or a click, an arrow pointing at the press from wherever it is let go, a pinch never half a mark, undo, and the marks handed to the box on close");
+console.log("PASS: marks on a waiting picture - rounded boxes and arrows sized for the picture, the tools leading the bar only for a picture a prompt box waits to send, a box from its drag or a click, an arrow pointing at the press from wherever it is let go, a pinch never half a mark, undo, and the marks handed to the box on close");
 
 /* ---- Copy: the picture onto the clipboard, offered only where a page may write one ---- */
 (async () => {

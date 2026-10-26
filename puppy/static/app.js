@@ -324,7 +324,8 @@ function downloadIcon(size) {
 /* A chevron pointing left or right on the same 12-box: the image viewer's
    previous and next. */
 /* The image viewer's marking tools, on the download glyph's 12-grid and
-   stroke: a circle, an arrow pointing up and to the left, and undo. */
+   stroke: a box with rounded corners, an arrow pointing up and to the left,
+   and undo. */
 function markToolIcon(kind, size = 14) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -334,7 +335,8 @@ function markToolIcon(kind, size = 14) {
   svg.setAttribute("aria-hidden", "true");
   const p = document.createElementNS(NS, "path");
   p.setAttribute("d", {
-    circle: "M10.25 6 A4.25 3.75 0 1 1 1.75 6 A4.25 3.75 0 1 1 10.25 6 Z",
+    box: "M3.5 2.75 H8.5 A1.75 1.75 0 0 1 10.25 4.5 V7.5 A1.75 1.75 0 0 1 8.5 9.25 H3.5 " +
+      "A1.75 1.75 0 0 1 1.75 7.5 V4.5 A1.75 1.75 0 0 1 3.5 2.75 Z",
     arrow: "M9.5 9.5 L2.75 2.75 M2.75 7 L2.75 2.75 7 2.75",
     undo: "M4.25 2.5 L2.25 4.5 4.25 6.5 M2.5 4.5 H7.25 A2.5 2.5 0 0 1 7.25 9.5 H5",
   }[kind]);
@@ -17887,9 +17889,10 @@ function imageViewerVisibleBox(node) {
 
 /* ---- marks on a waiting picture ----
    A picture waiting in a prompt box can carry red marks for the agent: a
-   circle around something, an arrow pointing at it. Marks are kept in the
-   picture's own pixels and sized for the picture rather than the zoom they
-   were drawn at, so the copy the agent receives shows them as they looked. */
+   box with rounded corners around something, an arrow pointing at it. Marks
+   are kept in the picture's own pixels and sized for the picture rather than
+   the zoom they were drawn at, so the copy the agent receives shows them as
+   they looked. */
 const IMAGE_MARK_COLOR = "#ff2b2b";   // burned into the picture, so no theme token
 const IMAGE_MARK_TRAVEL = 4;          // screen px a press must move to be a drag
 
@@ -17898,22 +17901,38 @@ function imageMarkSizes(width, height) {
   return {
     stroke: Math.min(14, Math.max(3, side * 0.006)),
     arrow: Math.min(360, Math.max(48, side * 0.14)),   // an arrow's whole length
-    circle: Math.min(240, Math.max(18, side * 0.06)),  // a clicked circle's radius
+    box: Math.min(240, Math.max(18, side * 0.06)),     // half a clicked box's side
+    radius: Math.min(64, Math.max(5, side * 0.02)),    // a box's corners
   };
 }
 
-/* The circle a drag draws: the ellipse its box holds - a round one with
-   `round` (Shift) - or, for a press that did not travel, a circle of the
-   picture's own size around the press. */
-function imageMarkCircle(from, to, sizes, moved = true, round = false) {
-  const base = { kind: "circle", w: sizes.stroke };
-  if (!moved) return { ...base, cx: from.x, cy: from.y, rx: sizes.circle, ry: sizes.circle };
-  const dx = to.x - from.x, dy = to.y - from.y;
-  if (round) {
-    const r = Math.max(Math.abs(dx), Math.abs(dy)) / 2;
-    return { ...base, cx: from.x + (dx < 0 ? -r : r), cy: from.y + (dy < 0 ? -r : r), rx: r, ry: r };
+/* The box a drag draws: the rectangle between the press and the release -
+   a square with `square` (Shift) - or, for a press that did not travel, a
+   square of the picture's own size around the press. Its corners round by
+   the picture's own radius, never past half its shorter side. */
+function imageMarkBox(from, to, sizes, moved = true, square = false) {
+  let x, y, width, height;
+  if (!moved) {
+    x = from.x - sizes.box; y = from.y - sizes.box; width = height = sizes.box * 2;
+  } else {
+    let dx = to.x - from.x, dy = to.y - from.y;
+    if (square) {
+      const side = Math.max(Math.abs(dx), Math.abs(dy));
+      dx = dx < 0 ? -side : side; dy = dy < 0 ? -side : side;
+    }
+    x = Math.min(from.x, from.x + dx); y = Math.min(from.y, from.y + dy);
+    width = Math.abs(dx); height = Math.abs(dy);
   }
-  return { ...base, cx: from.x + dx / 2, cy: from.y + dy / 2, rx: Math.abs(dx) / 2, ry: Math.abs(dy) / 2 };
+  return { kind: "box", w: sizes.stroke, x, y, width, height,
+           r: Math.min(sizes.radius, width / 2, height / 2) };
+}
+
+/* A box as drawn: never thinner than a pixel, which a picture would not show,
+   and its corners no rounder than that allows. */
+function imageBoxShape(mark) {
+  const width = Math.max(1, mark.width), height = Math.max(1, mark.height);
+  return { x: mark.x, y: mark.y, width, height,
+           r: Math.max(0, Math.min(mark.r, width / 2, height / 2)) };
 }
 
 /* The arrow a press draws: its point on the press, its tail toward wherever
@@ -17949,8 +17968,9 @@ function drawImageMarks(svg, marks) {
     svg.appendChild(node);
   };
   for (const mark of marks) {
-    if (mark.kind === "circle") {
-      add("ellipse", { cx: mark.cx, cy: mark.cy, rx: Math.max(0.5, mark.rx), ry: Math.max(0.5, mark.ry),
+    if (mark.kind === "box") {
+      const box = imageBoxShape(mark);
+      add("rect", { x: box.x, y: box.y, width: box.width, height: box.height, rx: box.r, ry: box.r,
         fill: "none", stroke: IMAGE_MARK_COLOR, "stroke-width": mark.w });
     } else if (mark.kind === "arrow") {
       const shape = imageArrowShape(mark);
@@ -17968,10 +17988,17 @@ function paintImageMarks(ctx, marks) {
   ctx.strokeStyle = ctx.fillStyle = IMAGE_MARK_COLOR;
   ctx.lineCap = ctx.lineJoin = "round";
   for (const mark of marks) {
-    if (mark.kind === "circle") {
+    if (mark.kind === "box") {
+      // the same corners an SVG rect's rx draws: a quarter circle each
+      const { x, y, width, height, r } = imageBoxShape(mark);
       ctx.lineWidth = mark.w;
       ctx.beginPath();
-      ctx.ellipse(mark.cx, mark.cy, Math.max(0.5, mark.rx), Math.max(0.5, mark.ry), 0, 0, Math.PI * 2);
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + width, y, x + width, y + height, r);
+      ctx.arcTo(x + width, y + height, x, y + height, r);
+      ctx.arcTo(x, y + height, x, y, r);
+      ctx.arcTo(x, y, x + width, y, r);
+      ctx.closePath();
       ctx.stroke();
     } else if (mark.kind === "arrow") {
       const shape = imageArrowShape(mark);
@@ -18034,7 +18061,7 @@ class ImageViewer {
     this.bare = false;
     this.lastTap = null;
     this.timers = new Set();
-    this.tool = "";                // the marking tool that is on: "", "circle" or "arrow"
+    this.tool = "";                // the marking tool that is on: "", "box" or "arrow"
     this.draft = null;             // the mark a press is drawing
   }
 
@@ -18105,18 +18132,18 @@ class ImageViewer {
         button.appendChild(markToolIcon(kind));
         return button;
       };
-      this.circleButton = tool("circle", "Draw a circle");
+      this.boxButton = tool("box", "Draw a box");
       this.arrowButton = tool("arrow", "Draw an arrow");
       this.undoButton = tool("undo", "Undo the last mark");
-      this.circleButton.setAttribute("aria-pressed", "false");
+      this.boxButton.setAttribute("aria-pressed", "false");
       this.arrowButton.setAttribute("aria-pressed", "false");
-      this.circleButton.onclick = () => this.setTool(this.tool === "circle" ? "" : "circle");
+      this.boxButton.onclick = () => this.setTool(this.tool === "box" ? "" : "box");
       this.arrowButton.onclick = () => this.setTool(this.tool === "arrow" ? "" : "arrow");
       this.undoButton.onclick = () => this.undoMark();
       const sep = el("span", "iv-sep");
       sep.setAttribute("aria-hidden", "true");
       const first = this.bar.firstElementChild;
-      for (const node of [this.circleButton, this.arrowButton, this.undoButton, sep])
+      for (const node of [this.boxButton, this.arrowButton, this.undoButton, sep])
         this.bar.insertBefore(node, first);
     }
     this.prevButton.onclick = () => this.go(this.index - 1);
@@ -18395,9 +18422,9 @@ class ImageViewer {
   /* The tools answer for the picture shown: drawing needs a loaded picture
      the box still waits to send, undo a mark to take back. */
   syncTools() {
-    if (!this.circleButton) return;
+    if (!this.boxButton) return;
     const item = this.markItem(), on = !!item && this.ready;
-    this.enable(this.circleButton, on);
+    this.enable(this.boxButton, on);
     this.enable(this.arrowButton, on);
     this.enable(this.undoButton, on && item.marks.length > 0);
     if (!on && this.tool) this.setTool("");
@@ -18406,10 +18433,10 @@ class ImageViewer {
   setTool(tool) {
     this.tool = tool;
     this.m.classList.toggle("iv-marking", !!tool);
-    if (!this.circleButton) return;
-    this.circleButton.setAttribute("aria-pressed", String(tool === "circle"));
+    if (!this.boxButton) return;
+    this.boxButton.setAttribute("aria-pressed", String(tool === "box"));
     this.arrowButton.setAttribute("aria-pressed", String(tool === "arrow"));
-    this.circleButton.classList.toggle("on", tool === "circle");
+    this.boxButton.classList.toggle("on", tool === "box");
     this.arrowButton.classList.toggle("on", tool === "arrow");
   }
 
@@ -18422,9 +18449,9 @@ class ImageViewer {
   }
 
   /* What a press is drawing, from where it began to where the pointer is. */
-  draftMark(g, p, round = false) {
+  draftMark(g, p, square = false) {
     const to = this.imagePoint(p);
-    return this.tool === "circle" ? imageMarkCircle(g.from, to, this.sizes(), g.moved, round) :
+    return this.tool === "box" ? imageMarkBox(g.from, to, this.sizes(), g.moved, square) :
       imageMarkArrow(g.from, to, this.sizes(), g.moved);
   }
 

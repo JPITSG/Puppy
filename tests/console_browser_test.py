@@ -1629,8 +1629,9 @@ async def image_viewer_checks(instance, capture=False):
         shows(g)
         assert g["level"] == str(round(g["s"] * 100)) + "%", g
 
-        # a wheel zooms about the pointer
-        px, py = (g["left"] + g["right"]) / 2, g["top"] + g["height"] * 0.4
+        # a wheel zooms about the pointer (at whole pixels: Chromium delivers
+        # a mouse event's position rounded, whatever was dispatched)
+        px, py = round((g["left"] + g["right"]) / 2), round(g["top"] + g["height"] * 0.4)
         point = ((px - g["x"]) / g["s"], (py - g["y"]) / g["s"])
         await mouse("mouseMoved", px, py)
         await instance.call("Input.dispatchMouseEvent", {"type": "mouseWheel", "x": px, "y": py,
@@ -1873,6 +1874,134 @@ def demo_png(width, height, colour):
 
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) +
             chunk(b"IDAT", zlib.compress(row * height)) + chunk(b"IEND", b""))
+
+
+async def image_mark_checks(instance):
+    """A picture waiting in a prompt box takes red boxes for the agent, and
+    the bar that offers them keeps one even ring of bar around its first and
+    last controls. In real layout on a desktop and a phone in both themes: a
+    lit box tool and the download stand as far in from the bar's ends as
+    from its top and bottom, every control's corners follow the bar's at
+    that inset, a real drag draws a box with rounded corners in the
+    picture's red, and closing hands the box to the prompt box. MARK_SHOT
+    names a directory to save each bar and box for a look."""
+    page = instance.page_session
+    shots = os.environ.get("MARK_SHOT")
+    measure = """(() => {
+        const v = imageViewerOpen, bar = v.bar, b = bar.getBoundingClientRect(), cs = getComputedStyle(bar);
+        const controls = [...bar.children].filter(n => !n.classList.contains('iv-sep') &&
+            getComputedStyle(n).display !== 'none');
+        const f = controls[0].getBoundingClientRect(), l = controls[controls.length - 1].getBoundingClientRect();
+        return {first: controls[0].className, last: controls[controls.length - 1].className,
+            on: controls[0].classList.contains('on'),
+            left: f.left - b.left, right: b.right - l.right, top: f.top - b.top, bottom: b.bottom - f.bottom,
+            lastTop: l.top - b.top, lastBottom: b.bottom - l.bottom,
+            radius: parseFloat(cs.borderTopLeftRadius), border: parseFloat(cs.borderTopWidth),
+            radii: controls.map(n => parseFloat(getComputedStyle(n).borderTopLeftRadius)),
+            bar: [b.left, b.top, b.width, b.height]};
+    })()"""
+
+    async def mouse(kind, x, y, buttons=0):
+        await instance.call("Input.dispatchMouseEvent", {
+            "type": kind, "x": x, "y": y, "button": "left" if kind != "mouseMoved" or buttons else "none",
+            "buttons": buttons, "clickCount": 1}, session=page)
+
+    async def click(x, y):
+        await mouse("mousePressed", x, y, 1)
+        await mouse("mouseReleased", x, y, 0)
+
+    async def shot(name, clip):
+        if not shots:
+            return
+        x, y, w, h = clip
+        data = await instance.call("Page.captureScreenshot", {"format": "png", "clip": {
+            "x": max(0, x - 12), "y": max(0, y - 12), "width": w + 24, "height": h + 24, "scale": 2}},
+            session=page)
+        Path(shots, name + ".png").write_bytes(base64.b64decode(data["data"]))
+
+    try:
+        for width, height, scale, mobile, theme in ((1280, 800, 1, False, "dark"), (1280, 800, 1, False, "light"),
+                                                    (390, 844, 2, True, "dark"), (390, 844, 2, True, "light")):
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile}, session=page)
+            await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); true")
+            spot = await evaluate(instance, r"""(async () => {
+                if (typeof closeDrawer === 'function') closeDrawer();
+                document.querySelectorAll('.mark-lane').forEach(n => n.remove());
+                const c = document.createElement('canvas'); c.width = 800; c.height = 500;
+                const g = c.getContext('2d'); g.fillStyle = '#dfe6ee'; g.fillRect(0, 0, 800, 500);
+                const url = c.toDataURL('image/png');
+                const strip = document.createElement('div');
+                strip.className = 'attach-strip mark-lane';
+                strip.style.cssText = 'position:fixed;left:20px;top:120px;z-index:5';
+                const attachment = {name: 'pasted.png', path: '/u/p', preview: true};
+                const chip = attachmentChipNode(attachment, url);
+                strip.appendChild(chip); document.body.appendChild(strip);
+                window.markApplied = [];
+                const box = {markable: () => true, applyMarks(a, list) { markApplied.push(list); return true; }};
+                const button = chip.querySelector('.attach-view');
+                button._marking = {composer: box, attachment, marks: [], source: ''};
+                const img = chip.querySelector('img');
+                if (!img.complete) await new Promise(r => { img.addEventListener('load', r, {once: true}); });
+                await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+                const r = button.getBoundingClientRect();
+                return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()""")
+            await click(spot["x"], spot["y"])
+            await until(instance, "!!imageViewerOpen && imageViewerOpen.ready && !!imageViewerOpen.boxButton")
+            await evaluate(instance, "Promise.all(document.getAnimations().filter(a => a.effect && "
+                                     "a.effect.getTiming().iterations !== Infinity)"
+                                     ".map(a => a.finished.catch(() => {}))).then(() => true)")
+            tool = await evaluate(instance, """(() => { const r = imageViewerOpen.boxButton.getBoundingClientRect();
+                return {x: r.left + r.width / 2, y: r.top + r.height / 2,
+                        label: imageViewerOpen.boxButton.getAttribute('aria-label')}; })()""")
+            assert tool["label"] == "Draw a box", tool
+            await click(tool["x"], tool["y"])
+            await mouse("mouseMoved", 5, 5)
+            g = await evaluate(instance, measure)
+            where = (width, theme, g)
+            assert g["first"] == "icon-btn iv-tool iv-box on" and g["last"] == "icon-btn iv-download", where
+            inset = g["border"] + 4
+            for side in ("left", "right", "top", "bottom", "lastTop", "lastBottom"):
+                assert abs(g[side] - inset) < 0.6, ("one even ring around the ends", side, where)
+            assert all(abs(r - (g["radius"] - inset)) < 0.01 for r in g["radii"]), \
+                ("every control's corners follow the bar's", where)
+            await shot("bar-{}-{}".format(width, theme), g["bar"])
+            # a real drag across the picture draws a box with rounded corners
+            pic = await evaluate(instance, """(() => { const r = imageViewerOpen.img.getBoundingClientRect();
+                return [r.left, r.top, r.width, r.height]; })()""")
+            ax, ay = pic[0] + pic[2] * 0.25, pic[1] + pic[3] * 0.3
+            bx, by = pic[0] + pic[2] * 0.7, pic[1] + pic[3] * 0.65
+            await mouse("mouseMoved", ax, ay)
+            await mouse("mousePressed", ax, ay, 1)
+            await mouse("mouseMoved", (ax + bx) / 2, (ay + by) / 2, 1)
+            await mouse("mouseMoved", bx, by, 1)
+            await mouse("mouseReleased", bx, by, 0)
+            drawn = await evaluate(instance, """(() => { const v = imageViewerOpen, rect = v.marksLayer.querySelector('rect');
+                const r = rect && rect.getBoundingClientRect();
+                return {marks: v.items[0].marks.map(m => ({...m})), tag: rect ? 'rect' : '',
+                        rx: rect ? +rect.getAttribute('rx') : 0, stroke: rect ? rect.getAttribute('stroke') : '',
+                        color: IMAGE_MARK_COLOR, screen: r ? [r.left, r.top, r.width, r.height] : null}; })()""")
+            assert drawn["tag"] == "rect" and len(drawn["marks"]) == 1, (where, drawn)
+            mark = drawn["marks"][0]
+            assert mark["kind"] == "box" and mark["r"] > 0 and abs(drawn["rx"] - mark["r"]) < 1e-6, drawn
+            assert drawn["stroke"] == drawn["color"], drawn
+            assert abs(mark["width"] / mark["height"] - (0.45 * pic[2]) / (0.35 * pic[3])) < 0.02, \
+                ("the box between the press and the release", drawn, pic)
+            await shot("box-{}-{}".format(width, theme), pic)
+            await instance.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape",
+                                                           "windowsVirtualKeyCode": 27}, session=page)
+            await instance.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Escape", "code": "Escape",
+                                                           "windowsVirtualKeyCode": 27}, session=page)
+            await until(instance, "!imageViewerOpen && markApplied.length === 1")
+            applied = await evaluate(instance, "markApplied[0]")
+            assert len(applied) == 1 and applied[0]["kind"] == "box", applied
+    finally:
+        await evaluate(instance, "document.querySelectorAll('.mark-lane').forEach(n => n.remove()); "
+                                 "applyTheme('dark'); true")
+        await instance.call("Emulation.clearDeviceMetricsOverride", {}, session=page)
+    print("PASS: a waiting picture's marking bar keeps one even ring around its ends with its controls' "
+          "corners following the bar's, and a real drag draws a rounded box handed to the prompt box, "
+          "desktop/phone in both themes", flush=True)
 
 
 async def tool_image_checks(instance):
@@ -9496,6 +9625,7 @@ async def main(args):
                 return
             if args.image_viewer_only:
                 await image_viewer_checks(instances[0], args.screenshots)
+                await image_mark_checks(instances[0])
                 await tool_image_checks(instances[0])
                 return
             await directory_checks(instances[0], app)
@@ -9521,6 +9651,7 @@ async def main(args):
             await thinking_disclosure_checks(instances[0])
             await loop_checks(instances[0], args.screenshots)
             await image_viewer_checks(instances[0], args.screenshots)
+            await image_mark_checks(instances[0])
             await tool_image_checks(instances[0])
             await task_tools_checks(instances[0])
             await task_tab_spacing_checks(instances[0])

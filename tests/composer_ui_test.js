@@ -1687,7 +1687,7 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
       rendered.push({ url, marks: JSON.parse(JSON.stringify(marks)) });
       return renderFail ? Promise.reject(renderFail) : Promise.resolve({ size: 99, type: "image/png" });
     };
-    const circle = { kind: "circle", w: 6, cx: 40, cy: 30, rx: 12, ry: 8 };
+    const boxMark = { kind: "box", w: 6, x: 28, y: 22, width: 24, height: 16, r: 8 };
     const arrow = { kind: "arrow", w: 6, x1: 90, y1: 90, x2: 50, y2: 50 };
     const b = makeBox({ directory: () => null });
     b.ta.focus(); type(b.ta, "Look here");
@@ -1705,14 +1705,14 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     assert.equal(view._marking.source, "", "an unmarked picture opens as itself");
 
     // the marked copy takes the picture's place at once, and a send waits for it
-    assert.equal(b.composer.applyMarks(base, [circle]), true);
+    assert.equal(b.composer.applyMarks(base, [boxMark]), true);
     let marked = b.composer.attachments[0];
     assert.ok(marked !== base && marked.original === base && marked.uploading);
     assert.equal(b.composer.attachments.length, 1);
     assert.equal(marked.name, "shot-marked.png");
     assert.equal(b.composer.sendBlocker(), "Wait for file uploads to finish");
     await settle();
-    assert.deepEqual(rendered.at(-1), { url: base.url, marks: [circle] }, "drawn from the picture itself");
+    assert.deepEqual(rendered.at(-1), { url: base.url, marks: [boxMark] }, "drawn from the picture itself");
     const upload = calls.fetch.at(-1);
     assert.equal(upload.init.headers["Content-Type"], "image/png");
     assert.equal(upload.init.headers["X-Puppy-Filename"], "shot-marked.png");
@@ -1723,15 +1723,15 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
       !b.composer.message().includes(`/${baseId}/`), "the message carries the marked copy alone");
     assert.deepEqual(deletes(apiFrom), [], "the picture under the marks is kept for the next change");
     const markedView = b.box.querySelector(".attach-view");
-    assert.deepEqual(JSON.parse(JSON.stringify(markedView._marking.marks)), [circle]);
+    assert.deepEqual(JSON.parse(JSON.stringify(markedView._marking.marks)), [boxMark]);
     assert.equal(markedView._marking.source, base.url, "a marked picture opens as it was, its marks laid over it");
 
     // marked again: drawn from the original, the earlier copy spent once the new one lands
-    b.composer.applyMarks(marked, [circle, arrow]);
+    b.composer.applyMarks(marked, [boxMark, arrow]);
     const again = b.composer.attachments[0];
     assert.ok(again.original === base && again.previous === marked);
     await settle();
-    assert.deepEqual(rendered.at(-1), { url: base.url, marks: [circle, arrow] });
+    assert.deepEqual(rendered.at(-1), { url: base.url, marks: [boxMark, arrow] });
     completeUpload(calls.fetch.at(-1));
     await settle();
     assert.deepEqual(deletes(apiFrom), [`sessions/10/upload/${markedId}`], "the earlier marked copy goes");
@@ -1747,12 +1747,12 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     // a copy that cannot be drawn, or uploaded, leaves the box as it was and says so
     calls.toasts.length = 0;
     renderFail = new Error("the picture could not be read");
-    b.composer.applyMarks(base, [circle]);
+    b.composer.applyMarks(base, [boxMark]);
     await settle();
     renderFail = null;
     assert.ok(b.composer.attachments[0] === base && !base.removed);
     assert.deepEqual(calls.toasts.map(t => t.text), ["Could not mark shot.png · the picture could not be read"]);
-    b.composer.applyMarks(base, [circle]);
+    b.composer.applyMarks(base, [boxMark]);
     await settle();
     calls.fetch.at(-1).resolve({ ok: false, status: 413, json: async () => ({ error: "too large" }) });
     await settle();
@@ -1775,7 +1775,7 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     const next = b.composer.attachments[0];
     const nextId = completeUpload(calls.fetch.at(-1));
     await settle();
-    b.composer.applyMarks(next, [circle]);
+    b.composer.applyMarks(next, [boxMark]);
     await settle();
     completeUpload(calls.fetch.at(-1));
     await settle();
@@ -1786,7 +1786,7 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     await settle();
     b.composer.setBusy(true);
     assert.equal(b.composer.markable(b.composer.attachments[0]), false);
-    assert.equal(b.composer.applyMarks(b.composer.attachments[0], [circle]), false);
+    assert.equal(b.composer.applyMarks(b.composer.attachments[0], [boxMark]), false);
     b.composer.setBusy(false);
     b.composer.destroy();
     delete context.imageWithMarks;
