@@ -591,12 +591,16 @@ itself before the model has said anything is the turn coming up, not trouble to
 report; anything the engine will not retry is still shown as an error.
 
 A blue pill in the session header shows the live background-task count (for
-example, **2 tasks**), including while the model is still working. It disappears
-at zero, on disconnect and when the turn ends; reconnecting restores the current
-list. Only engine-reported background work counts, excluding internal
-housekeeping. This indicator is currently available for Claude Code. Codex and
-OpenCode do not yet supply a reliable complete background-task list through
-Puppy's integrations, so they show no counter.
+example, **2 tasks**), including while the model is still working. Clicking it
+lists them: each task's kind (a command, a watch or an agent), what it does, its
+ID and how long it has run, kept up to date while the list is open. Clicking a
+row whose starting call Claude Code reported lands on that call in the
+transcript, loading it first if it is no longer on the page. The pill
+disappears at zero, on disconnect and when the turn ends; reconnecting restores
+the current list. Only engine-reported background work counts, excluding
+internal housekeeping. This indicator is currently available for Claude Code.
+Codex and OpenCode do not yet supply a reliable complete background-task list
+through Puppy's integrations, so they show no counter.
 
 When the engine answers with a model other than the one requested (Claude Code
 falling back because the requested model is overloaded or unavailable, for

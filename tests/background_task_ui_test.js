@@ -1,11 +1,13 @@
 /* Run with node tests/background_task_ui_test.js. Live counts and native
-   background-task endings, with no browser or engine. */
+   background-task endings, and the list the count opens - its rows, their
+   clocks and calls, live redraws, its keys and how it closes - with no
+   browser or engine. */
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
-const {FakeDocument} = require("./fake_dom.js");
+const {FakeDocument, fire} = require("./fake_dom.js");
 const source = fs.readFileSync(path.join(__dirname, "../puppy/static/app.js"), "utf8");
 const between = (from, to) => {
   const start = source.indexOf(from), end = source.indexOf(to, start);
@@ -221,8 +223,10 @@ const snapshot = (background_tasks, engine = "claude", status = "running") => ({
 const a = header(), b = header(2, 7);
 a.handle(snapshot(live("a", "b")));
 assert.equal(chip(a).textContent, "2 tasks", "attach restores the live count before any new event");
-assert.equal(chip(a).getAttribute("aria-label"), "2 background tasks running");
-assert.equal(chip(a).tagName, "SPAN", "the count does not promise a dialog or action");
+assert.equal(chip(a).getAttribute("aria-label"), "2 background tasks running · list them");
+assert.equal(chip(a).tagName, "BUTTON", "the count is the button to their list");
+assert.equal(chip(a).getAttribute("aria-haspopup"), "menu");
+assert.equal(chip(a).getAttribute("aria-expanded"), "false");
 assert.equal(chip(b), null, "each conversation/backend owns its own count");
 const stable = chip(a);
 a.handle({type: "background_tasks", ...live("a", "a", "b"), waiting: true, text: "Waiting"});
@@ -282,3 +286,119 @@ const lane = a.root.querySelector(".chat-meta-scroll");
 assert.deepEqual(lane.children.map(n => n.className), [
   "chip eng", "chip cwd", "chip browser", "chip terminal", "chip background-tasks", "chat-status"]);
 console.log("PASS: background-task pill snapshots, live replacements, deduplication, per-session ownership, unsupported engines, history, reconnects, turn/engine changes and linked controls");
+
+// The count opens the list of what the engine still runs.
+const listed = [];
+let ticker = null;
+Object.assign(context, {
+  setInterval: (fn) => { ticker = fn; return 1; }, clearInterval() { ticker = null; },
+  requestAnimationFrame: fn => fn(),
+  placeChoiceMenu: (menu, anchor) => listed.push(anchor),
+  findSessionMeta: () => ({active_since: 1000}),
+  Date, JSON,
+});
+vm.runInContext([
+  between("function closeMenusToggling(", "/* Capture before controls"),
+  "function closeAllMenus(anchor) { return closeMenusToggling(anchor); }",
+  between("const sessionActivityAnchors", "/* The sidebar's move-to-front"),
+  between("function sessionActivityKey(", "function ingestOneSessionActivity("),
+  between("function formatSessionActivity(", "function formatUptime("),
+  // the kinds and clock helpers came with the task endings' section above
+  "globalThis.sessionActivityAnchors = sessionActivityAnchors;",
+].join("\n"), context);
+const owner = header(3);
+document.body.appendChild(owner.root);
+const jumps = [];
+owner.jumpToCall = seq => jumps.push(seq);
+// the session's work began ten minutes ago by this browser's clock, at 1000
+// by the backend's
+context.sessionActivityAnchors.set(context.sessionActivityKey(0, 3), Date.now() - 600000);
+const running = {tasks: [
+  {id: "b7k2q9", type: "local_bash", description: "Start the dev server",
+   tool_use_id: "toolu_1", call_seq: 41, started_at: 1030},
+  {id: "m3x8rt", type: "monitor_ws", description: "Watch the build log", started_at: 1100},
+  {id: "z9", type: "future-kind", description: "  "},
+]};
+owner.handle(snapshot(running));
+const button = chip(owner);
+button.getClientRects = () => [{}];   // laid out, as a chip on the screen is
+const openList = () => document.querySelector(".choice-menu.background-task-list");
+button.click();
+let list = openList();
+assert.ok(list, "a press opens the list");
+assert.equal(button.getAttribute("aria-expanded"), "true");
+assert.equal(list._anchor, button, "it hangs from the chip, on the shared floats' rules");
+assert.equal(list.getAttribute("role"), "menu");
+assert.equal(document.activeElement, list, "the keys land on the list, no row lit");
+assert.equal(list.querySelector(".background-task-title").textContent, "Background tasks");
+assert.equal(list.querySelector(".background-task-count").textContent, "3 running");
+assert.equal(list.querySelector(".prompt-list-empty"), null);
+let rows = list.querySelectorAll(".background-task-row");
+assert.deepEqual(rows.map(row => row.tagName), ["BUTTON", "DIV", "DIV"],
+  "only a task whose call the node named is a way to it");
+assert.deepEqual(rows.map(row => row.querySelector(".background-task-name").textContent),
+  ["Start the dev server", "Watch the build log", "z9"], "a task with no words is named by its id");
+assert.deepEqual(rows.map(row => row.querySelector(".background-task-meta").textContent),
+  ["Command · b7k2q9", "Watch · m3x8rt", "Task · z9"], "an unknown kind is still a task");
+const ages = rows.map(row => row.querySelector(".background-task-age").textContent);
+assert.match(ages[0], /^9:(29|30|31)$/, "the call's own start, on the running clock's face");
+assert.match(ages[1], /^8:(19|20|21)$/);
+assert.equal(ages[2], "", "an unknown start is no figure, never an invented one");
+assert.equal(rows[1].getAttribute("aria-disabled"), "true");
+assert.match(rows[0].getAttribute("aria-label"), /^Start the dev server · Command b7k2q9 · show the call/);
+// the clocks run while it is open
+context.sessionActivityAnchors.set(context.sessionActivityKey(0, 3), Date.now() - 660000);
+ticker();
+assert.match(rows[0].querySelector(".background-task-age").textContent, /^10:(29|30|31)$/);
+// keys: the arrows reach the rows a press can take, Escape gives the focus back
+fire(list, "keydown", {key: "ArrowDown"});
+assert.equal(document.activeElement, rows[0]);
+fire(list, "keydown", {key: "ArrowDown"});
+assert.equal(document.activeElement, rows[0], "a row with no call is not a stop");
+fire(list, "keydown", {key: "Escape"});
+assert.equal(openList(), null);
+assert.equal(document.activeElement, button);
+assert.equal(button.getAttribute("aria-expanded"), "false");
+// a second press on the chip closes what the first opened
+button.click();
+assert.ok(openList());
+button.click();
+assert.equal(openList(), null, "the chip toggles its list");
+// a row lands on its call and closes the list
+button.click();
+openList().querySelector("button.background-task-row").click();
+assert.deepEqual(jumps, [41], "the call that started the task, by its event");
+assert.equal(openList(), null);
+assert.equal(document.activeElement, button);
+// the same set again changes nothing on screen; a changed set redraws in place
+button.click();
+list = openList();
+const first = list.querySelector(".background-task-row");
+owner.handle({type: "background_tasks", ...running, waiting: true, text: "Waiting"});
+assert.equal(openList(), list);
+assert.equal(list.querySelector(".background-task-row"), first, "a repeat keeps every row");
+owner.handle({type: "background_tasks", tasks: running.tasks.slice(1), waiting: true, text: "Waiting"});
+assert.equal(openList(), list, "the list stays open as tasks end");
+assert.equal(list.querySelectorAll(".background-task-row").length, 2);
+assert.equal(list.querySelector(".background-task-count").textContent, "2 running");
+assert.equal(chip(owner).textContent, "2 tasks");
+owner.handle({type: "background_tasks", tasks: [], waiting: false});
+assert.equal(openList(), null, "the last task's end takes the list with it");
+assert.equal(chip(owner), null);
+// Tab leaves the list closed behind it; the list is never another view's
+owner.handle(snapshot(running));
+chip(owner).click();
+fire(openList(), "keydown", {key: "Tab"});
+assert.equal(openList(), null);
+chip(owner).click();
+const stranger = header(4);
+document.body.appendChild(stranger.root);
+stranger.handle(snapshot(running));
+stranger.syncBackgroundTaskList();
+assert.equal(openList()._ownerView, owner, "another conversation's tasks never redraw it");
+// a chip taken off the screen (its tab switched away) takes its list along
+chip(owner).getClientRects = () => [];
+ticker();
+assert.equal(openList(), null);
+assert.equal(chip(owner).getAttribute("aria-expanded"), "false");
+console.log("PASS: the count opens the list of running background tasks - kinds, names, ids and running clocks, a way to each named call, live redraws and their end, keys, toggling and ownership");

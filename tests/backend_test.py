@@ -86,19 +86,44 @@ def exercise_driver_normalization() -> None:
              "ambient": True}]}), bg_ctx) == [{
         "a": "background_tasks",
         "tasks": [{"id": "b1", "type": "local_bash", "description": "watch"}]}]
-    # the edge for a task already in the set is not a change
+    # the edge for a task already in the set is not a change...
     assert claude.parse_line(json.dumps({
         "type": "system", "subtype": "task_started", "task_id": "b1",
         "is_backgrounded": True, "description": "watch",
         "task_type": "local_bash"}), bg_ctx) == []
+    # ...unless it names the call that started the task, which the CLI's own
+    # list never does; a listing after it keeps the call
+    named = [{"id": "b1", "type": "local_bash", "description": "watch",
+              "tool_use_id": "toolu_watch"}]
+    assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "task_started", "task_id": "b1",
+        "tool_use_id": "toolu_watch", "is_backgrounded": True,
+        "description": "watch", "task_type": "local_bash"}), bg_ctx) == [{
+            "a": "background_tasks", "tasks": named}]
+    assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": "b1", "task_type": "local_bash", "description": "watch"}]}),
+        bg_ctx) == []
+    # a foreground command the CLI moves to the background later keeps the
+    # call its start named
+    fg_ctx = claude.turn_context({}, True, "build it", "fg-pin")
+    assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "task_started", "task_id": "f1",
+        "tool_use_id": "toolu_build", "is_backgrounded": False,
+        "description": "build", "task_type": "local_bash"}), fg_ctx) == []
+    assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": "f1", "task_type": "local_bash", "description": "build"}]}),
+        fg_ctx) == [{"a": "background_tasks", "tasks": [
+            {"id": "f1", "type": "local_bash", "description": "build",
+             "tool_use_id": "toolu_build"}]}]
     paused = claude.parse_line(json.dumps({
         "type": "result", "session_id": "s", "num_turns": 2, "duration_api_ms": 400,
         "total_cost_usd": 0.01, "stop_reason": "end_turn", "is_error": False,
         "usage": {"input_tokens": 10, "output_tokens": 4,
                   "cache_read_input_tokens": 100}, "modelUsage": {}}), bg_ctx)
     assert len(paused) == 1 and paused[0]["a"] == "turn_pause"
-    assert paused[0]["tasks"] == [
-        {"id": "b1", "type": "local_bash", "description": "watch"}]
+    assert paused[0]["tasks"] == named
     assert paused[0]["data"]["usage"] == {
         "input_tokens": 10, "output_tokens": 4, "cache_read_input_tokens": 100}
     assert paused[0]["data"]["native_prompt_id"] == "prompt-1"
@@ -1318,6 +1343,18 @@ if prompt.endswith("stale wakeup fake turn"):
 system("init", model="claude-fake", tools=[])
 send({"type": "user", "uuid": "u-1", "session_id": sid,
       "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}})
+if "named" in prompt.split():
+    # the call that starts the background command, and the CLI's own result
+    # for it, ahead of the answer
+    send({"type": "assistant", "uuid": "a-0", "session_id": sid, "message": {
+        "model": "claude-fake", "content": [{
+            "type": "tool_use", "id": "toolu_1", "name": "Bash",
+            "input": {"command": "sleep 600", "run_in_background": True}}],
+        "usage": usage(0, 0)}})
+    send({"type": "user", "uuid": "r-0", "session_id": sid, "message": {
+        "role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "toolu_1",
+            "content": "Command running in background with ID: btask1"}]}})
 send({"type": "assistant", "uuid": "a-1", "session_id": sid, "message": {
     "model": "claude-fake", "content": [{"type": "text", "text": "first answer"}],
     "usage": usage(10, 2)}})
@@ -1439,7 +1476,7 @@ finish()
             "Waiting for 1 background task: fake background command"
         assert events[2]["data"]["tasks"] == [{
             "id": "btask1", "type": "local_bash",
-            "description": "fake background command"}]
+            "description": "fake background command", "tool_use_id": "toolu_1"}]
         assert events[3]["data"]["status"] == "completed"
         assert events[3]["data"]["tool_use_id"] == "toolu_1"
         assert events[3]["data"]["text"] == \
@@ -1482,6 +1519,13 @@ finish()
         snapshot = hub.snapshot()["background_tasks"]
         assert snapshot["waiting"] is True
         assert snapshot["tasks"][0]["id"] == "btask1"
+        # task_started named the call, but this turn wrote no event for it:
+        # the task starts when the turn first heard of it, and names no event
+        assert snapshot["tasks"][0]["tool_use_id"] == "toolu_1"
+        assert "call_seq" not in snapshot["tasks"][0]
+        started = snapshot["tasks"][0]["started_at"]
+        assert isinstance(started, float) and time.time() - 30 < started <= time.time()
+        assert hub.snapshot()["background_tasks"]["tasks"][0]["started_at"] == started
         assert snapshot["text"].endswith("Stop ends the wait")
         assert hub.steering_state()["ready"] is False
         await hub.interrupt()
@@ -1498,6 +1542,29 @@ finish()
         assert events[5]["data"]["usage"]["input_tokens"] == 10
         assert hub.last_completion_status == "interrupted"
         assert last_invocation()["flags"]["eof_while_waiting"] is True
+
+        # a task whose call this turn wrote names that call's event, and
+        # starts when the call did
+        assert hub.send_message("stop while waiting named fake turn") == {"queued": False}
+        deadline = time.monotonic() + 20
+        while hub._bg_wait_since is None:
+            if time.monotonic() >= deadline:
+                raise AssertionError("named fake turn never paused on its task")
+            await asyncio.sleep(0.02)
+        call = next(event for event in turn_events("stop while waiting named fake turn")
+                    if event["kind"] == "tool_use")
+        assert call["data"]["tool_use_id"] == "toolu_1"
+        live = hub.snapshot()["background_tasks"]["tasks"]
+        assert live == [{"id": "btask1", "type": "local_bash",
+                         "description": "fake background command",
+                         "tool_use_id": "toolu_1", "call_seq": call["seq"],
+                         "started_at": call["ts"]}], live
+        assert any(message.get("type") == "background_tasks" and
+                   message["tasks"] and message["tasks"][0].get("call_seq") == call["seq"]
+                   for message in capture.messages)
+        await hub.interrupt()
+        await finish_turn("stop while waiting named fake turn")
+        assert hub.snapshot()["background_tasks"]["tasks"] == []
         assert any(message.get("type") == "status" and
                    message.get("text") == "Ending the wait for background tasks..."
                    for message in capture.messages)

@@ -1058,6 +1058,11 @@ class SessionHub:
         # idle-but-attached phase for the stop path and for consoles.
         self._bg_tasks = []
         self._bg_wait_since = None
+        # This turn's tool calls by native id - (seq, ts) of each call's event
+        # - and when the turn first heard of each background task, so a
+        # console can name the call that started a task and how long it runs.
+        self._turn_calls = {}
+        self._bg_seen = {}
         # The side question Puppy has put to the model about that work, while
         # it is unanswered, and what the status line says about the check.
         self._bg_check_id = ""
@@ -2567,6 +2572,8 @@ class SessionHub:
             str(item["fields"].get("text") or "") if _is_queued_retry(item) else ""
         self._bg_tasks = []
         self._bg_wait_since = None
+        self._turn_calls = {}
+        self._bg_seen = {}
         self._bg_check_id = ""
         self._bg_note = ""
         self.turn_task = asyncio.ensure_future(self._run_turn(item))
@@ -3025,8 +3032,21 @@ class SessionHub:
 
     def _background_payload(self) -> dict:
         """Live engine background tasks for consoles, with the status line to
-        show while the model waits on them."""
-        tasks = self._scrub_value([dict(row) for row in self._bg_tasks])
+        show while the model waits on them. A task the engine tied to its
+        call (``tool_use_id``) names that call's event (``call_seq``); every
+        task says when it started (``started_at``, this node's clock): its
+        call's stamp, else when this turn first heard of it."""
+        tasks = []
+        for row in self._bg_tasks:
+            task = dict(row)
+            call = self._turn_calls.get(str(task.get("tool_use_id") or ""))
+            if call:
+                task["call_seq"], task["started_at"] = call
+            else:
+                task["started_at"] = self._bg_seen.setdefault(
+                    str(task.get("id") or ""), time.time())
+            tasks.append(task)
+        tasks = self._scrub_value(tasks)
         waiting = self._bg_wait_since is not None and self.status == "running"
         return {"tasks": tasks, "waiting": waiting,
                 "text": _background_wait_status(tasks, self._bg_note) if waiting else ""}
@@ -3070,6 +3090,8 @@ class SessionHub:
     def _emit(self, kind: str, data: dict) -> dict:
         ev = db.add_event(self.id, kind, self._scrub_value(data))
         self.broadcast({"type": "event", "event": ev})
+        if kind == "tool_use" and data.get("tool_use_id"):
+            self._turn_calls[str(data["tool_use_id"])] = (ev["seq"], ev["ts"])
         return ev
 
     def _note_turn_config(self, session) -> None:

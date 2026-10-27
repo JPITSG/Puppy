@@ -150,8 +150,9 @@ textarea::-webkit-scrollbar-track,.md pre::-webkit-scrollbar-track,
 }
 .menu::-webkit-scrollbar-track,.choice-menu::-webkit-scrollbar-track,
 .mention-pop::-webkit-scrollbar-track,.approval.question::-webkit-scrollbar-track{margin:var(--r-md)}
-/* the prompt list's rows reach the float's rounded foot, not its head */
-.prompt-list-rows::-webkit-scrollbar-track{margin:0 0 var(--r-md)}
+/* the prompt list's and the background task list's rows reach the float's
+   rounded foot, not its head */
+.prompt-list-rows::-webkit-scrollbar-track,.background-task-rows::-webkit-scrollbar-track{margin:0 0 var(--r-md)}
 .modal::-webkit-scrollbar-track{margin:var(--r-lg)}
 /* where a vertical and a horizontal bar meet: the browser's default there is
    an opaque square that ignores the theme */
@@ -1321,23 +1322,30 @@ select.choice-native{display:none!important}
    console's warn tone, as the composer's Model value does below */
 .chip.eng .eng-model.substituted{color:var(--warn)}
 .chip.cwd.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-dim)}
-/* Live session activity shares one blue pill, including the count-only
-   background-task indicator. Only browser/terminal/VNC pills are controls. */
+/* Live session activity shares one blue pill, and every one is a control:
+   browser/terminal/VNC pills show their tab, the background-task count
+   opens the list of what the engine still runs, its dropdown's own arrow
+   turning over while that list is open. */
 .chip.browser,.chip.terminal,.chip.vnc,.chip.background-tasks{
   color:var(--acc2);background:var(--acc-dim);border-color:var(--acc-line-soft);
 }
 .chip.browser svg,.chip.terminal svg,.chip.vnc svg,.chip.background-tasks svg{flex-shrink:0;opacity:.85}
 .chip.background-tasks{font-family:var(--sans)}
-.chip.browser,.chip.terminal,.chip.vnc{
+.chip.background-tasks .chip-caret{display:inline-grid;place-items:center;margin-right:-3px;
+  transition:transform var(--t-base) var(--ease)}
+.chip.background-tasks .chip-caret svg{width:10px;height:10px}
+.chip.background-tasks[aria-expanded="true"] .chip-caret{transform:rotate(180deg)}
+.chip.browser,.chip.terminal,.chip.vnc,.chip.background-tasks{
   cursor:pointer;-webkit-appearance:none;appearance:none;
   transition:border-color var(--t-base) var(--ease),color var(--t-base) var(--ease),transform var(--t-fast) var(--ease);
 }
 @media (hover:hover){
-  .chip.browser:hover,.chip.terminal:hover,.chip.vnc:hover{border-color:var(--focus-line);color:var(--txt)}
-  .chip.browser:hover svg,.chip.terminal:hover svg,.chip.vnc:hover svg{opacity:1}
+  .chip.browser:hover,.chip.terminal:hover,.chip.vnc:hover,.chip.background-tasks:hover{border-color:var(--focus-line);color:var(--txt)}
+  .chip.browser:hover svg,.chip.terminal:hover svg,.chip.vnc:hover svg,.chip.background-tasks:hover svg{opacity:1}
 }
-.chip.browser:active,.chip.terminal:active,.chip.vnc:active{transform:scale(.96)}
-.chip.browser:focus-visible,.chip.terminal:focus-visible,.chip.vnc:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.chip.browser:active,.chip.terminal:active,.chip.vnc:active,.chip.background-tasks:active{transform:scale(.96)}
+.chip.browser:focus-visible,.chip.terminal:focus-visible,.chip.vnc:focus-visible,.chip.background-tasks:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){.chip.background-tasks .chip-caret{transition:none}}
 /* the linked-workspace chip is a control too: it opens the link sheet */
 .chip.ws{
   gap:6px;cursor:pointer;color:var(--txt2);
@@ -1457,9 +1465,9 @@ select.choice-native{display:none!important}
   width:min(460px,calc(100vw - 16px));max-width:none;max-height:none;padding:0;
   display:flex;flex-direction:column;overflow:hidden;
 }
-.prompt-list-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:10px 13px 8px}
-.prompt-list-title{font:600 var(--fs-xs) var(--sans);text-transform:uppercase;letter-spacing:.08em;color:var(--txt3)}
-.prompt-list-count{font:var(--fs-2xs) var(--mono);color:var(--txt3)}
+.prompt-list-head,.background-task-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:10px 13px 8px}
+.prompt-list-title,.background-task-title{font:600 var(--fs-xs) var(--sans);text-transform:uppercase;letter-spacing:.08em;color:var(--txt3)}
+.prompt-list-count,.background-task-count{font:var(--fs-2xs) var(--mono);color:var(--txt3)}
 .prompt-list input.prompt-list-filter{flex:none;width:auto;height:var(--btn-h-sm);margin:0 8px 6px;font-size:var(--fs-md)}
 .prompt-list-rows{flex:1;min-height:0;overflow-y:auto;padding:0 5px 5px;overscroll-behavior:contain}
 .prompt-list-space{position:relative}
@@ -1516,6 +1524,32 @@ select.choice-native{display:none!important}
 .prompt-list-text{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .prompt-list-time{font:var(--fs-2xs) var(--mono);color:var(--txt3)}
 .prompt-list-empty{padding:4px 13px 12px;font-size:var(--fs-sm);color:var(--txt3)}
+/* The background tasks the chat head's chip lists: the prompt list's float
+   and head, one row per task - its kind's glyph in the activity pills' blue
+   ring, what it does over its kind and id, and its running clock - a row
+   naming its call being the way to that call in the transcript. */
+.choice-menu.background-task-list{
+  width:min(420px,calc(100vw - 16px));max-width:none;max-height:min(420px,calc(100dvh - 16px));padding:0;
+  display:flex;flex-direction:column;overflow:hidden;
+}
+.background-task-rows{display:flex;flex-direction:column;gap:1px;min-height:0;overflow-y:auto;
+  padding:0 5px 5px;overscroll-behavior:contain}
+.background-task-row{
+  width:100%;display:grid;grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:10px;
+  padding:6px 8px;border:0;border-radius:var(--r-sm);background:transparent;text-align:left;
+  font:var(--fs-sm)/1.35 var(--sans);color:var(--txt);outline:none;
+  transition:background var(--t-fast) var(--ease);
+}
+button.background-task-row{cursor:pointer}
+@media (hover:hover){button.background-task-row:hover{background:var(--float-menu-hover)}}
+button.background-task-row:focus-visible{background:var(--float-menu-hover)}
+.background-task-glyph{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;
+  color:var(--acc2);background:var(--acc-dim);border:1px solid var(--acc-line-soft)}
+.background-task-glyph svg{display:block}
+.background-task-text{display:flex;flex-direction:column;gap:1px;min-width:0}
+.background-task-name{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.background-task-meta{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font:var(--fs-2xs) var(--mono);color:var(--txt3)}
+.background-task-age{font:var(--fs-2xs) var(--mono);font-variant-numeric:tabular-nums;color:var(--acc2)}
 /* Keep every event and live block mounted: pairing, history cursors, folded
    cards and incoming answers continue normally even while their type hides.
    A message explicitly opened from search/history gets a temporary exception.

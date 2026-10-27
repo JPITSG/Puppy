@@ -418,7 +418,9 @@ BACKGROUND_GUIDANCE = (
 
 def _task_row(item) -> dict:
     """One live background task as the runner and consoles see it; empty for
-    ambient housekeeping the CLI hides from user-visible activity."""
+    ambient housekeeping the CLI hides from user-visible activity. Listing it
+    adds the call that started it (``tool_use_id``) once task_started named
+    that call."""
     if not isinstance(item, dict) or item.get("ambient") or item.get("skip_transcript"):
         return {}
     task_id = str(item.get("task_id") or "")
@@ -820,6 +822,9 @@ class ClaudeDriver(Driver):
             # background work the CLI still owns: REPLACE semantics from
             # background_tasks_changed, task edges as the fallback
             "background_tasks": [],
+            # the call that started each task, by task id: only task_started
+            # names it, the CLI's own task list does not
+            "task_calls": {},
             # wake-up queries for tasks of a PREVIOUS process run ahead of our
             # own request; their results are folded, never taken as ours
             "stale_wakeups": 0,
@@ -836,6 +841,10 @@ class ClaudeDriver(Driver):
 
     @staticmethod
     def _set_tasks(ctx, tasks) -> list:
+        calls = ctx.get("task_calls") or {}
+        tasks = [dict(row, tool_use_id=calls[row["id"]])
+                 if row.get("id") in calls and not row.get("tool_use_id") else row
+                 for row in tasks]
         if tasks == list(ctx.get("background_tasks") or []):
             return []
         ctx["background_tasks"] = tasks
@@ -1017,11 +1026,18 @@ class ClaudeDriver(Driver):
                 return self._set_tasks(ctx, [row for row in rows if row])
             if sub == "task_started":
                 row = _task_row(ev)
+                if row and ev.get("tool_use_id"):
+                    # recorded for any task: a foreground command the CLI
+                    # moves to the background later keeps its call
+                    ctx.setdefault("task_calls", {})[row["id"]] = \
+                        str(ev["tool_use_id"])[:200]
+                listed = list(ctx.get("background_tasks") or [])
                 if row and ev.get("is_backgrounded") and all(
-                        item.get("id") != row["id"]
-                        for item in ctx.get("background_tasks") or []):
-                    return self._set_tasks(
-                        ctx, list(ctx.get("background_tasks") or []) + [row])
+                        item.get("id") != row["id"] for item in listed):
+                    return self._set_tasks(ctx, listed + [row])
+                if row:
+                    # already listed by background_tasks_changed: name its call
+                    return self._set_tasks(ctx, listed)
                 return []
             if sub == "task_updated":
                 patch = ev.get("patch") if isinstance(ev.get("patch"), dict) else {}

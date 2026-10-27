@@ -196,6 +196,14 @@ still contain a value written before that release.
   background pauses continue accepting side questions, except for the few
   seconds Puppy's own check on that background work is out (readiness is
   false meanwhile). This changes no stored format or wire capability.
+- A session's `background_tasks` rows (snapshot and live) carry three optional
+  additive fields: `tool_use_id`, the call the engine said started the task;
+  `call_seq`, that call's event in the transcript when this turn wrote it; and
+  `started_at`, that call's stamp in the node's clock, else when the turn
+  first heard of the task. The console's task list lands on `call_seq` and
+  times rows from `started_at`; rows without them are still listed. The
+  persisted `background_wait` row's `tasks` may carry `tool_use_id`. No
+  capability, route or stored format changes.
 
 This cleanup preserves transaction rollback, interrupted-operation recovery,
 offline retry, historical transcript rendering, and external engine/Chromium

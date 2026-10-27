@@ -5878,6 +5878,7 @@ async def background_count_checks(a, b, hub):
                 "mobile": width == 390}, session=a.page_session)
             for theme in ("dark", "light"):
                 await evaluate(a, "applyTheme(" + json.dumps(theme) + "); true")
+                await asyncio.sleep(.4)   # the pill's colours ease into the theme like its neighbours'
                 layout = await evaluate(a, """(() => {
                     const chip=demoView.root.querySelector('.chip.background-tasks');
                     const lane=chip.parentElement;
@@ -5892,8 +5893,9 @@ async def background_count_checks(a, b, hub):
                         centered:Math.abs(bounds.top-other.top)<.5,
                         countFits:chip.scrollWidth<=chip.clientWidth,
                         noPageOverflow:document.documentElement.scrollWidth<=innerWidth,
-                        passive:chip.tagName==='SPAN' && style.cursor!=='pointer',
-                        named:chip.getAttribute('aria-label')==='2 background tasks running',
+                        control:chip.tagName==='BUTTON' && style.cursor==='pointer' &&
+                            chip.getAttribute('aria-haspopup')==='menu',
+                        named:chip.getAttribute('aria-label')==='2 background tasks running · list them',
                         swipe:getComputedStyle(lane).overflowX==='auto'};
                     reference.remove(); return result;
                 })()""")
@@ -7167,6 +7169,153 @@ async def start_stub_rfb(width=320, height=200):
             writer.close()
 
     return await asyncio.start_server(serve, "127.0.0.1", 0)
+
+
+async def background_task_list_checks(instance):
+    """The chat head's background-task count opens their list, in real
+    layout. A session waits on three tasks the way a claude turn does after
+    answering: a dev server started by a call 230 messages back - off the
+    page the console loads - a log watch started near the end, and an agent
+    whose call no event names. A real click on the chip opens the list under
+    it on a desktop and a phone in both themes, inside the window, its rows
+    one height with their glyphs centred in their rings, the clocks in the
+    activity blue; Escape closes it with the focus back on the chip. A real
+    click on the dev server's row loads its call into the transcript and
+    lands on it, flashed, inside the transcript's box; the watch's row lands
+    on its call on the page; the agent's row is no button. A task ending
+    while the list is open redraws it in place, and the last one takes it
+    away with the chip."""
+    sid = db.create_session("Dev server preview", "claude", "/home/mira/projects/harbor",
+                            "", "", "", "default")
+    hub = runner.hub(sid)
+    hub.status = "running"
+    hub.active_since = time.time() - 900
+    db.touch_session(sid, status="running")
+    hub._emit("user", {"text": "Start the dev server for my phone, watch the build log, and have a helper check the card contrast."})
+    hub._emit("tool_use", {"tool_use_id": "toolu_dev", "tool": "Bash", "input": {
+        "command": "npm run dev -- --host --port 5173", "run_in_background": True}})
+    hub._emit("tool_result", {"tool_use_id": "toolu_dev", "content": "Command running in background with ID: b7k2q9"})
+    for index in range(230):
+        hub._emit("assistant", {"text": "Checked card %d of the dashboard layout." % (index + 1)})
+    hub._emit("tool_use", {"tool_use_id": "toolu_watch", "tool": "Monitor", "input": {
+        "command": "tail -f logs/build.log | grep -i error"}})
+    hub._emit("tool_result", {"tool_use_id": "toolu_watch", "content": "Monitoring started"})
+    hub._emit("assistant", {"text": "The dev server is up on port 5173; I'm watching the build log."})
+    hub._bg_tasks = [
+        {"id": "b7k2q9", "type": "local_bash", "description": "Start the dev server for phone testing",
+         "tool_use_id": "toolu_dev"},
+        {"id": "m3x8rt", "type": "monitor_ws", "description": "Watch the build log for errors",
+         "tool_use_id": "toolu_watch"},
+        {"id": "a9c4fz", "type": "local_agent", "description": "Check card colour contrast"},
+    ]
+    hub._bg_wait_since = time.time()
+    runner.broadcast_sessions()
+    view = "state.views['s:0:%d'].activeView()" % sid
+    chip = view + ".root.querySelector('.chip.background-tasks')"
+    listed = "document.querySelector('.choice-menu.background-task-list')"
+
+    async def press(point):
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left",
+                                                                 clickCount=1), session=instance.page_session)
+
+    async def centre(script):
+        return await evaluate(instance, """(() => { const n = %s; n.scrollIntoView({block: 'nearest', inline: 'nearest'});
+            const b = n.getBoundingClientRect(); return {x: b.left + b.width / 2, y: b.top + b.height / 2}; })()""" % script)
+
+    async def key(name):
+        for kind in ("keyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {
+                "type": kind, "key": name, "code": name, "windowsVirtualKeyCode": 27},
+                session=instance.page_session)
+
+    try:
+        await until(instance, "!!findSessionMeta(0,%d)" % sid)
+        await evaluate(instance, "openSessionTab(0,%d,findSessionMeta(0,%d)); true" % (sid, sid))
+        await until(instance, "!!state.views['s:0:%d'] && !!(%s) && (%s).textContent === '3 tasks'" % (sid, chip, chip))
+        assert await evaluate(instance, "!%s.toolCards.toolu_dev && !!%s.toolCards.toolu_watch" % (view, view)), \
+            "the dev server's call is off the loaded page, the watch's on it"
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width == 390}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                await press(await centre(chip))
+                await until(instance, "!!" + listed)
+                geometry = await evaluate(instance, """(() => {
+                    const menu = %s, anchor = %s, box = menu.getBoundingClientRect(), at = anchor.getBoundingClientRect();
+                    const rows = [...menu.querySelectorAll('.background-task-row')];
+                    const probe = document.createElement('span'); probe.style.color = 'var(--acc2)';
+                    document.body.append(probe); const blue = getComputedStyle(probe).color; probe.remove();
+                    return {
+                      below: box.top >= at.bottom - 0.5, inside: box.left >= -0.5 && box.right <= innerWidth + 0.5 &&
+                        box.bottom <= innerHeight + 0.5,
+                      expanded: anchor.getAttribute('aria-expanded'),
+                      count: menu.querySelector('.background-task-count').textContent,
+                      kinds: rows.map(r => r.querySelector('.background-task-meta').textContent),
+                      tags: rows.map(r => r.tagName),
+                      heights: rows.map(r => Math.round(r.getBoundingClientRect().height * 2) / 2),
+                      centred: rows.every(r => { const ring = r.querySelector('.background-task-glyph').getBoundingClientRect(),
+                          ink = r.querySelector('.background-task-glyph svg').getBoundingClientRect();
+                          return Math.abs((ring.left + ring.right) - (ink.left + ink.right)) <= 1 &&
+                                 Math.abs((ring.top + ring.bottom) - (ink.top + ink.bottom)) <= 1; }),
+                      fits: rows.every(r => r.scrollWidth <= r.clientWidth + 1),
+                      clocks: rows.slice(0, 2).every(r => /^\d+:\d\d$/.test(r.querySelector('.background-task-age').textContent) &&
+                          getComputedStyle(r.querySelector('.background-task-age')).color === blue),
+                    }; })()""" % (listed, chip))
+                assert geometry["below"] and geometry["inside"], (name, theme, geometry)
+                assert geometry["expanded"] == "true" and geometry["count"] == "3 running", (name, theme, geometry)
+                assert geometry["kinds"] == ["Command · b7k2q9", "Watch · m3x8rt", "Agent · a9c4fz"], geometry
+                assert geometry["tags"] == ["BUTTON", "BUTTON", "DIV"], geometry
+                assert len(set(geometry["heights"])) == 1, (name, theme, geometry)
+                assert geometry["centred"] and geometry["fits"] and geometry["clocks"], (name, theme, geometry)
+                assert await evaluate(instance, "document.activeElement === " + listed), \
+                    "the keys land on the list at once"
+                await key("Escape")
+                await until(instance, "!%s && document.activeElement === %s && (%s).getAttribute('aria-expanded') === 'false'"
+                            % (listed, chip, chip))
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        await evaluate(instance, "applyTheme('dark'); true")
+        # the call off the page is loaded and landed on, inside the transcript's box
+        await press(await centre(chip))
+        await until(instance, "!!" + listed)
+        await press(await centre(listed + ".querySelector('.background-task-row')"))
+        await until(instance, "!%s && !!%s.toolCards.toolu_dev && %s.toolCards.toolu_dev.classList.contains('search-flash')"
+                    % (listed, view, view))
+        # the landing's smooth scroll runs from the foot of a long transcript
+        await until(instance, """(() => { const v = %s, card = v.toolCards.toolu_dev.getBoundingClientRect(),
+            box = v.scroll.getBoundingClientRect(); return card.top >= box.top - 1 && card.bottom <= box.bottom + 1; })()""" % view)
+        # the list follows the tasks while it is open, and goes with the last
+        await evaluate(instance, "%s.returnToTail(false); true" % view)
+        await until(instance, "!(%s).detached && !!(%s).toolCards.toolu_watch" % (view, view))
+        await press(await centre(chip))
+        await until(instance, "!!" + listed)
+        hub._bg_tasks = hub._bg_tasks[1:]
+        hub._publish_background()
+        await until(instance, "!!%s && %s.querySelector('.background-task-count').textContent === '2 running' && "
+                              "(%s).textContent === '2 tasks'" % (listed, listed, chip))
+        await press(await centre(listed + ".querySelector('.background-task-row')"))
+        await until(instance, "!%s && %s.toolCards.toolu_watch.classList.contains('search-flash')" % (listed, view))
+        await press(await centre(chip))
+        await until(instance, "!!" + listed)
+        hub._bg_tasks = []
+        hub._publish_background()
+        await until(instance, "!%s && !(%s)" % (listed, chip))
+    finally:
+        await evaluate(instance, "closeTab('s:0:%d'); activateTab('s:0:1'); applyTheme('dark'); true" % sid)
+        hub.status = "idle"
+        hub._bg_tasks = []
+        hub._bg_wait_since = None
+        runner.drop_hub(sid)
+        db.delete_session(sid)
+        runner.broadcast_sessions()
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+    print("PASS: the background-task count opens their list under it on desktop and phone in both themes, "
+          "rows one height with centred glyphs and blue clocks, Escape back to the chip, a real click landing "
+          "a call off the page and one on it, live redraws and the list gone with the last task", flush=True)
 
 
 async def running_list_checks(instance, sid, capture=False):
@@ -9582,6 +9731,10 @@ async def main(args):
             if args.running_only:
                 await running_list_checks(instances[0], sid, args.screenshots or bool(os.environ.get("RUNNING_SHOT")))
                 return
+            if args.background_tasks_only:
+                await background_count_checks(*instances, runner.hub(sid))
+                await background_task_list_checks(instances[0])
+                return
             if args.notices_only:
                 await notices_panel_checks(instances[0], args.screenshots)
                 await notice_wrapping_checks(instances[0], args.screenshots)
@@ -9646,6 +9799,7 @@ async def main(args):
             await engine_activity_checks(instances[0])
             await model_alias_checks(instances[0])
             await model_substitute_checks(instances[0], args.screenshots)
+            await background_task_list_checks(instances[0])
             await chat_filter_checks(*instances, args.screenshots)
             await show_focus_checks(instances[0])
             await thinking_disclosure_checks(instances[0])
@@ -9684,6 +9838,7 @@ if __name__ == "__main__":
     parser.add_argument("--notices-only", action="store_true")
     parser.add_argument("--popout-only", action="store_true")
     parser.add_argument("--running-only", action="store_true")
+    parser.add_argument("--background-tasks-only", action="store_true")
     parser.add_argument("--chat-filter-only", action="store_true")
     parser.add_argument("--show-focus-only", action="store_true")
     parser.add_argument("--thinking-only", action="store_true")

@@ -17105,6 +17105,35 @@ function backgroundTaskUpdateNode(d) {
   return taskUpdateNode(`Background task ${label}`, tone, String(d.text || ""), "background-task");
 }
 
+/* What a running background task is, in the list the chat head's chip
+   opens: its kind's word and the tool whose glyph its call's card wears.
+   An engine's task type this table does not know is still listed, as a
+   task drawn by its type's name. */
+const BACKGROUND_TASK_KINDS = {
+  local_bash: ["Command", "Bash"], monitor_ws: ["Watch", "Monitor"],
+  monitor_mcp: ["Watch", "Monitor"], local_agent: ["Agent", "Task"],
+  local_workflow: ["Workflow", "Task"],
+};
+function backgroundTaskKind(task) {
+  return Object.prototype.hasOwnProperty.call(BACKGROUND_TASK_KINDS, task.type) ?
+    BACKGROUND_TASK_KINDS[task.type] : ["Task", String(task.type || "")];
+}
+/* How long a task has run, on the running clock's stopwatch face: its
+   start is the executing backend's stamp, anchored like a running tool
+   card's clock to this browser's moment for the session's own start, so no
+   clock needs translating. Unknown, or older than the session's activity,
+   it is no figure at all rather than an invented one. */
+function backgroundTaskAge(view, task, now = Date.now()) {
+  const startedAt = Number(task.started_at);
+  const { bid, sid } = view.tab;
+  const session = findSessionMeta(bid, sid) || view.session;
+  const activeSince = Number(session && session.active_since);
+  const anchor = sessionActivityAnchors.get(sessionActivityKey(bid, sid));
+  if (!Number.isFinite(startedAt) || startedAt <= 0 || !Number.isFinite(anchor) ||
+      !Number.isFinite(activeSince) || activeSince <= 0 || startedAt < activeSince) return "";
+  return formatSessionActivity(anchor + (startedAt - activeSince) * 1000, now);
+}
+
 /* A result belongs inside its call's card, folded away like every other
    card's body until the reader opens it. `endedAt` is the result event's own
    stamp, which the mark's hover measures the call to. */
@@ -22467,33 +22496,164 @@ class SessionView {
   /* Consume only the driver's normalized live set, never transcript text,
      tool names or a guessed engine allowlist. No list means no counter; new
      drivers can supply the same contract without adding UI engine branches.
-     Replace semantics and native identities make repeats harmless. */
+     Replace semantics and native identities make repeats harmless. The
+     counter is the button to the list itself (openBackgroundTaskList). */
   setBackgroundTasks(value) {
     const tasks = value && value.tasks;
     const valid = Array.isArray(tasks) && tasks.every(task => task &&
       typeof task.id === "string" && task.id.trim());
-    const count = valid && this.status === "running" && !this.reconnecting
-      ? new Set(tasks.map(task => task.id)).size : 0;
+    const live = valid && this.status === "running" && !this.reconnecting ? tasks : [];
+    this.backgroundTasks = [...new Map(live.map(task => [task.id, task])).values()];
+    const count = this.backgroundTasks.length;
     const scroll = this.root.querySelector(".chat-meta-scroll");
     let chip = scroll.querySelector(".chip.background-tasks");
     if (!count) {
       if (chip) { chip.remove(); this.syncHeadOverflow(); }
+      this.syncBackgroundTaskList();
       return;
     }
     if (!chip) {
-      chip = el("span", "chip background-tasks");
+      chip = el("button", "chip background-tasks");
+      chip.type = "button";
+      chip.setAttribute("aria-haspopup", "menu");
+      chip.setAttribute("aria-expanded", "false");
       chip.appendChild(tasksIcon(11));
       chip.appendChild(el("span", "chip-text"));
+      chip.appendChild(el("span", "chip-caret")).appendChild(choiceSvg("arrow"));
+      chip.onclick = () => this.openBackgroundTaskList(chip);
       scroll.insertBefore(chip, scroll.querySelector(".chat-status"));
     }
     const text = `${count} ${count === 1 ? "task" : "tasks"}`;
     const label = chip.querySelector(".chip-text");
-    if (label.textContent === text) return;
-    label.textContent = text;
-    const description = `${count} background ${count === 1 ? "task" : "tasks"} running`;
-    chip.setAttribute("aria-label", description);
-    chip.title = description;
-    this.syncHeadOverflow();
+    if (label.textContent !== text) {
+      label.textContent = text;
+      chip.setAttribute("aria-label",
+        `${count} background ${count === 1 ? "task" : "tasks"} running · list them`);
+      this.syncHeadOverflow();
+    }
+    this.syncBackgroundTaskList();
+  }
+
+  /* The chip's list: one row per task the engine still runs - its kind's
+     glyph, what it does, its kind and id, how long it has run - opening
+     under the chip on the shared floats' rules (a press outside, Escape, a
+     pick, losing the chip close it) and redrawn in place as tasks come and
+     go. A row whose call the node named is the way to that call in the
+     transcript: the prompt gutter's own landing, loading it when it is not
+     on the page, revealing it under a filter, and recording no navigation
+     entry, as a step does not. */
+  openBackgroundTaskList(chip) {
+    if (closeAllMenus(chip)) return;
+    const menu = el("div", "choice-menu dyn background-task-list");
+    menu._anchor = chip;
+    menu._ownerView = this;
+    menu.tabIndex = -1;
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "Background tasks");
+    const dismiss = (returnFocus = false) => {
+      menu.remove();
+      chip.setAttribute("aria-expanded", "false");
+      if (returnFocus && chip.isConnected) chip.focus();
+    };
+    menu._dismiss = dismiss;
+    menu.sync = () => this.drawBackgroundTaskList(menu);
+    menu.onkeydown = event => {
+      if (event.key === "Escape") { event.preventDefault(); dismiss(true); return; }
+      if (event.key === "Tab") { dismiss(); return; }
+      const rows = [...menu.querySelectorAll("button.background-task-row")];
+      if (!rows.length) return;
+      const at = rows.indexOf(document.activeElement);
+      let next = null;
+      if (event.key === "ArrowDown") next = at < 0 ? 0 : (at + 1) % rows.length;
+      else if (event.key === "ArrowUp") next = at < 0 ? rows.length - 1 : (at - 1 + rows.length) % rows.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = rows.length - 1;
+      if (next !== null) { event.preventDefault(); rows[next].focus(); }
+    };
+    menu.onclick = event => event.stopPropagation();
+    document.body.appendChild(menu);
+    chip.setAttribute("aria-expanded", "true");
+    menu.sync();
+    placeChoiceMenu(menu, chip, null);
+    /* the keys land on the list at once, no row lit until they reach one */
+    menu.focus({ preventScroll: true });
+    /* the clocks run while the list is open; the list goes with its chip */
+    const tick = setInterval(() => {
+      if (!menu.isConnected) { clearInterval(tick); return; }
+      if (!chip.isConnected || !chip.getClientRects().length) { clearInterval(tick); dismiss(); return; }
+      this.tickBackgroundTaskList(menu);
+    }, 1000);
+    requestAnimationFrame(() => { if (menu.isConnected) placeChoiceMenu(menu, chip, null); });
+  }
+
+  /* the open list, if any, follows the tasks: redrawn when they change, and
+     gone with the last of them */
+  syncBackgroundTaskList() {
+    for (const menu of document.querySelectorAll(".choice-menu.background-task-list"))
+      if (menu._ownerView === this) menu.sync();
+  }
+
+  drawBackgroundTaskList(menu) {
+    const tasks = this.backgroundTasks || [];
+    if (!tasks.length || !menu._anchor.isConnected) { menu._dismiss(); return; }
+    const signature = JSON.stringify(tasks.map(task =>
+      [task.id, task.type, task.description, Number(task.call_seq) || 0, task.started_at]));
+    if (menu._signature === signature) return;
+    menu._signature = signature;
+    const focused = document.activeElement && menu.contains(document.activeElement) ?
+      document.activeElement.dataset.taskId : null;
+    menu.replaceChildren();
+    const head = el("div", "background-task-head");
+    head.appendChild(el("span", "background-task-title", "Background tasks"));
+    head.appendChild(el("span", "background-task-count", `${tasks.length} running`));
+    menu.appendChild(head);
+    const list = el("div", "background-task-rows");
+    const now = Date.now();
+    for (const task of tasks) {
+      const [kind, tool] = backgroundTaskKind(task);
+      const name = String(task.description || "").trim() || task.id;
+      const seq = Number(task.call_seq);
+      const callable = Number.isSafeInteger(seq) && seq > 0;
+      const row = el(callable ? "button" : "div", "background-task-row");
+      row.dataset.taskId = task.id;
+      row.setAttribute("role", "menuitem");
+      if (callable) {
+        row.type = "button";
+        row.tabIndex = -1;
+        row.setAttribute("aria-label", `${name} · ${kind} ${task.id} · show the call that started it`);
+        row.onclick = () => {
+          menu._dismiss(true);
+          this.jumpToCall(seq);
+        };
+      } else row.setAttribute("aria-disabled", "true");
+      const glyph = row.appendChild(el("span", "background-task-glyph"));
+      glyph.appendChild(toolIconNode(tool));
+      const text = row.appendChild(el("span", "background-task-text"));
+      text.appendChild(el("span", "background-task-name", name));
+      text.appendChild(el("span", "background-task-meta", `${kind} · ${task.id}`));
+      row.appendChild(el("span", "background-task-age", backgroundTaskAge(this, task, now)));
+      list.appendChild(row);
+    }
+    menu.appendChild(list);
+    if (focused) {
+      const again = [...list.querySelectorAll("button.background-task-row")]
+        .find(row => row.dataset.taskId === focused);
+      (again || menu).focus({ preventScroll: true });
+    }
+    if (menu.isConnected) placeChoiceMenu(menu, menu._anchor, null);
+  }
+
+  tickBackgroundTaskList(menu) {
+    const now = Date.now();
+    const byId = new Map((this.backgroundTasks || []).map(task => [task.id, task]));
+    for (const row of menu.querySelectorAll(".background-task-row")) {
+      const task = byId.get(row.dataset.taskId);
+      const age = row.querySelector(".background-task-age");
+      if (task && age) {
+        const text = backgroundTaskAge(this, task, now);
+        if (age.textContent !== text) age.textContent = text;
+      }
+    }
   }
 
   /* A browser this session launched lives in its own tab, which can be
@@ -23159,6 +23319,10 @@ class SessionView {
      landed the same way - the message the node named, or the nearest one
      before it on the page, shown even under a filter that hides it. */
   jumpToAnswer(seq) { return this.gutterStep(seq, false); }
+
+  /* A background task's list row: the call that started the task, landed
+     the same way. */
+  jumpToCall(seq) { return this.gutterStep(seq, false); }
 
   async gutterStep(seq, prompt) {
     seq = Number(seq);
