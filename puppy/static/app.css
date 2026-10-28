@@ -1527,7 +1527,10 @@ select.choice-native{display:none!important}
 /* The background tasks the chat head's chip lists: the prompt list's float
    and head, one row per task - its kind's glyph in the activity pills' blue
    ring, what it does over its kind and id, and its running clock - a row
-   naming its call being the way to that call in the transcript. */
+   naming its call being the way to that call in the transcript. The row's
+   press is a button laid under its text (the glyph, text and end stand
+   above it and let the pointer through), so the stop at the row's end is a
+   sibling of the press, never a button inside one. */
 .choice-menu.background-task-list{
   width:min(420px,calc(100vw - 16px));max-width:none;max-height:min(420px,calc(100dvh - 16px));padding:0;
   display:flex;flex-direction:column;overflow:hidden;
@@ -1535,14 +1538,20 @@ select.choice-native{display:none!important}
 .background-task-rows{display:flex;flex-direction:column;gap:1px;min-height:0;overflow-y:auto;
   padding:0 5px 5px;overscroll-behavior:contain}
 .background-task-row{
-  width:100%;display:grid;grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:10px;
-  padding:6px 8px;border:0;border-radius:var(--r-sm);background:transparent;text-align:left;
-  font:var(--fs-sm)/1.35 var(--sans);color:var(--txt);outline:none;
+  position:relative;width:100%;display:grid;grid-template-columns:24px minmax(0,1fr) auto;
+  align-items:center;gap:10px;padding:6px 8px;border-radius:var(--r-sm);background:transparent;
+  font:var(--fs-sm)/1.35 var(--sans);color:var(--txt);
   transition:background var(--t-fast) var(--ease);
 }
-button.background-task-row{cursor:pointer}
-@media (hover:hover){button.background-task-row:hover{background:var(--float-menu-hover)}}
-button.background-task-row:focus-visible{background:var(--float-menu-hover)}
+.background-task-main{
+  position:absolute;inset:0;margin:0;padding:0;border:0;border-radius:inherit;
+  background:transparent;color:inherit;font:inherit;outline:none;
+  transition:background var(--t-fast) var(--ease);
+}
+button.background-task-main{cursor:pointer}
+@media (hover:hover){button.background-task-main:hover{background:var(--float-menu-hover)}}
+button.background-task-main:focus-visible{background:var(--float-menu-hover)}
+.background-task-glyph,.background-task-text,.background-task-end{position:relative;pointer-events:none}
 .background-task-glyph{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;
   color:var(--acc2);background:var(--acc-dim);border:1px solid var(--acc-line-soft)}
 .background-task-glyph svg{display:block}
@@ -1550,6 +1559,36 @@ button.background-task-row:focus-visible{background:var(--float-menu-hover)}
 .background-task-name{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .background-task-meta{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font:var(--fs-2xs) var(--mono);color:var(--txt3)}
 .background-task-age{font:var(--fs-2xs) var(--mono);font-variant-numeric:tabular-nums;color:var(--acc2)}
+/* The row's end holds every state it can be in - the clock and its stop,
+   the question (Keep, Stop), Stopping… - in one grid cell, only the current
+   one visible, so the cell is always as wide as the widest and a press
+   moves nothing else in the row: the text never changes face or size. */
+.background-task-end{display:grid;align-items:center;justify-items:end}
+.background-task-end>*{grid-area:1/1;display:flex;align-items:center;visibility:hidden}
+.background-task-end[data-state="rest"]>.background-task-rest,
+.background-task-end[data-state="confirm"]>.background-task-confirm,
+.background-task-end[data-state="stopping"]>.background-task-busy{visibility:visible}
+.background-task-end button{pointer-events:auto}
+.background-task-rest{gap:10px}
+/* quiet at rest, the error tone under the pointer like the strip's bin */
+.background-task-stop{
+  width:22px;height:22px;padding:0;display:grid;place-items:center;cursor:pointer;
+  border:1px solid var(--line);border-radius:var(--r-sm);background:var(--panel2);color:var(--txt3);
+  transition:background var(--t-fast) var(--ease),border-color var(--t-fast) var(--ease),color var(--t-fast) var(--ease),transform var(--t-fast) var(--ease);
+}
+.background-task-stop svg{display:block}
+@media (hover:hover){.background-task-stop:hover{background:var(--err-dim);border-color:var(--err-line);color:var(--err)}}
+.background-task-stop:active{transform:scale(.88);color:var(--err)}
+.background-task-stop:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+/* asking: the row's tint is the question, over any wash */
+.background-task-row.armed{background:var(--err-dim)}
+.background-task-confirm{gap:6px}
+.background-task-confirm .btn{height:24px;padding:0 10px;font-size:var(--fs-xs)}
+.background-task-row.stopping :is(.background-task-glyph,.background-task-text){opacity:.55}
+.background-task-busy{gap:6px;font:var(--fs-2xs) var(--sans);color:var(--txt3)}
+.background-task-busy .spinner{width:9px;height:9px;border:1.5px solid var(--acc-dim);
+  border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite}
+@media (prefers-reduced-motion:reduce){.background-task-busy .spinner{animation:none}}
 /* Keep every event and live block mounted: pairing, history cursors, folded
    cards and incoming answers continue normally even while their type hides.
    A message explicitly opened from search/history gets a temporary exception.

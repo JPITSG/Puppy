@@ -25,10 +25,12 @@ Normalized transcript event kinds (persisted):
                  Engine background work uses three subtypes: background_wait
                  {tasks} when the model has answered but the engine still
                  owns background tasks whose end will wake it within this
-                 same turn, task {status, task_id, tool_use_id?} when one of
-                 them ends (the optional native tool id links its card), and
-                 background_wait_stopped when the node ended such a wait
-                 itself (turn timeout, or an engine that never continued).
+                 same turn, task {status, task_id, tool_use_id?, by_user?}
+                 when one of them ends (the optional native tool id links its
+                 card; by_user marks a task the person stopped from the
+                 console), and background_wait_stopped when the node ended
+                 such a wait itself (turn timeout, an engine that never
+                 continued, or the person stopping its last task).
                  model_switch {state, engine, ...} marks where the answering
                  model moved: state "substituted" {requested, baseline,
                  served, note} where a model not serving the request starts
@@ -111,6 +113,11 @@ Actions returned by parse_line() (consumed by the runner):
                                                      Only emit a complete live set
                                                      from native task evidence, never
                                                      infer it from tool calls/text.
+    {"a": "stop_task_result", "request_id": "...", "ok": bool, "error": "..."}
+                                                     the engine's answer to one
+                                                     stop_task_payload; ok says it took
+                                                     the request, never that the task is
+                                                     gone - the live set says that
     {"a": "turn_pause", "data": {...}, "tasks": [...]}
                                                      the model answered but the engine
                                                      keeps running background tasks that
@@ -1016,6 +1023,20 @@ class Driver:
 
     def side_question_ready(self, session: dict, ctx: dict) -> bool:
         """Whether the live driver context can carry a side question."""
+        return False
+
+    def stop_task_payload(self, session: dict, ctx: dict, task_id: str,
+                          request_id: str):
+        """Return one stdin payload stopping one of the turn's background
+        tasks, or None when this engine or turn cannot.
+
+        The engine answers with a stop_task_result action; the task's end
+        itself arrives as the usual background_tasks and task events.
+        """
+        return None
+
+    def stop_task_ready(self, session: dict, ctx: dict) -> bool:
+        """Whether the live driver context can stop one background task."""
         return False
 
     async def status(self) -> dict:

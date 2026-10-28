@@ -213,6 +213,18 @@ still contain a value written before that release.
   times rows from `started_at`; rows without them are still listed. The
   persisted `background_wait` row's `tasks` may carry `tool_use_id`. No
   capability, route or stored format changes.
+- `POST /api/sessions/{sid}/background-tasks/{task_id}/stop` (both runtimes,
+  additive `session-background-task-stop` capability) stops one task of the
+  running turn's live set through the driver's control channel (claude's
+  `stop_task`), waiting up to 15 s for the engine's answer: `200 {ok, task_id}`
+  once the task has left the live set, else `409 {error}` (not running, the
+  turn cannot take a stop, the engine refused or kept it running, no answer,
+  the turn ended). Two requests for one task share one engine request. The
+  live `background_tasks` payload adds `stoppable` (the turn can take a stop);
+  consoles offer one only behind both. The persisted `task` row of a task the
+  person stopped adds `by_user: true` with the text "Stopped by user: …", and
+  stopping the last task an answered turn waits on ends the wait at once with
+  a `background_wait_stopped` row. No stored format changes.
 
 This cleanup preserves transaction rollback, interrupted-operation recovery,
 offline retry, historical transcript rendering, and external engine/Chromium

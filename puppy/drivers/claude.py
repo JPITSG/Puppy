@@ -39,6 +39,14 @@ stdin ends every task (~5 s, reported as stopped) and exits; a later resume
 first reports such a task as stale and runs an empty wake-up whose result
 precedes the prompt's own. duration_api_ms accumulates over
 the process while usage and num_turns are per result.
+One task is stopped with the client control_request {subtype:"stop_task",
+task_id}, probed on claude 2.1.312 in this headless mode: the CLI kills it
+and reports task_updated {status:"killed"}, task_notification {status:"stopped",
+tool_use_id} and the shrunken background_tasks_changed, all BEFORE its
+control_response; it answers success with an empty response even for an id it
+does not hold, so the live set, not the answer, says the task is gone; and a
+stopped task never wakes the model, so a wait whose last task the person
+stopped would otherwise sit until the runner's wake grace.
 
 The model answering is read from system/init and from each assistant message
 of the main conversation, as claude 2.1.283's own SDK message schema defines
@@ -208,6 +216,7 @@ _TASK_ENDED = ("completed", "failed", "killed", "stopped")
 # Our request ids travel on the wire, so they are namespaced rather than
 # trusted to be distinct from the CLI's own.
 _ID_SQ_PREFIX = "puppy-sq:"
+_ID_STOP_PREFIX = "puppy-stop:"
 _MODEL_REQUEST_ID = "puppy-models"
 _MODEL_OUTPUT_LIMIT = 8 * 1024 * 1024
 _MODEL_MESSAGE_LIMIT = 128
@@ -430,9 +439,12 @@ def _task_row(item) -> dict:
             "description": str(item.get("description") or "")[:200]}
 
 
-def _task_notice(ev) -> str:
+def _task_notice(ev, by_user=False) -> str:
     status = str(ev.get("status") or "")
     summary = str(ev.get("summary") or "").strip()
+    if by_user:
+        return "Stopped by user: {}".format(
+            summary or ev.get("task_id") or "unknown task")
     if status == "completed" and summary:
         return summary
     label = "failed" if status == "failed" else \
@@ -926,6 +938,19 @@ class ClaudeDriver(Driver):
         # fork, so it is never offered one.
         return bool(ctx.get("control_ready")) and not ctx.get("tool")
 
+    def stop_task_payload(self, session, ctx, task_id, request_id):
+        # One task of the live set, by the CLI's own id. The id is kept so its
+        # ending reads as the person's stop rather than the engine's.
+        if not self.stop_task_ready(session, ctx):
+            return None
+        ctx.setdefault("user_stops", set()).add(str(task_id))
+        return {"type": "control_request",
+                "request_id": _ID_STOP_PREFIX + request_id,
+                "request": {"subtype": "stop_task", "task_id": str(task_id)}}
+
+    def stop_task_ready(self, session, ctx):
+        return bool(ctx.get("control_ready")) and not ctx.get("tool")
+
     def parse_line(self, line, ctx):
         try:
             ev = json.loads(line)
@@ -1053,10 +1078,16 @@ class ClaudeDriver(Driver):
                     return acts
                 if ev.get("skip_transcript") or ev.get("ambient"):
                     return acts
+                task_id = str(ev.get("task_id") or "")
+                # a task the person stopped from the console says so
+                by_user = task_id in (ctx.get("user_stops") or ()) and \
+                    ev.get("status") in _TASK_ENDED and ev.get("status") != "completed"
                 data = {
                     "subtype": "task", "status": str(ev.get("status") or ""),
-                    "task_id": str(ev.get("task_id") or ""),
-                    "text": _task_notice(ev)}
+                    "task_id": task_id,
+                    "text": _task_notice(ev, by_user)}
+                if by_user:
+                    data["by_user"] = True
                 # Native provenance, when supplied: never guess a tool from
                 # its command or task description. Some notices have no tool.
                 if ev.get("tool_use_id"):
@@ -1179,6 +1210,12 @@ class ClaudeDriver(Driver):
                         # control channel's readiness for this real turn.
                         pass
                 return []
+            if rid.startswith(_ID_STOP_PREFIX):
+                ok = resp.get("subtype") == "success"
+                return [{"a": "stop_task_result",
+                         "request_id": rid[len(_ID_STOP_PREFIX):], "ok": ok,
+                         "error": "" if ok else str(
+                             resp.get("error") or "the engine refused to stop it")}]
             if not rid.startswith(_ID_SQ_PREFIX):
                 return []
             request_id = rid[len(_ID_SQ_PREFIX):]

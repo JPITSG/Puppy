@@ -190,6 +190,47 @@ def exercise_driver_normalization() -> None:
     assert real[0]["data"]["native_prompt_id"] == "p2"
     assert real[0]["data"]["usage"] == {"input_tokens": 7, "output_tokens": 3}
     assert real[0]["data"]["num_turns"] == 1
+    # One task stopped by the person (stop_task, probed on claude 2.1.312):
+    # never before the control channel answered, never on a tool turn, its
+    # answer a stop_task_result, and its ending worded as the person's stop.
+    stop_ctx = claude.turn_context({}, True, "start two", "stop-pin")
+    assert claude.stop_task_ready({}, stop_ctx) is False
+    assert claude.stop_task_payload({}, stop_ctx, "b1", "r1") is None
+    claude.parse_line(json.dumps({"type": "control_response", "response": {
+        "subtype": "success", "request_id": "init_1", "response": {}}}), stop_ctx)
+    assert claude.stop_task_ready({}, stop_ctx) is True
+    assert claude.stop_task_payload({}, stop_ctx, "b1", "r1") == {
+        "type": "control_request", "request_id": "puppy-stop:r1",
+        "request": {"subtype": "stop_task", "task_id": "b1"}}
+    tool_ctx = claude.turn_context({}, False, "x", "tool-pin", tool={"tool": "compact"})
+    tool_ctx["control_ready"] = True
+    assert claude.stop_task_ready({}, tool_ctx) is False
+    assert claude.parse_line(json.dumps({"type": "control_response", "response": {
+        "subtype": "success", "request_id": "puppy-stop:r1", "response": {}}}),
+        stop_ctx) == [{"a": "stop_task_result", "request_id": "r1", "ok": True,
+                       "error": ""}]
+    assert claude.parse_line(json.dumps({"type": "control_response", "response": {
+        "subtype": "error", "request_id": "puppy-stop:r2",
+        "error": "stop_task is not supported"}}), stop_ctx) == [{
+            "a": "stop_task_result", "request_id": "r2", "ok": False,
+            "error": "stop_task is not supported"}]
+    claude.parse_line(json.dumps({"type": "user", "message": {"role": "user",
+        "content": [{"type": "text", "text": "start two"}]}}), stop_ctx)
+    assert claude.parse_line(json.dumps({
+        "type": "system", "subtype": "task_notification", "task_id": "b1",
+        "tool_use_id": "toolu_b1", "status": "stopped", "output_file": "",
+        "summary": "watch"}), stop_ctx)[-1]["data"] == {
+            "subtype": "task", "status": "stopped", "task_id": "b1",
+            "tool_use_id": "toolu_b1", "by_user": True,
+            "text": "Stopped by user: watch"}
+    # a task the person did not stop, or one that finished first, is the engine's
+    for task_id, status, text in (("b2", "stopped", "Background task stopped: watch"),
+                                  ("b1", "completed", "watch")):
+        data = claude.parse_line(json.dumps({
+            "type": "system", "subtype": "task_notification", "task_id": task_id,
+            "status": status, "output_file": "", "summary": "watch"}), stop_ctx)[-1]["data"]
+        assert "by_user" not in data and data["text"] == text, data
+
     # without a stale report, an early result is still the turn's result
     early_ctx = claude.turn_context({}, True, "x", "early-pin")
     early = claude.parse_line(json.dumps({
@@ -1363,6 +1404,46 @@ if prompt.endswith("error with tasks fake turn"):
     result(1, 100, 0.01, 10, 2, "boom", is_error=True)
     flags["closed_after_error"] = stdin_eof(3)
     finish()
+if prompt.endswith("taskstop fake turn"):
+    # two tasks the person stops one at a time, as claude 2.1.312 does it:
+    # the kill, the stopped notice and the shrunken set, then the answer
+    watch = {"task_id": "btask2", "task_type": "monitor_ws",
+             "description": "fake build watch"}
+    live = {"btask1": TASK, "btask2": watch}
+    system("background_tasks_changed", tasks=list(live.values()))
+    system("task_started", task_id="btask1", tool_use_id="toolu_1",
+           is_backgrounded=True, description=TASK["description"],
+           task_type="local_bash")
+    result(1, 100, 0.01, 10, 2, "first answer")
+    stops = flags.setdefault("stops", [])
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            flags["eof"] = True
+            finish()
+        if not line.strip():
+            continue
+        value = json.loads(line)
+        seen.append(value)
+        request = value.get("request") or {}
+        if value.get("type") != "control_request" or \
+                request.get("subtype") != "stop_task":
+            continue
+        task_id = request.get("task_id")
+        stops.append(task_id)
+        if task_id in live and not (task_id == "btask2" and stops.count("btask2") == 1):
+            # (the first stop of the watch is taken and never carried out)
+            task = live.pop(task_id)
+            system("task_updated", task_id=task_id,
+                   patch={"status": "killed", "end_time": 1})
+            notice = {"task_id": task_id, "status": "stopped", "output_file": "",
+                      "summary": task["description"]}
+            if task_id == "btask1":
+                notice["tool_use_id"] = "toolu_1"
+            system("task_notification", **notice)
+            system("background_tasks_changed", tasks=list(live.values()))
+        send({"type": "control_response", "response": {
+            "subtype": "success", "request_id": value["request_id"], "response": {}}})
 if prompt.endswith("plain fake turn") or prompt.endswith("stale wakeup fake turn") \
         or prompt.endswith("transient auth fake turn"):
     result(1, 100, 0.01, 10, 2, "first answer")
@@ -1569,6 +1650,60 @@ finish()
                    message.get("text") == "Ending the wait for background tasks..."
                    for message in capture.messages)
 
+        # the person stops tasks one at a time from the console: the engine's
+        # own stop_task, the live set deciding, two presses one request, and
+        # the wait ending as soon as its last task is stopped (a stop wakes
+        # no model, so nothing else would end it before the wake grace)
+        prompt = "named taskstop fake turn"
+        assert hub.send_message(prompt) == {"queued": False}
+        deadline = time.monotonic() + 20
+        while hub._bg_wait_since is None or len(hub._bg_tasks) != 2:
+            if time.monotonic() >= deadline:
+                raise AssertionError("taskstop fake turn never paused on its tasks")
+            await asyncio.sleep(0.02)
+        assert hub.snapshot()["background_tasks"]["stoppable"] is True
+        assert await hub.stop_background_task("nope") == {
+            "error": "that background task is no longer running"}
+        for bad in ("bad id!", "btask1\n", "", "x" * 129):
+            assert await hub.stop_background_task(bad) == {
+                "error": "invalid background task id"}, bad
+        assert await hub.stop_background_task("btask2") == {
+            "error": "the engine kept the task running"}
+        first, second = await asyncio.gather(
+            hub.stop_background_task("btask2"), hub.stop_background_task("btask2"))
+        assert first == second == {"ok": True, "task_id": "btask2"}, (first, second)
+        assert [row["id"] for row in hub._bg_tasks] == ["btask1"]
+        assert hub.status == "running" and hub._bg_wait_since is not None, \
+            "a task is left: the wait goes on"
+        started = time.monotonic()
+        assert await hub.stop_background_task("btask1") == {"ok": True, "task_id": "btask1"}
+        await finish_turn(prompt)
+        assert time.monotonic() - started < runner.BACKGROUND_WAKE_GRACE / 4, \
+            "the last stop ends the wait at once"
+        events = turn_events(prompt)
+        assert shape(events) == [
+            ("user", ""), ("tool_use", ""), ("tool_result", ""), ("assistant", ""),
+            ("info", "background_wait"), ("info", "task"), ("info", "task"),
+            ("info", "background_wait_stopped"), ("result", "")], shape(events)
+        stopped = [event["data"] for event in events if event["data"].get("subtype") == "task"]
+        assert stopped == [
+            {"subtype": "task", "status": "stopped", "task_id": "btask2", "by_user": True,
+             "text": "Stopped by user: fake build watch"},
+            {"subtype": "task", "status": "stopped", "task_id": "btask1", "by_user": True,
+             "tool_use_id": "toolu_1", "text": "Stopped by user: fake background command"},
+        ], stopped
+        assert events[7]["data"]["text"] == (
+            "The last background task was stopped by user; "
+            "the turn ends with the answer it has")
+        assert events[8]["data"]["ok"] is True
+        assert hub.last_completion_status == "ok"
+        assert last_invocation()["flags"]["stops"] == ["btask2", "btask2", "btask1"]
+        assert last_invocation()["flags"]["eof"] is True
+        assert hub.snapshot()["background_tasks"] == {
+            "tasks": [], "waiting": False, "stoppable": False, "text": ""}
+        assert await hub.stop_background_task("btask1") == {
+            "error": "that background task is no longer running"}
+
         # a wait does not spend the turn timeout: the background task limit
         # ends it, gracefully instead of killing the engine
         from puppy import timeouts
@@ -1643,7 +1778,7 @@ finish()
                       if message.get("type") == "background_tasks"]
         assert background[0]["tasks"]
         assert background[-1] == {"type": "background_tasks", "tasks": [],
-                                  "waiting": False, "text": ""}
+                                  "waiting": False, "stoppable": False, "text": ""}
         assert capture.messages.index(background[-1]) < next(
             index for index, message in enumerate(capture.messages)
             if message.get("type") == "turn_done")
@@ -3077,6 +3212,7 @@ async def exercise_node(url: str, token: str, expected_version: str,
         assert "spawn-owner-lease" in ping["capabilities"]
         assert "spawn-reply" in ping["capabilities"]
         assert "session-turns-view" in ping["capabilities"]
+        assert "session-background-task-stop" in ping["capabilities"]
         assert "session-search" in ping["capabilities"]
         assert "session-event-window" in ping["capabilities"]
         assert "session-tools" in ping["capabilities"]
@@ -3631,6 +3767,22 @@ async def exercise_node(url: str, token: str, expected_version: str,
                 idle_steer = await response.json()
                 assert response.status == 409, idle_steer
             assert idle_steer["error"] == "there is no active turn to steer"
+            # one background task stopped: an idle session holds none, and an
+            # id outside the engine's alphabet is no route at all
+            async with http.post(
+                    url + f"/api/sessions/{normal['id']}/background-tasks/b4dxjrqqd/stop",
+                    headers=good, ssl=pinned) as response:
+                idle_stop = await response.json()
+                assert response.status == 409, idle_stop
+            assert idle_stop == {"error": "that background task is no longer running"}
+            async with http.post(
+                    url + f"/api/sessions/{normal['id']}/background-tasks/b%20x/stop",
+                    headers=good, ssl=pinned) as response:
+                assert response.status == 404
+            async with http.post(
+                    url + f"/api/sessions/{normal['id']}/background-tasks/b4dxjrqqd/stop",
+                    ssl=pinned) as response:
+                assert response.status == 401
             # session tools: malformed requests are 400, a session that has
             # never run a turn has nothing to compact or undo (409), and no
             # engine is ever spawned by either answer

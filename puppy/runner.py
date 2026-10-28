@@ -52,6 +52,9 @@ MAX_SIDE_QUESTIONS_PER_TURN = 32
 # holds its process open for a bounded grace rather than throwing away an
 # answer the user already paid for.
 SIDE_QUESTION_GRACE = 90.0
+# How long a stop of one background task may wait for the engine's answer.
+TASK_STOP_TIMEOUT = 15.0
+_TASK_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 STEER_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
@@ -1063,6 +1066,11 @@ class SessionHub:
         # console can name the call that started a task and how long it runs.
         self._turn_calls = {}
         self._bg_seen = {}
+        # Stops of single tasks the person asked for and the engine has not
+        # answered yet, by request id and by task id (a second press for the
+        # same task shares the first request).
+        self._task_stops = {}
+        self._task_stops_by_task = {}
         # The side question Puppy has put to the model about that work, while
         # it is unanswered, and what the status line says about the check.
         self._bg_check_id = ""
@@ -3035,7 +3043,8 @@ class SessionHub:
         show while the model waits on them. A task the engine tied to its
         call (``tool_use_id``) names that call's event (``call_seq``); every
         task says when it started (``started_at``, this node's clock): its
-        call's stamp, else when this turn first heard of it."""
+        call's stamp, else when this turn first heard of it. ``stoppable``
+        says the turn can stop one of them (stop_background_task)."""
         tasks = []
         for row in self._bg_tasks:
             task = dict(row)
@@ -3049,6 +3058,7 @@ class SessionHub:
         tasks = self._scrub_value(tasks)
         waiting = self._bg_wait_since is not None and self.status == "running"
         return {"tasks": tasks, "waiting": waiting,
+                "stoppable": bool(tasks) and self._task_stop_ready(),
                 "text": _background_wait_status(tasks, self._bg_note) if waiting else ""}
 
     def _publish_background(self) -> None:
@@ -3064,11 +3074,96 @@ class SessionHub:
         self._bg_tasks = tasks
         self._publish_background()
 
+    def _task_stop_ready(self, session=None) -> bool:
+        """Whether the running turn can stop one of its background tasks."""
+        proc = self.proc
+        if self.status != "running" or not self._bg_tasks or self.interrupted or \
+                self._turn_stopping or self._driver_ctx is None or \
+                not self._proc_ready or proc is None or proc.returncode is not None or \
+                proc.stdin is None or proc.stdin.is_closing():
+            return False
+        session = session or db.get_session(self.id) or {}
+        try:
+            driver = get_driver(str(session.get("engine") or ""))
+        except KeyError:
+            return False
+        return bool(driver.stop_task_ready(session, self._driver_ctx))
+
+    async def stop_background_task(self, task_id: str) -> dict:
+        """Stop one engine background task of this hub's running turn.
+
+        The driver addresses the engine's own control channel. Its answer only
+        says it took the request: the live set the engine reports ahead of
+        that answer decides whether the task is gone. A second request for a
+        task already being stopped shares the first. When the task was the
+        last one a finished answer waited on, the turn loop ends the wait
+        (stop_task_result), since the engine wakes nobody for a stop.
+        """
+        if not isinstance(task_id, str) or not _TASK_ID_RE.fullmatch(task_id):
+            return {"error": "invalid background task id"}
+        record = self._task_stops_by_task.get(task_id)
+        if record is None:
+            if all(str(row.get("id") or "") != task_id for row in self._bg_tasks):
+                return {"error": "that background task is no longer running"}
+            session = db.get_session(self.id)
+            if session is None:
+                return {"error": "session gone"}
+            if not self._task_stop_ready(session):
+                return {"error": "the active turn cannot stop a background task"}
+            driver = get_driver(session["engine"])
+            request_id = uuid.uuid4().hex
+            payload = driver.stop_task_payload(
+                session, self._driver_ctx, task_id, request_id)
+            if not isinstance(payload, dict):
+                return {"error": "the active turn cannot stop a background task"}
+            record = {"request_id": request_id, "task_id": task_id,
+                      "future": asyncio.get_running_loop().create_future()}
+            self._task_stops[request_id] = record
+            self._task_stops_by_task[task_id] = record
+            try:
+                await self._write_stdin(payload)
+            except (BrokenPipeError, ConnectionError, OSError, RuntimeError) as exc:
+                log.info("background task stop write failed for session %s: %s",
+                         self.id, exc)
+                self._settle_task_stop(
+                    record, False, "the turn ended before the request was sent")
+        try:
+            ok, error = await asyncio.wait_for(
+                asyncio.shield(record["future"]), TASK_STOP_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._settle_task_stop(
+                record, False, "the engine did not answer within {:g}s".format(
+                    TASK_STOP_TIMEOUT))
+            ok, error = record["future"].result()
+        if not ok:
+            return {"error": error}
+        if any(str(row.get("id") or "") == task_id for row in self._bg_tasks):
+            return {"error": "the engine kept the task running"}
+        return {"ok": True, "task_id": task_id}
+
+    def _settle_task_stop(self, record, ok, error="") -> None:
+        self._task_stops.pop(record["request_id"], None)
+        if self._task_stops_by_task.get(record["task_id"]) is record:
+            del self._task_stops_by_task[record["task_id"]]
+        if not record["future"].done():
+            record["future"].set_result((bool(ok), str(error or "")))
+
+    def _handle_task_stop_result(self, act) -> None:
+        record = self._task_stops.get(str(act.get("request_id") or ""))
+        if record is not None:
+            self._settle_task_stop(record, bool(act.get("ok")),
+                                   str(act.get("error") or ""))
+
+    def _fail_task_stops(self, reason) -> None:
+        for record in list(self._task_stops.values()):
+            self._settle_task_stop(record, False, reason)
+
     def _close_stdin(self) -> None:
         # Probed on claude 2.1.258: closing stdin ends an unanswered side
         # question outright, so nothing may be left waiting on an answer that
         # can no longer arrive. This is the single choke point for that.
         self._fail_side_questions("the turn ended before the engine answered")
+        self._fail_task_stops("the turn ended before the engine answered")
         self._bg_check_id = ""
         self._bg_note = ""
         proc = self.proc
@@ -3941,6 +4036,18 @@ class SessionHub:
                             await self._write_stdin(payload)
                     elif a == "steer_result":
                         self._handle_steer_result(act)
+                    elif a == "stop_task_result":
+                        self._handle_task_stop_result(act)
+                        if act.get("ok") and pending_result is not None and \
+                                not wait_closed and self._bg_wait_since is not None and \
+                                not self._bg_tasks:
+                            # the person stopped the last task the answer
+                            # waited on, and a stop wakes no model: the turn
+                            # ends here with the answer it has
+                            await withdraw_check("its last task was stopped")
+                            end_wait("stopped by user",
+                                     "The last background task was stopped by "
+                                     "user; the turn ends with the answer it has")
                     elif a in ("side_question_result", "side_question_progress") and \
                             str(act.get("request_id") or "").startswith(
                                 BACKGROUND_CHECK_PREFIX):
@@ -4092,6 +4199,7 @@ class SessionHub:
             self._turn_result_seen = True
             self._turn_stopping = True
             self._fail_side_questions("the turn ended before the engine answered")
+            self._fail_task_stops("the turn ended before the engine answered")
             self._bg_wait_since = None
             self._bg_tasks = []
             self._bg_check_id = ""

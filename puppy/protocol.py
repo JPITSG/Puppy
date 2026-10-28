@@ -264,6 +264,12 @@ SESSION_REFERENCES_CAPABILITY = "session-references"
 # agent can go through a long conversation - its own included - without its
 # tool output. A controller asks a node without this marker for events only.
 SESSION_TURNS_VIEW_CAPABILITY = "session-turns-view"
+# POST /api/sessions/{sid}/background-tasks/{task_id}/stop stops one engine
+# background task the running turn holds, through the driver's own control
+# channel, and answers once the engine has let it go; the live
+# ``background_tasks`` payload says whether the turn can take one
+# (``stoppable``). A console offers the stop only to a node with this marker.
+SESSION_BACKGROUND_TASK_STOP_CAPABILITY = "session-background-task-stop"
 
 # Generated session titles. A node keeps the per-session intent (POST
 # /api/sessions with auto_title, the same field on task creation) as the
@@ -325,6 +331,7 @@ BASE_CAPABILITIES = (
     SESSION_TASK_AGENT_CAPABILITY,
     SESSION_REFERENCES_CAPABILITY,
     SESSION_TURNS_VIEW_CAPABILITY,
+    SESSION_BACKGROUND_TASK_STOP_CAPABILITY,
     "session-short-references",
     "session-communication",
     "session-coordination",

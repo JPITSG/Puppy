@@ -7262,7 +7262,7 @@ async def background_task_list_checks(instance):
                       expanded: anchor.getAttribute('aria-expanded'),
                       count: menu.querySelector('.background-task-count').textContent,
                       kinds: rows.map(r => r.querySelector('.background-task-meta').textContent),
-                      tags: rows.map(r => r.tagName),
+                      tags: rows.map(r => r.querySelector('.background-task-main').tagName),
                       heights: rows.map(r => Math.round(r.getBoundingClientRect().height * 2) / 2),
                       centred: rows.every(r => { const ring = r.querySelector('.background-task-glyph').getBoundingClientRect(),
                           ink = r.querySelector('.background-task-glyph svg').getBoundingClientRect();
@@ -7311,6 +7311,103 @@ async def background_task_list_checks(instance):
         hub._bg_tasks = []
         hub._publish_background()
         await until(instance, "!%s && !(%s)" % (listed, chip))
+
+        # A row's end is its stop. The node's own stop is stood in for here
+        # (the engine's side is exercise_claude_background_turn's): a real
+        # click on the square asks in the row - red, Keep focused, and not a
+        # pixel of the text, the glyph or the row moving - on a desktop and a
+        # phone in both themes; a real double click only asks; Escape takes
+        # it back; a real click on Stop sends one request and the task goes.
+        stops = []
+
+        async def stand_in_stop(task_id):
+            stops.append(task_id)
+            hub._bg_tasks = [row for row in hub._bg_tasks if row["id"] != task_id]
+            hub._publish_background()
+            return {"ok": True, "task_id": task_id}
+
+        hub._task_stop_ready = lambda session=None: True
+        hub.stop_background_task = stand_in_stop
+        hub._bg_tasks = [
+            {"id": "b7k2q9", "type": "local_bash", "description": "Start the dev server for phone testing",
+             "tool_use_id": "toolu_dev"},
+            {"id": "m3x8rt", "type": "monitor_ws", "description": "Watch the build log for errors",
+             "tool_use_id": "toolu_watch"},
+            {"id": "a9c4fz", "type": "local_agent", "description": "Check card colour contrast"},
+        ]
+        hub._publish_background()
+        await until(instance, "(%s) && (%s).textContent === '3 tasks' && %s.backgroundStoppable" % (chip, chip, view))
+        first_row = listed + ".querySelector('.background-task-row')"
+        square = first_row + ".querySelector('.background-task-stop')"
+        measure = """(() => { const row = %s, r = n => { const b = n.getBoundingClientRect();
+            return [b.left, b.top, b.width, b.height]; };
+          return {row: r(row), glyph: r(row.querySelector('.background-task-glyph')),
+            name: r(row.querySelector('.background-task-name')), meta: r(row.querySelector('.background-task-meta')),
+            end: r(row.querySelector('.background-task-end')), state: row.querySelector('.background-task-end').dataset.state,
+            text: row.querySelector('.background-task-name').textContent + '|' + row.querySelector('.background-task-meta').textContent,
+            fits: row.scrollWidth <= row.clientWidth + 1 &&
+              [...row.querySelectorAll('.background-task-confirm .btn')].every(b => b.getBoundingClientRect().right <= row.getBoundingClientRect().right + 0.5),
+            tint: getComputedStyle(row).backgroundColor,
+            keep: document.activeElement === row.querySelector('.background-task-keep')}; })()""" % first_row
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width == 390}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                await asyncio.sleep(.4)   # the theme's colour transitions
+                await press(await centre(chip))
+                await until(instance, "!!" + listed)
+                await asyncio.sleep(.3)   # the float's own 2px entrance
+                before = await evaluate(instance, measure)
+                assert before["state"] == "rest", before
+                await press(await centre(square))
+                await until(instance, "(%s).querySelector('.background-task-end').dataset.state === 'confirm'" % first_row)
+                await asyncio.sleep(.2)   # the tint's transition
+                after = await evaluate(instance, measure)
+                tint = await evaluate(instance, """(() => { const p = document.createElement('span');
+                    p.style.backgroundColor = 'var(--err-dim)'; document.body.append(p);
+                    const c = getComputedStyle(p).backgroundColor; p.remove(); return c; })()""")
+                for part in ("row", "glyph", "name", "meta", "end"):
+                    assert before[part] == after[part], (name, theme, part, before[part], after[part])
+                assert before["text"] == after["text"], (name, theme, after)
+                assert after["fits"] and after["keep"] and after["tint"] == tint, (name, theme, after, tint)
+                assert stops == [], "the square only asks"
+                await key("Escape")
+                await until(instance, "!!%s && (%s).querySelector('.background-task-end').dataset.state === 'rest' && "
+                                      "document.activeElement === %s" % (listed, first_row, square))
+                back = await evaluate(instance, measure)
+                assert all(back[part] == before[part] for part in ("row", "glyph", "name", "meta", "end")), \
+                    (name, theme, back, before)
+                await key("Escape")
+                await until(instance, "!" + listed)
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        await evaluate(instance, "applyTheme('dark'); true")
+        # a real double click on the square asks and no more: Stop stands
+        # where the square was, and the second press is no confirmation
+        await press(await centre(chip))
+        await until(instance, "!!" + listed)
+        point = await centre(square)
+        for count in (1, 2):
+            for kind in ("mousePressed", "mouseReleased"):
+                await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left",
+                                                                     clickCount=count), session=instance.page_session)
+        await until(instance, "(%s).querySelector('.background-task-end').dataset.state === 'confirm'" % first_row)
+        await asyncio.sleep(.5)
+        assert stops == [], stops
+        # a real click on Stop sends it, once, and the task leaves the list
+        await press(await centre(first_row + ".querySelector('.background-task-yes')"))
+        await until(instance, "!!%s && %s.querySelector('.background-task-count').textContent === '2 running' && "
+                              "(%s).textContent === '2 tasks'" % (listed, listed, chip))
+        assert stops == ["b7k2q9"], stops
+        assert await evaluate(instance, "%s.querySelector('.background-task-meta').textContent" % first_row) == \
+            "Watch · m3x8rt"
+        await key("Escape")
+        await until(instance, "!" + listed)
+        hub._bg_tasks = []
+        hub._publish_background()
+        await until(instance, "!(%s)" % chip)
     finally:
         await evaluate(instance, "closeTab('s:0:%d'); activateTab('s:0:1'); applyTheme('dark'); true" % sid)
         hub.status = "idle"
@@ -7323,7 +7420,9 @@ async def background_task_list_checks(instance):
             "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
     print("PASS: the background-task count opens their list under it on desktop and phone in both themes, "
           "rows one height with centred glyphs and blue clocks, Escape back to the chip, a real click landing "
-          "a call off the page and one on it, live redraws and the list gone with the last task", flush=True)
+          "a call off the page and one on it, live redraws and the list gone with the last task; a real click "
+          "on a row's stop asks in the row without moving a pixel of it, Escape takes it back, a double "
+          "click only asks, and a real click on Stop sends one request and the task goes", flush=True)
 
 
 async def running_list_checks(instance, sid, capture=False):

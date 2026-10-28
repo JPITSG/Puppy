@@ -1126,6 +1126,14 @@ async def h_session_ask_cancel(request: web.Request):
     return web.json_response(result, status=409 if "error" in result else 200)
 
 
+async def h_session_background_task_stop(request: web.Request):
+    """Stop one engine background task of the session's running turn."""
+    session = _session_or_404(request)
+    result = await runner.hub(session["id"]).stop_background_task(
+        request.match_info["task_id"])
+    return web.json_response(result, status=409 if "error" in result else 200)
+
+
 async def h_session_interrupt(request: web.Request):
     s = _session_or_404(request)
     await runner.hub(s["id"]).interrupt()
@@ -2262,6 +2270,8 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     r.add_post("/api/sessions/{sid:\\d+}/steer", h_session_steer)
     r.add_post("/api/sessions/{sid:\\d+}/ask", h_session_ask)
     r.add_delete("/api/sessions/{sid:\\d+}/ask", h_session_ask_cancel)
+    r.add_post("/api/sessions/{sid:\\d+}/background-tasks/{task_id:[A-Za-z0-9_.:-]{1,128}}/stop",
+               h_session_background_task_stop)
     r.add_post("/api/sessions/{sid:\\d+}/interrupt", h_session_interrupt)
     r.add_post("/api/sessions/{sid:\\d+}/switch", h_session_switch)
     r.add_post("/api/sessions/{sid:\\d+}/tool", h_session_tool)

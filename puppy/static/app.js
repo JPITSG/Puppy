@@ -6334,6 +6334,15 @@ function backendSupportsSessionGitActions(bid) {
 
 /* The sheet's History pages the short log through a route of its own, so
    the list is drawn only where the node serves it. */
+/* A running turn's background task can be stopped from the chat head's
+   list: the node serves the route (``session-background-task-stop``), and the
+   live list itself says whether this turn can take one. */
+function backendSupportsBackgroundTaskStop(bid) {
+  if (!bid) return true;
+  return backendHasCapability(state.backends.find(b => b.id === Number(bid)),
+    "session-background-task-stop");
+}
+
 function backendSupportsSessionGitLog(bid) {
   if (!bid) return true;
   const backend = state.backends.find(b => b.id === bid);
@@ -17121,6 +17130,30 @@ function backgroundTaskKind(task) {
   return Object.prototype.hasOwnProperty.call(BACKGROUND_TASK_KINDS, task.type) ?
     BACKGROUND_TASK_KINDS[task.type] : ["Task", String(task.type || "")];
 }
+/* The controls of one row of the background task list the keys can reach:
+   the row's own press when it is one, and whichever of its end's controls
+   stand in the end's current state (the others are there only to hold the
+   end's width). */
+function backgroundTaskControls(row) {
+  const end = row.querySelector(".background-task-end");
+  const state = end ? end.dataset.state : "";
+  return [...row.querySelectorAll("button[data-part]")].filter(button =>
+    button.dataset.part === "main" ||
+    (button.dataset.part === "stop" ? state === "rest" : state === "confirm"));
+}
+/* The stop square a row's end wears: the composer's Stop, drawn. */
+function stopSquareIcon(size = 10) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("aria-hidden", "true");
+  const square = document.createElementNS(SVG_NS, "rect");
+  for (const [key, value] of [["x", "2"], ["y", "2"], ["width", "8"], ["height", "8"],
+    ["rx", "1.6"], ["fill", "currentColor"]]) square.setAttribute(key, value);
+  svg.appendChild(square);
+  return svg;
+}
 /* How long a task has run, on the running clock's stopwatch face: its
    start is the executing backend's stamp, anchored like a running tool
    card's clock to this browser's moment for the session's own start, so no
@@ -21495,6 +21528,11 @@ class SessionView {
     this.toolCards = {};
     this.toolClockEndSeq = 0; // retain known turn endings across history windows
     this.backgroundTaskUpdates = new Map();
+    /* the head list's stop: the row asking before it stops (one at a time),
+       and the tasks whose stop is on its way */
+    this.backgroundArmed = null;
+    this.backgroundArmedAt = 0;
+    this.backgroundStopping = new Set();
     this.orphanResults = new Map();   // results whose call is not in this window
     this.switchLines = [];    // engine-switch dividers, re-labelled as state arrives
     this.liveEl = null;
@@ -22507,6 +22545,12 @@ class SessionView {
       typeof task.id === "string" && task.id.trim());
     const live = valid && this.status === "running" && !this.reconnecting ? tasks : [];
     this.backgroundTasks = [...new Map(live.map(task => [task.id, task])).values()];
+    this.backgroundStoppable = !!(value && value.stoppable === true) &&
+      backendSupportsBackgroundTaskStop(this.tab.bid);
+    const ids = new Set(this.backgroundTasks.map(task => task.id));
+    if (this.backgroundArmed && !ids.has(this.backgroundArmed)) this.backgroundArmed = null;
+    for (const id of [...this.backgroundStopping])
+      if (!ids.has(id)) this.backgroundStopping.delete(id);
     const count = this.backgroundTasks.length;
     const scroll = this.root.querySelector(".chat-meta-scroll");
     let chip = scroll.querySelector(".chip.background-tasks");
@@ -22544,7 +22588,10 @@ class SessionView {
      go. A row whose call the node named is the way to that call in the
      transcript: the prompt gutter's own landing, loading it when it is not
      on the page, revealing it under a filter, and recording no navigation
-     entry, as a step does not. */
+     entry, as a step does not. Where the turn can take it, a row's end is
+     its stop: a press asks in the row itself (Keep, then Stop), and only
+     Stop sends it. The keys walk the rows with Up/Down and a row's own
+     controls with Left/Right; Escape takes an asking row back first. */
   openBackgroundTaskList(chip) {
     if (closeAllMenus(chip)) return;
     const menu = el("div", "choice-menu dyn background-task-list");
@@ -22553,25 +22600,41 @@ class SessionView {
     menu.tabIndex = -1;
     menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", "Background tasks");
+    this.backgroundArmed = null;
     const dismiss = (returnFocus = false) => {
       menu.remove();
+      this.backgroundArmed = null;
       chip.setAttribute("aria-expanded", "false");
       if (returnFocus && chip.isConnected) chip.focus();
     };
     menu._dismiss = dismiss;
     menu.sync = () => this.drawBackgroundTaskList(menu);
     menu.onkeydown = event => {
-      if (event.key === "Escape") { event.preventDefault(); dismiss(true); return; }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (this.backgroundArmed) this.disarmBackgroundTask(menu, this.backgroundArmed);
+        else dismiss(true);
+        return;
+      }
       if (event.key === "Tab") { dismiss(); return; }
-      const rows = [...menu.querySelectorAll("button.background-task-row")];
+      const rows = [...menu.querySelectorAll(".background-task-row")]
+        .map(backgroundTaskControls).filter(controls => controls.length);
       if (!rows.length) return;
-      const at = rows.indexOf(document.activeElement);
+      const at = rows.findIndex(controls => controls.includes(document.activeElement));
+      const column = at < 0 ? 0 : rows[at].indexOf(document.activeElement);
+      const pick = (index, col) => {
+        const row = rows[(index + rows.length) % rows.length];
+        return row[Math.min(col, row.length - 1)];
+      };
       let next = null;
-      if (event.key === "ArrowDown") next = at < 0 ? 0 : (at + 1) % rows.length;
-      else if (event.key === "ArrowUp") next = at < 0 ? rows.length - 1 : (at - 1 + rows.length) % rows.length;
-      else if (event.key === "Home") next = 0;
-      else if (event.key === "End") next = rows.length - 1;
-      if (next !== null) { event.preventDefault(); rows[next].focus(); }
+      if (event.key === "ArrowDown") next = at < 0 ? pick(0, 0) : pick(at + 1, column);
+      else if (event.key === "ArrowUp") next = at < 0 ? pick(rows.length - 1, 0) : pick(at - 1, column);
+      else if (event.key === "Home") next = pick(0, 0);
+      else if (event.key === "End") next = pick(rows.length - 1, 0);
+      else if (event.key === "ArrowRight" && at >= 0)
+        next = rows[at][Math.min(column + 1, rows[at].length - 1)];
+      else if (event.key === "ArrowLeft" && at >= 0) next = rows[at][Math.max(column - 1, 0)];
+      if (next) { event.preventDefault(); next.focus(); }
     };
     menu.onclick = event => event.stopPropagation();
     document.body.appendChild(menu);
@@ -22599,12 +22662,18 @@ class SessionView {
   drawBackgroundTaskList(menu) {
     const tasks = this.backgroundTasks || [];
     if (!tasks.length || !menu._anchor.isConnected) { menu._dismiss(); return; }
-    const signature = JSON.stringify(tasks.map(task =>
-      [task.id, task.type, task.description, Number(task.call_seq) || 0, task.started_at]));
+    const stoppable = !!this.backgroundStoppable;
+    const signature = JSON.stringify([stoppable, this.backgroundArmed || "",
+      [...this.backgroundStopping].sort(), tasks.map(task =>
+        [task.id, task.type, task.description, Number(task.call_seq) || 0, task.started_at])]);
     if (menu._signature === signature) return;
     menu._signature = signature;
-    const focused = document.activeElement && menu.contains(document.activeElement) ?
-      document.activeElement.dataset.taskId : null;
+    /* the control that had the keys keeps them across the redraw, unless an
+       arm, a take-back or a stop said where they go next */
+    const active = document.activeElement;
+    const focus = menu._focusNext || (active && menu.contains(active) && active.dataset.part ?
+      { id: active.closest(".background-task-row").dataset.taskId, part: active.dataset.part } : null);
+    menu._focusNext = null;
     menu.replaceChildren();
     const head = el("div", "background-task-head");
     head.appendChild(el("span", "background-task-title", "Background tasks"));
@@ -22616,34 +22685,127 @@ class SessionView {
       const [kind, tool] = backgroundTaskKind(task);
       const name = String(task.description || "").trim() || task.id;
       const seq = Number(task.call_seq);
-      const callable = Number.isSafeInteger(seq) && seq > 0;
-      const row = el(callable ? "button" : "div", "background-task-row");
+      const stopping = this.backgroundStopping.has(task.id);
+      const armed = !stopping && stoppable && this.backgroundArmed === task.id;
+      const callable = Number.isSafeInteger(seq) && seq > 0 && !armed && !stopping;
+      const row = el("div", "background-task-row" + (armed ? " armed" : "") +
+        (stopping ? " stopping" : ""));
       row.dataset.taskId = task.id;
-      row.setAttribute("role", "menuitem");
+      row.setAttribute("role", "none");
+      /* the row's own press: a button laid under its text, so the stop at
+         its end is a sibling rather than a button inside a button */
+      const main = row.appendChild(el(callable ? "button" : "div", "background-task-main"));
+      main.dataset.part = "main";
+      main.setAttribute("role", "menuitem");
+      const label = `${name} · ${kind} ${task.id}`;
       if (callable) {
-        row.type = "button";
-        row.tabIndex = -1;
-        row.setAttribute("aria-label", `${name} · ${kind} ${task.id} · show the call that started it`);
-        row.onclick = () => {
+        main.type = "button";
+        main.tabIndex = -1;
+        main.setAttribute("aria-label", `${label} · show the call that started it`);
+        main.onclick = () => {
           menu._dismiss(true);
           this.jumpToCall(seq);
         };
-      } else row.setAttribute("aria-disabled", "true");
+      } else {
+        main.setAttribute("aria-disabled", "true");
+        main.setAttribute("aria-label", stopping ? `${label} · stopping` :
+          armed ? `${label} · stop it?` : label);
+      }
       const glyph = row.appendChild(el("span", "background-task-glyph"));
       glyph.appendChild(toolIconNode(tool));
       const text = row.appendChild(el("span", "background-task-text"));
       text.appendChild(el("span", "background-task-name", name));
       text.appendChild(el("span", "background-task-meta", `${kind} · ${task.id}`));
-      row.appendChild(el("span", "background-task-age", backgroundTaskAge(this, task, now)));
+      /* every state of the row's end stands in one cell, so the cell is as
+         wide as the widest of them and nothing beside it moves on a press */
+      const end = row.appendChild(el("span", "background-task-end"));
+      end.dataset.state = stopping ? "stopping" : armed ? "confirm" : "rest";
+      const rest = end.appendChild(el("span", "background-task-rest"));
+      const age = rest.appendChild(el("span", "background-task-age", backgroundTaskAge(this, task, now)));
+      /* the row's press and its controls carry the words */
+      for (const node of [glyph, text, age]) node.setAttribute("aria-hidden", "true");
+      if (stoppable) {
+        const stop = rest.appendChild(el("button", "background-task-stop"));
+        stop.type = "button";
+        stop.tabIndex = -1;
+        stop.dataset.part = "stop";
+        stop.setAttribute("role", "menuitem");
+        stop.setAttribute("aria-label", `Stop ${name}`);
+        stop.title = `Stop ${name}`;
+        stop.appendChild(stopSquareIcon());
+        stop.onclick = () => this.armBackgroundTask(menu, task.id);
+        const confirm = end.appendChild(el("span", "background-task-confirm"));
+        const keep = confirm.appendChild(el("button", "btn background-task-keep", "Keep"));
+        keep.type = "button";
+        keep.tabIndex = -1;
+        keep.dataset.part = "keep";
+        keep.setAttribute("role", "menuitem");
+        keep.setAttribute("aria-label", `Keep ${name} running`);
+        keep.onclick = () => this.disarmBackgroundTask(menu, task.id);
+        const yes = confirm.appendChild(el("button", "btn btn-danger background-task-yes", "Stop"));
+        yes.type = "button";
+        yes.tabIndex = -1;
+        yes.dataset.part = "yes";
+        yes.setAttribute("role", "menuitem");
+        yes.setAttribute("aria-label", `Stop ${name} now`);
+        yes.onclick = event => {
+          /* Stop stands where the square was: the second press of a double
+             click on the square lands here and is not a confirmation */
+          if (event.detail > 1 || performance.now() - this.backgroundArmedAt < 350) return;
+          this.stopBackgroundTask(menu, task);
+        };
+        const busy = end.appendChild(el("span", "background-task-busy"));
+        busy.setAttribute("aria-hidden", "true");
+        busy.appendChild(el("span", "spinner"));
+        busy.appendChild(el("span", "", "Stopping…"));
+      }
       list.appendChild(row);
     }
     menu.appendChild(list);
-    if (focused) {
-      const again = [...list.querySelectorAll("button.background-task-row")]
-        .find(row => row.dataset.taskId === focused);
-      (again || menu).focus({ preventScroll: true });
+    if (focus) {
+      const row = [...list.children].find(item => item.dataset.taskId === focus.id);
+      const target = row && backgroundTaskControls(row).find(node => node.dataset.part === focus.part);
+      (target || menu).focus({ preventScroll: true });
     }
     if (menu.isConnected) placeChoiceMenu(menu, menu._anchor, null);
+  }
+
+  /* A press on a row's stop square: the row asks first, with Keep under the
+     keys, since a stop cannot be taken back. */
+  armBackgroundTask(menu, id) {
+    if (!this.backgroundStoppable || this.backgroundStopping.has(id)) return;
+    this.backgroundArmed = id;
+    this.backgroundArmedAt = performance.now();
+    menu._focusNext = { id, part: "keep" };
+    menu.sync();
+  }
+
+  disarmBackgroundTask(menu, id) {
+    if (this.backgroundArmed === id) this.backgroundArmed = null;
+    menu._focusNext = { id, part: "stop" };
+    menu.sync();
+  }
+
+  /* Stop sends it: the row says Stopping… until the task leaves the live
+     list, which the node reports before it answers. A refusal puts the row
+     back with one notice - unless the task is gone anyway. */
+  async stopBackgroundTask(menu, task) {
+    const id = task.id;
+    if (this.backgroundStopping.has(id)) return;
+    const name = String(task.description || "").trim() || id;
+    this.backgroundArmed = null;
+    this.backgroundStopping.add(id);
+    menu._focusNext = { id: null };
+    this.syncBackgroundTaskList();
+    try {
+      await api(this.tab.bid, `sessions/${this.tab.sid}/background-tasks/${encodeURIComponent(id)}/stop`,
+        { method: "POST", timeoutMs: 30000 });
+    } catch (error) {
+      if (!this.backgroundStopping.delete(id)) return;
+      this.syncBackgroundTaskList();
+      if ((this.backgroundTasks || []).some(item => item.id === id))
+        toast(`Could not stop ${name} · ${error.message}`, "bad", TOAST_LONG);
+    }
   }
 
   tickBackgroundTaskList(menu) {

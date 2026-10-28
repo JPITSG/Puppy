@@ -213,6 +213,10 @@ function header(sid = 1, bid = 0) {
   v.setStatus = text => { v.statusText = text; };
   v.skippedEvents = [];
   v.atBottom = () => false;
+  // the constructor's own state for the list's stop
+  v.backgroundArmed = null;
+  v.backgroundArmedAt = 0;
+  v.backgroundStopping = new Set();
   return v;
 }
 const live = (...ids) => ({tasks: ids.map(id => ({id, type: "future-kind"}))});
@@ -334,8 +338,11 @@ assert.equal(list.querySelector(".background-task-title").textContent, "Backgrou
 assert.equal(list.querySelector(".background-task-count").textContent, "3 running");
 assert.equal(list.querySelector(".prompt-list-empty"), null);
 let rows = list.querySelectorAll(".background-task-row");
-assert.deepEqual(rows.map(row => row.tagName), ["BUTTON", "DIV", "DIV"],
+const main = row => row.querySelector(".background-task-main");
+assert.deepEqual(rows.map(row => main(row).tagName), ["BUTTON", "DIV", "DIV"],
   "only a task whose call the node named is a way to it");
+assert.equal(list.querySelector(".background-task-stop"), null,
+  "no stop where the turn cannot take one");
 assert.deepEqual(rows.map(row => row.querySelector(".background-task-name").textContent),
   ["Start the dev server", "Watch the build log", "z9"], "a task with no words is named by its id");
 assert.deepEqual(rows.map(row => row.querySelector(".background-task-meta").textContent),
@@ -344,17 +351,17 @@ const ages = rows.map(row => row.querySelector(".background-task-age").textConte
 assert.match(ages[0], /^9:(29|30|31)$/, "the call's own start, on the running clock's face");
 assert.match(ages[1], /^8:(19|20|21)$/);
 assert.equal(ages[2], "", "an unknown start is no figure, never an invented one");
-assert.equal(rows[1].getAttribute("aria-disabled"), "true");
-assert.match(rows[0].getAttribute("aria-label"), /^Start the dev server · Command b7k2q9 · show the call/);
+assert.equal(main(rows[1]).getAttribute("aria-disabled"), "true");
+assert.match(main(rows[0]).getAttribute("aria-label"), /^Start the dev server · Command b7k2q9 · show the call/);
 // the clocks run while it is open
 context.sessionActivityAnchors.set(context.sessionActivityKey(0, 3), Date.now() - 660000);
 ticker();
 assert.match(rows[0].querySelector(".background-task-age").textContent, /^10:(29|30|31)$/);
 // keys: the arrows reach the rows a press can take, Escape gives the focus back
 fire(list, "keydown", {key: "ArrowDown"});
-assert.equal(document.activeElement, rows[0]);
+assert.equal(document.activeElement, main(rows[0]));
 fire(list, "keydown", {key: "ArrowDown"});
-assert.equal(document.activeElement, rows[0], "a row with no call is not a stop");
+assert.equal(document.activeElement, main(rows[0]), "a row with no call is not a stop");
 fire(list, "keydown", {key: "Escape"});
 assert.equal(openList(), null);
 assert.equal(document.activeElement, button);
@@ -366,7 +373,7 @@ button.click();
 assert.equal(openList(), null, "the chip toggles its list");
 // a row lands on its call and closes the list
 button.click();
-openList().querySelector("button.background-task-row").click();
+openList().querySelector("button.background-task-main").click();
 assert.deepEqual(jumps, [41], "the call that started the task, by its event");
 assert.equal(openList(), null);
 assert.equal(document.activeElement, button);
@@ -402,3 +409,143 @@ ticker();
 assert.equal(openList(), null);
 assert.equal(chip(owner).getAttribute("aria-expanded"), "false");
 console.log("PASS: the count opens the list of running background tasks - kinds, names, ids and running clocks, a way to each named call, live redraws and their end, keys, toggling and ownership");
+
+// A row's end is its stop where the turn can take one and the node serves
+// it: a press asks in the row itself, Keep takes it back, only Stop sends it.
+(async () => {
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const requests = [];
+  const toasts = [];
+  let answer = () => Promise.resolve({ok: true});
+  let clock = 10000;
+  Object.assign(context, {
+    SVG_NS: "http://www.w3.org/2000/svg",
+    performance: {now: () => clock},
+    api: (bid, path, opts) => { requests.push([bid, path, opts.method]); return answer(); },
+    toast: (text, tone) => toasts.push([text, tone]),
+    TOAST_LONG: 9000,
+    state: {tabs: [], backends: [{id: 7, capabilities: []},
+      {id: 8, capabilities: ["session-background-task-stop"]}]},
+  });
+  vm.runInContext([
+    between("function backendHasCapability(", "function backendSupportsShutdownNotice("),
+    between("function backendSupportsBackgroundTaskStop(", "function backendSupportsSessionGitLog("),
+  ].join("\n"), context);
+  const two = {tasks: running.tasks.slice(0, 2), stoppable: true, waiting: true, text: "Waiting"};
+  const stopper = header(5);
+  document.body.appendChild(stopper.root);
+  const landed = [];
+  stopper.jumpToCall = seq => landed.push(seq);
+  stopper.handle(snapshot(two));
+  const stopChip = chip(stopper);
+  stopChip.getClientRects = () => [{}];
+  stopChip.click();
+  let list = openList();
+  const rowsNow = () => openList().querySelectorAll(".background-task-row");
+  const end = row => row.querySelector(".background-task-end");
+  const part = (row, name) => row.querySelector(`[data-part="${name}"]`);
+  let rows = rowsNow();
+  assert.equal(rows.length, 2);
+  for (const row of rows) {
+    assert.equal(end(row).dataset.state, "rest");
+    assert.ok(part(row, "stop"), "each row ends in its stop");
+    assert.ok(part(row, "keep") && part(row, "yes") && row.querySelector(".background-task-busy"),
+      "every state of the end stands in its one cell, so a press moves nothing beside it");
+  }
+  assert.equal(part(rows[0], "stop").getAttribute("aria-label"), "Stop Start the dev server");
+  assert.equal(part(rows[0], "stop").parentNode.className, "background-task-rest",
+    "the square stands after the clock");
+  assert.equal(main(rows[0]).tagName, "BUTTON", "the row's press is the square's sibling");
+  // the square asks; it neither presses the row nor sends anything
+  part(rows[0], "stop").click();
+  assert.equal(openList(), list, "the question is asked in the open list");
+  rows = rowsNow();
+  assert.equal(end(rows[0]).dataset.state, "confirm");
+  assert.ok(rows[0].classList.contains("armed"));
+  assert.equal(main(rows[0]).tagName, "DIV", "an asking row is not a way to its call");
+  assert.equal(document.activeElement, part(rows[0], "keep"), "Keep has the keys, as Cancel does");
+  assert.deepEqual(landed, []);
+  assert.deepEqual(requests, []);
+  assert.equal(rows[0].querySelector(".background-task-name").textContent, "Start the dev server");
+  assert.equal(rows[0].querySelector(".background-task-meta").textContent, "Command · b7k2q9",
+    "the text column never changes for the question");
+  // Keep takes it back and hands the keys to the square
+  part(rows[0], "keep").click();
+  rows = rowsNow();
+  assert.equal(end(rows[0]).dataset.state, "rest");
+  assert.equal(document.activeElement, part(rows[0], "stop"));
+  // one row asks at a time; Escape takes the question back before the list
+  part(rows[0], "stop").click();
+  part(rowsNow()[1], "stop").click();
+  rows = rowsNow();
+  assert.deepEqual(rows.map(row => end(row).dataset.state), ["rest", "confirm"]);
+  fire(list, "keydown", {key: "Escape"});
+  assert.equal(openList(), list, "Escape takes the question back first");
+  rows = rowsNow();
+  assert.deepEqual(rows.map(row => end(row).dataset.state), ["rest", "rest"]);
+  assert.equal(document.activeElement, part(rows[1], "stop"));
+  // the keys: Up/Down across rows, Left/Right along a row's own controls
+  fire(list, "keydown", {key: "Home"});
+  assert.equal(document.activeElement, main(rows[0]));
+  fire(list, "keydown", {key: "ArrowRight"});
+  assert.equal(document.activeElement, part(rows[0], "stop"));
+  fire(list, "keydown", {key: "ArrowDown"});
+  assert.equal(document.activeElement, part(rows[1], "stop"), "a row with no call has its stop alone");
+  fire(list, "keydown", {key: "ArrowUp"});
+  assert.equal(document.activeElement, main(rows[0]));
+  fire(list, "keydown", {key: "ArrowLeft"});
+  assert.equal(document.activeElement, main(rows[0]));
+  // Stop stands where the square was: a double click's second press, or a
+  // press within a moment of the question, is no confirmation
+  part(rows[0], "stop").click();
+  part(rowsNow()[0], "yes").click();
+  assert.deepEqual(requests, [], "a press at once after the question");
+  clock += 1000;
+  fire(part(rowsNow()[0], "yes"), "click", {detail: 2});
+  assert.deepEqual(requests, [], "the second press of a double click");
+  // Stop sends it, once: the row says Stopping… until the task leaves
+  let release;
+  answer = () => new Promise(resolve => { release = resolve; });
+  part(rowsNow()[0], "yes").click();
+  assert.deepEqual(requests, [[0, "sessions/5/background-tasks/b7k2q9/stop", "POST"]]);
+  rows = rowsNow();
+  assert.equal(end(rows[0]).dataset.state, "stopping");
+  assert.ok(rows[0].classList.contains("stopping"));
+  assert.match(main(rows[0]).getAttribute("aria-label"), / · stopping$/);
+  assert.equal(context.backgroundTaskControls(rows[0]).length, 0, "nothing to press while it stops");
+  assert.equal(document.activeElement, openList(), "the keys stay on the list");
+  stopper.handle({type: "background_tasks", ...two, tasks: two.tasks.slice(1)});
+  assert.equal(rowsNow().length, 1, "the task leaves when the node says it is gone");
+  release({ok: true, task_id: "b7k2q9"});
+  await flush();
+  assert.deepEqual(toasts, []);
+  assert.equal(stopper.backgroundStopping.size, 0);
+  // a refusal puts the row back with one notice
+  answer = () => Promise.reject(new Error("the engine kept the task running"));
+  part(rowsNow()[0], "stop").click();
+  clock += 1000;
+  part(rowsNow()[0], "yes").click();
+  await flush();
+  assert.equal(end(rowsNow()[0]).dataset.state, "rest");
+  assert.deepEqual(toasts, [["Could not stop Watch the build log · the engine kept the task running", "bad"]]);
+  // a refusal for a task that is gone anyway says nothing
+  let fail;
+  answer = () => new Promise((_, reject) => { fail = reject; });
+  part(rowsNow()[0], "stop").click();
+  clock += 1000;
+  part(rowsNow()[0], "yes").click();
+  stopper.handle({type: "background_tasks", tasks: [], waiting: false});
+  assert.equal(openList(), null);
+  fail(new Error("the turn ended before the engine answered"));
+  await flush();
+  assert.equal(toasts.length, 1, "no notice for a task that ended anyway");
+  // a turn that cannot take a stop, or a node without the route, offers none
+  stopper.handle(snapshot({...two, stoppable: false}));
+  assert.equal(stopper.backgroundStoppable, false);
+  const older = header(10, 7), newer = header(11, 8);
+  older.handle(snapshot(two));
+  newer.handle(snapshot(two));
+  assert.equal(older.backgroundStoppable, false, "a node without the route");
+  assert.equal(newer.backgroundStoppable, true, "a node that serves it");
+  console.log("PASS: a row's stop asks in the row (Keep focused, the text column untouched, one row at a time, Escape first), Stop sends one request past a double click's second press, Stopping… until the task leaves, a refusal restored with one notice unless the task is gone, and no stop where the turn or node cannot take one");
+})().catch(error => { console.error(error); process.exit(1); });

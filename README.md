@@ -595,7 +595,14 @@ example, **2 tasks**), including while the model is still working. Clicking it
 lists them: each task's kind (a command, a watch or an agent), what it does, its
 ID and how long it has run, kept up to date while the list is open. Clicking a
 row whose starting call Claude Code reported lands on that call in the
-transcript, loading it first if it is no longer on the page. The pill
+transcript, loading it first if it is no longer on the page. The square at a
+row's end stops that one task: the row turns red and asks with **Keep** and
+**Stop** in place of the clock, without moving anything else in the row
+(Escape or Keep takes it back), and only **Stop** sends it. The row reads
+**Stopping…** until Claude Code has let the task go, the transcript marks it
+"Stopped by user", and stopping the last task an answered turn was waiting
+on ends that turn with the answer it has - Claude Code wakes nobody for a
+stop. A refusal puts the row back with a notice saying why. The pill
 disappears at zero, on disconnect and when the turn ends; reconnecting restores
 the current list. Only engine-reported background work counts, excluding
 internal housekeeping. This indicator is currently available for Claude Code.
