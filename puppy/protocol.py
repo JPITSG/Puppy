@@ -259,6 +259,11 @@ VNC_CONNECT_CANCEL_CAPABILITY = "vnc-connect-cancel"
 HOST_METRICS_CAPABILITY = "host-metrics-v1"
 
 SESSION_REFERENCES_CAPABILITY = "session-references"
+# The session tools' read takes view "turns": one row per prompt with that
+# turn's final answer, read from the prompt index (prompt_index.read), so an
+# agent can go through a long conversation - its own included - without its
+# tool output. A controller asks a node without this marker for events only.
+SESSION_TURNS_VIEW_CAPABILITY = "session-turns-view"
 
 # Generated session titles. A node keeps the per-session intent (POST
 # /api/sessions with auto_title, the same field on task creation) as the
@@ -319,6 +324,7 @@ BASE_CAPABILITIES = (
     # carry its editable ``tasks`` policy with ``tasks_default``.
     SESSION_TASK_AGENT_CAPABILITY,
     SESSION_REFERENCES_CAPABILITY,
+    SESSION_TURNS_VIEW_CAPABILITY,
     "session-short-references",
     "session-communication",
     "session-coordination",

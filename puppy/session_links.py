@@ -16,10 +16,17 @@ import uuid
 
 from aiohttp import web, WSMsgType, ClientTimeout
 
-from puppy import backends, config, db, runner, search, session_aliases
+from puppy import backends, config, db, prompt_index, protocol, runner, search, \
+    session_aliases
 
 log = logging.getLogger("puppy.session_links")
 CAPABILITY = "session-references"
+# read's view "turns": prompts and their turns' final answers, a page at a time
+TURNS_PAGE = 20
+TURNS_MAX = 50
+TURN_PROMPT_CHARS = 3000
+TURN_ANSWER_CHARS = 8000
+TURNS_BUDGET = 100000
 REF_RE = re.compile(r"^[a-f0-9]{32}/[1-9][0-9]{0,15}$")
 MENTION_RE = re.compile(
     r"(?<!\w)@session\s+(?:([a-f0-9]{32}):)?"
@@ -205,6 +212,72 @@ def _events(sid, args):
             "read_at": time.time(), "page_full": len(rows) == limit or len(result) < len(rows)}
 
 
+def _turn_text(kind, payload):
+    """What a turn's prompt or its ending says: a failed result's error, an
+    interruption's or an error row's words, a message's text."""
+    if not isinstance(payload, dict):
+        return search._scrub(search._text_of(payload))
+    if kind == "result":
+        text = payload.get("error") or payload.get("text") or \
+            ("the turn completed" if payload.get("ok") else "the turn failed")
+        return search._scrub(text if isinstance(text, str) else search._text_of(text))
+    return search._scrub(search._text_of(payload.get("text", payload)))
+
+
+def _turns(sid, args):
+    """read's view "turns": one row per prompt, oldest first after the
+    ``after_seq`` prompt, with its turn's final answer (the prompt index's
+    answer and outcome) - the conversation's story without its tool output
+    or thinking. A steered prompt joined the turn before it and has no
+    answer of its own; a turn still running answers with its latest message.
+    Long texts are cut and name their length: the events view reads a whole
+    message (limit=1, after_seq=seq-1, offset)."""
+    if args.get("before_seq") is not None or args.get("offset"):
+        raise SessionLinkError("the turns view pages forward with after_seq only")
+    after = integer(args.get("after_seq", 0), "after_seq", 0, 10 ** 16)
+    limit = integer(args.get("limit", TURNS_PAGE), "limit", 1, TURNS_MAX)
+    index = prompt_index.read(sid, after, limit)
+    wanted = sorted({row[0] for row in index["prompts"]} |
+                    {row[4] for row in index["prompts"] if row[4]})
+    messages = {}
+    for start in range(0, len(wanted), 400):
+        part = wanted[start:start + 400]
+        for row in db.query("SELECT seq, kind, payload, created_at FROM events WHERE session_id=? "
+                            "AND seq IN ({})".format(",".join("?" * len(part))), [sid] + part):
+            try:
+                payload = json.loads(row[2])
+            except (TypeError, ValueError):
+                payload = {}
+            messages[row[0]] = (row[1], payload, row[3])
+
+    def piece(seq, cap):
+        kind, payload, ts = messages.get(seq, ("", {}, 0))
+        text = _turn_text(kind, payload)
+        return {"seq": seq, "ts": round(float(ts or 0), 3), "text": text[:cap],
+                "chars": len(text), "truncated": len(text) > cap,
+                "source": source_link(reference(sid), seq)}
+
+    turns, budget, last = [], TURNS_BUDGET, after
+    for seq, _ts, steered, _excerpt, answer_seq, outcome in index["prompts"]:
+        prompt = piece(seq, TURN_PROMPT_CHARS)
+        row = {"prompt": prompt, "steered": bool(steered)}
+        if not steered:
+            if answer_seq:
+                row["answer"] = dict(piece(answer_seq, TURN_ANSWER_CHARS),
+                                     outcome=outcome or "unfinished")
+            else:
+                row["answer"] = None
+        size = len(prompt["text"]) + len((row.get("answer") or {}).get("text", ""))
+        if turns and size > budget:
+            break
+        turns.append(row)
+        budget -= size
+        last = seq
+    more = index["more"] or len(turns) < len(index["prompts"])
+    return {"view": "turns", "turns": turns, "total_prompts": index["total"],
+            "next_after_seq": last if more else None, "read_at": time.time()}
+
+
 async def node_call(method, args):
     if method in ("request", "request_status", "request_cancel", "notice"):
         from puppy import session_actions
@@ -227,7 +300,15 @@ async def node_call(method, args):
         if method == "read":
             if len(sessions) != 1:
                 raise SessionLinkError("read one session per call; search accepts several")
-            return dict(_events(sessions[0]["id"], args), session=session_info(sessions[0]))
+            view = args.get("view", "events")
+            if view not in ("events", "turns"):
+                raise SessionLinkError("view is events or turns")
+            reader = _turns if view == "turns" else _events
+            # the session's live state is read here; its history off the loop
+            info = session_info(sessions[0])
+            body = await asyncio.get_running_loop().run_in_executor(
+                None, reader, sessions[0]["id"], args)
+            return dict(body, session=info)
         query = args.get("query")
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= search.MAX_QUERY_CHARS:
             raise SessionLinkError("supply a search query of 1 to 400 characters")
@@ -265,6 +346,10 @@ async def remote_call(bid, method, args):
         raise SessionLinkError("node is offline")
     if CAPABILITY not in channel["capabilities"]:
         raise SessionLinkError("node does not support session references")
+    if method == "read" and args.get("view", "events") != "events" and \
+            protocol.SESSION_TURNS_VIEW_CAPABILITY not in channel["capabilities"]:
+        raise SessionLinkError("node '{}' cannot read by turns yet - upgrade its Puppy backend, "
+                               "or read its events".format(channel.get("name") or bid))
     from puppy.workspace_links import _request_json
     return await asyncio.wait_for(_request_json(
         channel, "POST", "session-links/node", {"method": method, "params": args}), 12)
@@ -364,33 +449,40 @@ async def broker(source, method, args, scope=None):
     if method not in ("sessions", "read", "search"):
         raise SessionLinkError("unknown session operation")
     data = await catalog()
-    available = {row["ref"]: row for row in data["sessions"] if row["ref"] != source}
+    # every session the controller reaches, the asking one included: it reads
+    # and searches its own conversation, while "all" stays every other one
+    known = {row["ref"]: row for row in data["sessions"]}
+    available = {ref: row for ref, row in known.items() if ref != source}
     if method == "sessions":
         query = str(args.get("query") or "").lower()
         offset = integer(args.get("offset", 0), "offset")
         limit = integer(args.get("limit", 100), "limit", 1, 200)
-        rows = [s for s in available.values() if query in
+        listed = ([dict(known[source], this=True)] if source in known else []) + \
+            list(available.values())
+        rows = [s for s in listed if query in
                 (s["title"] + " " + s["cwd"] + " " + s["node_name"] + " " + s["mention"]).lower()]
         return {"controller": data["controller"], "sessions": rows[offset:offset + limit],
                 "total": len(rows), "next_offset": offset + limit if offset + limit < len(rows) else None,
                 "unavailable": data["unavailable"]}
     refs = args.get("refs", (scope or {}).get("refs"))
-    if refs == "all":
-        refs = ["all"]
+    if refs in ("all", "this"):
+        refs = [refs]
     if not isinstance(refs, list) or not refs or len(refs) > 512:
-        raise SessionLinkError("select sessions with @Session or supply refs from sessions")
+        raise SessionLinkError("select sessions with @Session, supply refs from sessions, "
+                               "or pass [\"this\"] for this conversation")
     if refs == ["all"]:
         refs = list(available)
+    refs = [source if ref == "this" else ref for ref in refs]
     for ref in refs:
         parse_ref(ref)
         if ref == source:
-            raise SessionLinkError("select another session")
+            continue    # its own conversation is always the turn's to read
         if scope and scope["refs"] != ["all"] and ref not in scope["refs"]:
             raise SessionLinkError("session is outside the selected references")
     groups = {}
     errors = list(data["unavailable"])
     for ref in dict.fromkeys(refs):
-        row = available.get(ref)
+        row = known.get(ref)
         if row is None:
             errors.append({"ref": ref, "error": "session is deleted, offline, or unavailable"})
         else:

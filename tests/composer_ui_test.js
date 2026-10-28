@@ -860,7 +860,12 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     type(box.ta, "Compare @Session-P");
     await settle();
     const refs = () => Array.from(box.composer.mention.items.filter(i => i.kind === "session-select").map(i => i.ref));
-    assert.deepEqual(refs(), ["p1", "p2", "p3"]);
+    assert.deepEqual(refs(), ["self", "p1", "p2", "p3"],
+      "this conversation is listed first, for its agent to read its own history");
+    const own = box.composer.mention.items.find(i => i.ref === "self");
+    assert.equal(own.label, "Private origin");
+    assert.match(own.hint, /^this session · /);
+    assert.ok(!box.composer.mention.items.find(i => i.ref === "p1").hint.startsWith("this session"));
     assert.ok(box.composer.mention.items.some(i => i.label === "Offline: unavailable"));
     type(box.ta, "Compare @Session-pRoj");
     assert.deepEqual(refs(), ["p1", "p2"]);

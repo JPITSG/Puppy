@@ -16128,12 +16128,15 @@ class Composer {
       if (wizard.selected.size) add("session-insert", `Insert ${wizard.selected.size} selected`);
       const q = query.replace(/^session-?/i, "").normalize("NFKC").toLowerCase();
       if (!q || "all".startsWith(q))
-        add("session-all", "All sessions", "includes archived sessions across nodes");
-      for (const row of wizard.data.sessions) {
-        if (row.bid === (this.host.bid || 0) && row.id === this.host.sid) continue;
+        add("session-all", "All sessions", "every other session, archived ones too, across nodes");
+      /* this conversation first: its agent reads and searches its own
+         history (it is never sent anything), and naming it says so */
+      const own = row => row.bid === (this.host.bid || 0) && row.id === this.host.sid;
+      const rows = wizard.data.sessions.filter(own).concat(wizard.data.sessions.filter(row => !own(row)));
+      for (const row of rows) {
         const name = row.mention.slice(9, -5).toLowerCase();
         if (q && !name.startsWith(q)) continue;
-        add("session-select", row.title,
+        add("session-select", row.title, (own(row) ? "this session · " : "") +
           `${row.node_name} · ${row.short_id} · ${row.archived ? "archived" : row.status} · ${row.cwd}`, row.ref);
       }
       if (q && !items.some(item => item.kind === "session-select" || item.kind === "session-all"))

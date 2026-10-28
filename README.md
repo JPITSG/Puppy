@@ -871,11 +871,20 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   to avoid ambiguous short IDs; older UUID mentions still work. Alias reservations are included in backups.
   The agent can then read their transcripts, search
   their histories with exact-message links, and, when you ask, send them a
-  question, a task, a steering instruction or a stop. Each request leaves a
+  question, a task, a steering instruction or a stop. **All sessions** means
+  every session but the one you are typing in. Each request leaves a
   **View request** card in the transcript; its sheet shows the request's state,
   kind, creation time and deadline, then every session it went to with that
   session's state and its answer or error. A session's name opens it, and
   **Stop remaining work** cancels whatever the request still has pending.
+- **The session's own history.** The picker lists the session you are typing
+  in first, marked *this session*, and the agent can read and search its own
+  conversation whether you mention it or not - all of it, not only what its
+  context still holds. To go through a long history ("scan this session and
+  list the bugs we have not fixed yet") it reads one row per prompt with that
+  turn's final answer, without the tool output, then checks what it found
+  against later turns and the work itself, linking each finding to its
+  message. A session never sends requests, steering or workflows to itself.
 - **Coordination.** Ask for a plan and the agent can build a finite workflow of
   up to 24 question or task steps with dependencies across sessions, watched
   from a **View workflow** card in the transcript. Workflows survive restarts
@@ -1405,7 +1414,7 @@ node tests/browser_frames_ui_test.js # bounded image loading, stale frames and r
 node tests/browser_input_ui_test.js  # immediate gesture starts and bounded trailing input
 python3 tests/cli_upgrade_test.py    # engine CLI updates against a stub updater
 python3 tests/codex_turn_test.py     # Codex turn statuses and the start-up retry grace
-python3 tests/session_links_test.py  # session references, requests, workflows
+python3 tests/session_links_test.py  # session references, a session's own history, requests, workflows
 python3 tests/portability_test.py     # service homes, saved settings and relocatable launch
 ```
 

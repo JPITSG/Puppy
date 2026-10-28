@@ -377,6 +377,10 @@ async def send(source, args, scope=None, workflow=""):
     if not isinstance(request_key, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,100}", request_key):
         raise links.SessionLinkError("supply a unique request_id and reuse it if the reply is lost")
     rid = request_id(source, request_key)
+    # the mentions' selection may name this session itself, which reads its
+    # own history but is never sent anything: a send that reuses it goes to
+    # the others
+    implicit = "refs" not in args
     refs = args.get("refs", (scope or {}).get("refs"))
     if refs == "all":
         refs = ["all"]
@@ -405,8 +409,11 @@ async def send(source, args, scope=None, workflow=""):
         if source not in rows:
             raise links.SessionLinkError("the originating session is unavailable")
         targets = list(rows) if refs == ["all"] else list(dict.fromkeys(refs))
-        if refs == ["all"]:
+        if refs == ["all"] or implicit:
             targets = [ref for ref in targets if ref != source]
+        if "this" in targets:
+            raise links.SessionLinkError("cannot send a request to the originating session; "
+                                         "read and search its own history instead")
         if not targets or len(targets) > 512:
             raise links.SessionLinkError("select between 1 and 512 other sessions")
         for target in targets:

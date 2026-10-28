@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Session references, communication and coordination without model calls."""
+"""Session references, communication and coordination without model calls,
+including a session reading and searching its own history (by ["this"] or its
+own reference, past the mentions' boundary) through the events and the turns
+views, and never sending anything to itself."""
 from __future__ import annotations
 
 import asyncio
@@ -368,8 +371,127 @@ async def fleet_and_drivers():
     for app in (build_app(), backend_app()):
         paths = {route.resource.canonical for route in app.router.routes()}
         assert {"/api/session-links/node", "/api/session-links/action", "/api/ws/session-links"} <= paths
-        assert {"session-references", "session-communication", "session-coordination"} <= set(app["puppy_capabilities"])
+        assert {"session-references", "session-turns-view", "session-communication",
+                "session-coordination"} <= set(app["puppy_capabilities"])
     print("fleet routing/coverage, all engine bridges, MCP stdio, and both runtime registrations OK")
+
+
+async def own_history():
+    """A turn reads and searches its own conversation: by ["this"] or its
+    own reference, whatever the mentions selected, through the events view
+    and the turns view - each prompt with its turn's final answer and none of
+    the tool output - while "all" stays every other session and nothing is
+    ever sent to the session itself."""
+    a, b, d = session("Bug hunt"), session("Helper"), session("Unmentioned")
+    own, rb, rd = links.reference(a), links.reference(b), links.reference(d)
+    add = lambda kind, data: db.add_event(a, kind, data)["seq"]
+    p1 = add("user", {"text": "Fix the login redirect loop"})
+    add("tool_use", {"tool_use_id": "t1", "tool": "Bash", "input": {"command": "npm test"}})
+    add("tool_result", {"tool_use_id": "t1", "content": "noise " * 4000})
+    a1 = add("assistant", {"text": "Fixed the redirect loop. I also noticed a bug: the logout button double-fires."})
+    add("result", {"ok": True})
+    p2 = add("user", {"text": "Look at the export timeout"})
+    add("assistant", {"text": "Reading the export worker."})
+    p3 = add("user", {"text": "also check the CSV", "steering": True})
+    a2 = add("assistant", {"text": "The export timeout bug is still open: the worker never retries."})
+    add("result", {"ok": True})
+    p4 = add("user", {"text": "Try the migration"})
+    add("assistant", {"text": "Starting the migration."})
+    a4 = add("result", {"ok": False, "error": "engine exploded"})
+    p5 = add("user", {"text": "L" * 5000})
+    a5 = add("assistant", {"text": "A" * 9000})
+    add("result", {"ok": True})
+    p6 = add("user", {"text": "Current question"})
+    a6 = add("assistant", {"text": "Working on it"})
+    search.reconcile()
+    await links.prepare_turn(a, "own", "scan this session's history")
+    listed = (await links.dispatch(a, "own", "sessions", {}))["sessions"]
+    assert listed[0]["ref"] == own and listed[0]["this"] is True, listed[0]
+    assert not any(row.get("this") for row in listed[1:])
+    turns = await links.dispatch(a, "own", "read", {"refs": ["this"], "view": "turns"})
+    page = turns["results"][0]
+    assert page["view"] == "turns" and page["session"]["title"] == "Bug hunt"
+    assert page["total_prompts"] == 6 and page["next_after_seq"] is None
+    rows = page["turns"]
+    assert [row["prompt"]["seq"] for row in rows] == [p1, p2, p3, p4, p5, p6]
+    assert rows[0]["prompt"]["text"] == "Fix the login redirect loop"
+    assert rows[0]["answer"]["seq"] == a1 and rows[0]["answer"]["outcome"] == "ok"
+    assert "double-fires" in rows[0]["answer"]["text"]
+    assert "noise" not in json.dumps(rows), "the turns view carries no tool output"
+    assert rows[1]["answer"]["seq"] == a2 and "still open" in rows[1]["answer"]["text"]
+    assert rows[2]["steered"] is True and "answer" not in rows[2]
+    assert rows[3]["answer"] == dict(rows[3]["answer"], seq=a4, outcome="bad", text="engine exploded")
+    assert rows[4]["prompt"]["truncated"] and rows[4]["prompt"]["chars"] == 5000
+    assert len(rows[4]["prompt"]["text"]) == links.TURN_PROMPT_CHARS
+    assert rows[4]["answer"]["seq"] == a5 and rows[4]["answer"]["chars"] == 9000
+    assert len(rows[4]["answer"]["text"]) == links.TURN_ANSWER_CHARS
+    assert rows[5]["answer"] == dict(rows[5]["answer"], seq=a6, outcome="unfinished", text="Working on it")
+    assert rows[0]["answer"]["source"] == links.source_link(own, a1)
+    # paged by after_seq, in pages of turns, to the same rows
+    seen, after = [], 0
+    while after is not None:
+        got = (await links.dispatch(a, "own", "read", {"refs": ["this"], "view": "turns",
+                                                       "limit": 2, "after_seq": after}))["results"][0]
+        seen.extend(row["prompt"]["seq"] for row in got["turns"])
+        after = got["next_after_seq"]
+    assert seen == [p1, p2, p3, p4, p5, p6], seen
+    # a page stops before its text budget, and goes on where it stopped
+    with patch.object(links, "TURNS_BUDGET", 9000):
+        cut = (await links.dispatch(a, "own", "read", {"refs": ["this"], "view": "turns"}))["results"][0]
+    assert [row["prompt"]["seq"] for row in cut["turns"]] == [p1, p2, p3, p4], cut
+    assert cut["next_after_seq"] == p4
+    # a node's refusal is named per node, as for any read
+    refused = await links.dispatch(a, "own", "read", {"refs": ["this"], "view": "turns", "before_seq": 5})
+    assert "after_seq only" in json.dumps(refused["unavailable"]), refused
+    await rejected(links.node_call("read", {"refs": [own], "view": "turns", "limit": 51}), "integer")
+    await rejected(links.node_call("read", {"refs": [own], "view": "pages"}), "events or turns")
+    # the events view and search reach it too, by ["this"] or its own reference
+    events = (await links.dispatch(a, "own", "read", {"refs": [own], "limit": 2}))["results"][0]
+    assert [event["seq"] for event in events["events"]] == [p6, a6]
+    found = await links.dispatch(a, "own", "search", {"refs": ["this"], "query": "double-fires"})
+    assert found["results"][0]["results"][0]["sid"] == a
+    # past the mentions' boundary: another session mentioned, its own still readable
+    await links.prepare_turn(a, "scoped", "@Session {}:{} compare".format(db.node_uuid(), rb))
+    assert (await links.dispatch(a, "scoped", "read", {"refs": ["this"], "limit": 1}))["results"]
+    assert (await links.dispatch(a, "scoped", "read", {"refs": [own], "limit": 1}))["results"]
+    await rejected(links.dispatch(a, "scoped", "read", {"refs": [rd]}), "outside")
+    # "all" is every other session
+    await links.prepare_turn(a, "every", "@session all find bugs")
+    every = await links.dispatch(a, "every", "search", {"query": "bug"})
+    assert own not in json.dumps(every["results"]) and every["selected"] >= 2
+    # mentioned by the user, it is read with the mentions; it is never sent to
+    await links.prepare_turn(a, "self", "@Session {}:{} list the open bugs".format(db.node_uuid(), own))
+    assert links._scopes[(a, "self")]["refs"] == [own]
+    mine = await links.dispatch(a, "self", "read", {"view": "turns", "limit": 1})
+    assert mine["results"][0]["turns"][0]["prompt"]["seq"] == p1
+    await rejected(links.dispatch(a, "self", "send", {"request_id": "me", "text": "hi"}),
+                   "other sessions")
+    await rejected(links.dispatch(a, "self", "send", {"refs": ["this"], "request_id": "me2", "text": "hi"}),
+                   "cannot send a request to the originating session")
+    await rejected(links.dispatch(a, "self", "send", {"refs": [own], "request_id": "me3", "text": "hi"}),
+                   "cannot send a request to the originating session")
+    await rejected(links.dispatch(a, "self", "coordinate", {"request_id": "w", "steps": [
+        {"id": "s", "refs": [own], "action": "task", "text": "x", "after": []}]}), "originating session")
+    # mentioned beside another, a send reusing the mentions goes to the other alone
+    dest = ControlledSession(b)
+    try:
+        await links.prepare_turn(a, "both", "@Session {node}:{own} @Session {node}:{rb} ask".format(
+            node=db.node_uuid(), own=own, rb=rb))
+        sent = await links.dispatch(a, "both", "send", {"request_id": "implicit", "text": "Any open bugs?"})
+        assert [result["target"] for result in sent["results"]] == [rb], sent
+        assert len(dest.started) == 1
+        dest.finish("None here")
+    finally:
+        dest.patch.stop()
+    # a node that cannot read by turns is asked for nothing it cannot answer
+    with patch.object(links.backends, "node_channel",
+                      lambda bid: {"name": "Old", "capabilities": ["session-references"]}):
+        await rejected(links.remote_call(5, "read", {"refs": [rd], "view": "turns"}), "cannot read by turns")
+    tools = {tool["name"]: tool for tool in session_agent.TOOLS}
+    assert tools["read"]["inputSchema"]["properties"]["view"]["enum"] == ["events", "turns"]
+    assert '[\\"this\\"]' in json.dumps(session_agent.TOOL_INSTRUCTIONS)
+    print("own history: sessions, the turns and events views, search, paging, budget, scope, all, "
+          "and no requests to itself OK")
 
 
 async def main():
@@ -377,6 +499,7 @@ async def main():
     await references()
     await short_references()
     await communication()
+    await own_history()
     await workflows()
     await fleet_and_drivers()
 

@@ -4678,6 +4678,14 @@ async def session_mention_checks(instance):
     })()""")
     value = await evaluate(instance, "demoView.composer.ta.value")
     assert re.fullmatch(r"@Session-Phone-navigation-[A-Z0-9]{4} ", value), value
+    # the session typed in is listed too, first and marked, for its agent to
+    # read its own history
+    await evaluate(instance, "demoView.composer.set('', true); demoView.composer.hideMention(); true")
+    await type_text(instance, "@Session-")
+    await until(instance, "demoView.composer.mentionSession?.data?.sessions.length > 0")
+    first = await evaluate(instance, """(() => { const row = demoView.composer.mention.items
+        .find(i => i.kind === 'session-select'); return [row.label, row.hint]; })()""")
+    assert first[0] == "Harbor dashboard" and first[1].startswith("this session · "), first
     await evaluate(instance, "demoView.composer.set('', true); demoView.composer.hideMention(); true")
     # Rendered links resolve the alias through the real HTTP endpoint.
     await evaluate(instance, """(() => {
@@ -9731,6 +9739,9 @@ async def main(args):
             if args.running_only:
                 await running_list_checks(instances[0], sid, args.screenshots or bool(os.environ.get("RUNNING_SHOT")))
                 return
+            if args.session_mention_only:
+                await session_mention_checks(instances[0])
+                return
             if args.background_tasks_only:
                 await background_count_checks(*instances, runner.hub(sid))
                 await background_task_list_checks(instances[0])
@@ -9839,6 +9850,7 @@ if __name__ == "__main__":
     parser.add_argument("--popout-only", action="store_true")
     parser.add_argument("--running-only", action="store_true")
     parser.add_argument("--background-tasks-only", action="store_true")
+    parser.add_argument("--session-mention-only", action="store_true")
     parser.add_argument("--chat-filter-only", action="store_true")
     parser.add_argument("--show-focus-only", action="store_true")
     parser.add_argument("--thinking-only", action="store_true")

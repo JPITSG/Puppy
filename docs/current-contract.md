@@ -196,6 +196,15 @@ still contain a value written before that release.
   background pauses continue accepting side questions, except for the few
   seconds Puppy's own check on that background work is out (readiness is
   false meanwhile). This changes no stored format or wire capability.
+- The session tools read and search the asking session's own history:
+  `refs: ["this"]` or its own reference pass the mentions' scope, `sessions`
+  lists it first marked `this`, and `["all"]` still means every other session.
+  A session is never sent requests or workflow steps by itself; a send reusing
+  mentions that name it goes to the others. `read` accepts `view: "turns"`
+  (`after_seq`, `limit` up to 50 turns): one row per prompt with that turn's
+  final answer and outcome, texts cut at a stated length, `next_after_seq`
+  until null. A controller asks a backend for it only behind the additive
+  `session-turns-view` capability. No stored format changes.
 - A session's `background_tasks` rows (snapshot and live) carry three optional
   additive fields: `tool_use_id`, the call the engine said started the task;
   `call_seq`, that call's event in the transcript when this turn wrote it; and
