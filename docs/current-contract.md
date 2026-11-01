@@ -379,8 +379,15 @@ changes; while either runs the node is busy like a task apply.
 
 Host activity is additive `host-metrics-v1`: both execution runtimes serve
 `GET /api/host/metrics`, returning that node's in-memory CPU history, its
-cores/load/memory/uptime and the trimmed process tree below its own Puppy
-process. The controller samples already-online backends every four seconds,
+cores/load/memory/uptime, the trimmed process tree below its own Puppy
+process and the additive `disks` object: `mounts` (one row per filesystem
+holding Puppy's program or data directory or a session's working directory -
+`mount`, `fs`, `total`/`used`/`available` bytes from `statvfs`, `puppy`,
+`projects` and up to six sample `paths`; or `error` in place of the sizes),
+`stalled` (mount points whose probe did not answer within a second; each is
+probed in its own thread and not again while that probe is out) and
+`sampled_at`, cached ten seconds. A console reads a node without `disks` as
+one that does not report disk space. The controller samples already-online backends every four seconds,
 independently of viewers. Its `GET /api/backends/latency` returns cached readings
 without probing: each measured row includes `measured_at` and `history` (up to
 40 successful `[seconds, milliseconds]` pairs). Offline rows have empty history;

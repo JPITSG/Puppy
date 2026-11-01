@@ -1,7 +1,8 @@
 "use strict";
 /* The host activity box behind the footer's CPU reading, against the fake DOM:
-   what opening and closing it polls, the drawn CPU chart and its gaps, the
-   latency rows the controller measured, and the trimmed process tree - plus
+   what opening and closing it polls, the drawn CPU chart and its gaps, each
+   node's disks, the latency rows the controller measured, and the trimmed
+   process tree - plus
    every node it must not go and probe. No browser, engine, network or quota. */
 
 const assert = require("node:assert/strict");
@@ -17,6 +18,7 @@ function between(from, to) {
   return source.slice(start, end);
 }
 
+const GIB = 1024 * 1024 * 1024;
 const CPU_SERIES = (at, count, value) =>
   Array.from({ length: count }, (_, index) => [at + index * 3, value + index]);
 
@@ -29,6 +31,20 @@ function metrics(overrides = {}) {
     memory: { total: 16 * 1024 * 1024 * 1024, available: 8 * 1024 * 1024 * 1024,
               used: 8 * 1024 * 1024 * 1024 },
     load: [0.5, 0.25, 0.1], uptime: 90061,
+    disks: {
+      sampled_at: now + 30, stalled: ["/mnt/archive"],
+      mounts: [
+        { mount: "/", fs: "ext4", puppy: true, total: 100 * GIB, used: 40 * GIB,
+          available: 55 * GIB, projects: 2, paths: ["/home/mira/harbor", "/home/mira/notes"] },
+        { mount: "/srv/projects", fs: "xfs", puppy: false, total: 2048 * GIB,
+          used: 1900 * GIB, available: 148 * GIB, projects: 9,
+          paths: ["/srv/projects/a", "/srv/projects/b"] },
+        { mount: "/mnt/scratch", fs: "btrfs", puppy: false, total: 10 * GIB,
+          used: 9.7 * GIB, available: 0.3 * GIB, projects: 1, paths: ["/mnt/scratch/x"] },
+        { mount: "/mnt/locked", fs: "nfs4", puppy: false, projects: 1, paths: [],
+          error: "Permission denied" },
+      ],
+    },
     processes: {
       total: 411, counted: 4, hidden: 0, sampled_at: now + 30,
       root: {
@@ -148,7 +164,7 @@ async function sections() {
   const section = key => app.document.getElementById(`host-section-${key}`);
   const button = key => section(key).querySelector(".disclosure-toggle");
   const body = key => section(key).querySelector(".host-sec-body");
-  for (const key of ["cpu", "latency", "processes"]) {
+  for (const key of ["cpu", "disk", "latency", "processes"]) {
     assert.equal(button(key).getAttribute("aria-expanded"), "true");
     assert.equal(button(key).getAttribute("aria-controls"), body(key).id);
     assert.equal(body(key).hidden, false);
@@ -221,10 +237,8 @@ async function toggling() {
   assert.deepEqual(app.calls, [[0, "host/metrics?window=900"]]);
   // the readings that landed mid-slide re-aim it instead of snapping at the end
   assert.ok(app.aimed() > 0);
-  // one CPU section and one process section, both naming this instance
-  assert.equal(rows(app.panel(), "host-sec").length, 2);
-  assert.equal(text(rows(app.panel(), "host-sec-title")[0]), "CPU");
-  assert.equal(text(rows(app.panel(), "host-sec-title")[1]), "Processes");
+  // CPU, Disk and Processes, each naming this instance (no backend: no latency)
+  assert.deepEqual(rows(app.panel(), "host-sec-title").map(text), ["CPU", "Disk", "Processes"]);
   context.toggleHostPanel();
   assert.equal(app.hostPanel.open, false);
   assert.equal(app.panel().hidden, true);
@@ -339,7 +353,7 @@ async function processTree() {
   /* The root has no rails, so its dot takes the same column as the node head
      above it and as the backends above the box; every deeper row leads with
      its rails instead and is indented past that column. */
-  assert.ok(inDotColumn(rows(app.panel(), "host-node-head")[1], "gdot"));
+  assert.ok(inDotColumn(rows(app.panel(), "host-node-head")[2], "gdot"));
   assert.ok(inDotColumn(tree[0], "host-proc-dot"));
   for (const row of tree.slice(1))
     assert.equal(row.children[0].className, "host-proc-rails");
@@ -363,6 +377,71 @@ async function processTree() {
   assert.ok(tree[2].title.startsWith("5 processes"), tree[2].title);
   const note = text(rows(app.panel(), "host-node-note")[1]);
   assert.equal(note, "4 of 411");
+}
+
+/* ---- disk space: every filesystem the node's work lives on ---- */
+async function diskSpace() {
+  const app = consoleFor({
+    backends: [{ id: 2, name: "Workshop", capabilities: ["host-metrics-v1"] },
+               { id: 3, name: "Old box", capabilities: ["host-metrics-v1"] }],
+    remoteOk: { 2: true, 3: true },
+    answers: {
+      "0:host/metrics": metrics(),
+      "2:host/metrics": new Error("request timed out"),
+      // a backend from before the section answers without it
+      "3:host/metrics": (() => { const old = metrics(); delete old.disks; return old; })(),
+      "0:backends/latency": { backends: [{ id: 2, name: "Workshop", ok: true, ms: 2 },
+                                         { id: 3, name: "Old box", ok: true, ms: 3 }] } },
+  });
+  app.context.openHostPanel();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  // between CPU and Latency
+  assert.deepEqual(rows(app.panel(), "host-sec-title").map(text),
+    ["CPU", "Disk", "Latency", "Processes"]);
+  const section = app.document.getElementById("host-section-disk");
+  const groups = section.querySelectorAll(".host-node");
+  assert.deepEqual(groups.map(group => text(group.querySelector(".host-node-name"))),
+    ["this instance", "Workshop", "Old box"], "one group per node, as the CPU section");
+  const here = groups[0].querySelectorAll(".host-disk");
+  assert.deepEqual(here.map(row => text(row.querySelector(".host-disk-name"))),
+    ["/", "/srv/projects", "/mnt/scratch", "/mnt/locked", "/mnt/archive"],
+    "the node's order, then the mounts that did not answer");
+  for (const row of here) assert.ok(inDotColumn(row, "gdot"), "the footer's dot column");
+  // Puppy's own mount says so
+  assert.deepEqual(here.map(row => text(row.querySelector(".host-disk-tag"))),
+    ["Puppy", "", "", "", ""]);
+  // the figure in words, the meter and the dot in one tone
+  assert.deepEqual(here.map(row => text(row.querySelector(".host-disk-free"))),
+    ["55.0G free", "148G free", "307M free", "unreadable", "no answer"]);
+  const meter = row => row.querySelector(".host-disk-meter");
+  const dot = row => row.querySelector(".gdot").className;
+  assert.deepEqual(here.map(dot),
+    ["gdot ok", "gdot warn", "gdot bad", "gdot", "gdot"]);
+  assert.equal(meter(here[0]).className, "host-disk-meter");
+  assert.equal(meter(here[1]).className, "host-disk-meter warn");
+  assert.equal(meter(here[2]).className, "host-disk-meter bad");
+  assert.equal(meter(here[3]), null, "no meter for a mount not read");
+  assert.equal(meter(here[4]), null);
+  assert.equal(here[3].querySelector(".host-disk-free").className, "host-disk-free quiet");
+  // the share in use is used over used and free, as df counts it
+  const used = 40 / 95 * 100;
+  assert.equal(meter(here[0]).querySelector(".host-disk-fill").style.width, `${used}%`);
+  assert.equal(meter(here[0]).getAttribute("aria-label"), "42% used");
+  assert.equal(here[0].title, "/ · ext4 · 40.0G of 100G used (42% used) · 55.0G free · " +
+    "holds Puppy · 2 projects: /home/mira/harbor, /home/mira/notes");
+  assert.ok(here[1].title.endsWith("9 projects: /srv/projects/a, /srv/projects/b, …"), here[1].title);
+  assert.equal(here[1].querySelector(".host-disk-free").textContent, "148G free");
+  // four figures and a unit at most, so every figure fits one width
+  assert.deepEqual([0, 512, 99.94 * 1024, 1023.6 * GIB, 1.5 * 1024 * GIB, 5 * 1024 ** 5]
+    .map(app.context.hostDiskBytes), ["0B", "512B", "99.9K", "1024G", "1.5T", "5.0P"]);
+  assert.equal(here[3].title, "/mnt/locked · nfs4 · Permission denied · 1 project");
+  assert.equal(here[4].title, "/mnt/archive · did not answer in time · asked again on a later read");
+  // a node that could not be read, and one from before the section
+  assert.equal(text(groups[1].querySelector(".host-empty")), "request timed out");
+  assert.equal(text(groups[2].querySelector(".host-empty")),
+    "This backend does not report disk space");
+  assert.equal(groups[2].querySelectorAll(".host-disk").length, 0);
+  app.context.closeHostPanel();
 }
 
 /* ---- backends: latency the controller measured, and what is never probed ---- */
@@ -421,8 +500,8 @@ async function backends() {
     `L66.67 ${(100 - (4 / (15.2 * 1.15)) * 100).toFixed(2)}L100.00 ${peak}`);
   assert.ok(spark.querySelector(".host-chart-area"));
   assert.ok(spark.querySelector(".host-chart-floor"));
-  // three reachable nodes, each with one chart block and one process block
-  assert.equal(rows(app.panel(), "host-node").length, 6);
+  // three reachable nodes, each with one chart, one disk and one process block
+  assert.equal(rows(app.panel(), "host-node").length, 9);
   // a failed read keeps the tree that node last served rather than blanking it
   app.hostPanel.nodes.set(2, { data: metrics(), error: "network error" });
   context.renderHostPanel();
@@ -486,17 +565,17 @@ async function allUnreachable() {
   context.toggleHostPanel();
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(rows(app.panel(), "host-ping").length, 0);
-  // CPU and Processes only, both holding this instance alone
-  assert.deepEqual(rows(app.panel(), "host-sec-title").map(text), ["CPU", "Processes"]);
+  // CPU, Disk and Processes only, each holding this instance alone
+  assert.deepEqual(rows(app.panel(), "host-sec-title").map(text), ["CPU", "Disk", "Processes"]);
   assert.deepEqual(rows(app.panel(), "host-node-name").map(text),
-    ["this instance", "this instance"]);
+    ["this instance", "this instance", "this instance"]);
   // and it comes back the moment the health worker says the node is up
   app.state.remoteOk[2] = true;
   context.renderHostPanel();
   assert.deepEqual(rows(app.panel(), "host-sec-title").map(text),
-    ["CPU", "Latency", "Processes"]);
+    ["CPU", "Disk", "Latency", "Processes"]);
   assert.deepEqual(rows(app.panel(), "host-node-name").map(text),
-    ["this instance", "nas", "this instance", "nas"]);
+    ["this instance", "nas", "this instance", "nas", "this instance", "nas"]);
 }
 
 /* ---- with no backends configured there is nothing to measure ---- */
@@ -506,7 +585,7 @@ async function soloInstance() {
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.deepEqual(app.calls, [[0, "host/metrics?window=900"]]);
   assert.equal(rows(app.panel(), "host-ping").length, 0);
-  assert.equal(rows(app.panel(), "host-sec").length, 2);
+  assert.equal(rows(app.panel(), "host-sec").length, 3, "CPU, Disk and Processes");
 }
 
 /* ---- a node still collecting, and one that failed ---- */
@@ -528,6 +607,7 @@ async function emptyStates() {
 async function main() {
   await toggling();
   await sections();
+  await diskSpace();
   charting();
   await liveSamples();
   await processTree();

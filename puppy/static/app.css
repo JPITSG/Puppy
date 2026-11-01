@@ -603,9 +603,9 @@ html.popout body::after{--side-w:0px}
 .gdot.info{background:var(--acc)}
 
 /* ---------- host activity ----------
-   Opened by the CPU reading and stacked under the engine stats: this node's
-   CPU history, the round trip to each backend, and the processes Puppy runs
-   on every node. It scrolls on its own, and while it is open the engine box
+   Opened by the CPU reading and stacked under the engine stats: each node's
+   CPU history, the free space its work lives on, the round trip to each
+   backend, and the processes Puppy runs on every node. It scrolls on its own, and while it is open the engine box
    gives up height rather than the session list. */
 .side-foot.host-open .foot-engines,.side-foot.notices-open .foot-engines{max-height:22dvh}
 .foot-host{
@@ -681,6 +681,30 @@ html.popout body::after{--side-w:0px}
 }
 .host-chart.spark+.host-ping-ms{margin-left:0}
 .host-ping-ms.bad{color:var(--err)}
+/* A disk is a latency row with a meter in the sparkline's place: the share
+   in use on a lighter track of its own hue (blue, warn or bad), and the free
+   space at the end in a fixed width, so one node's meters stand in a column. */
+.host-disk{display:flex;align-items:center;gap:6px;min-width:0;min-height:16px}
+.host-disk-name{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font:var(--fs-2xs) var(--mono);color:var(--txt2);
+}
+.host-disk-tag{flex:0 0 auto;font:var(--fs-2xs) var(--sans);color:var(--txt3)}
+.host-disk-meter{
+  flex:0 0 46px;width:46px;height:4px;margin-left:auto;display:flex;
+  border-radius:2px;background:var(--acc-dim);overflow:hidden;
+}
+.host-disk-fill{flex:0 0 auto;min-width:4px;border-radius:2px;background:var(--acc2)}
+.host-disk-meter.warn{background:var(--warn-dim)}
+.host-disk-meter.warn .host-disk-fill{background:var(--warn)}
+.host-disk-meter.bad{background:var(--err-dim)}
+.host-disk-meter.bad .host-disk-fill{background:var(--err)}
+.host-disk-free{
+  flex:0 0 auto;min-width:10ch;margin-left:auto;text-align:right;
+  font:var(--fs-2xs) var(--mono);color:var(--txt2);font-variant-numeric:tabular-nums;
+}
+.host-disk-meter+.host-disk-free{margin-left:0}
+.host-disk-free.quiet{color:var(--txt3)}
 /* The tree's own rails, drawn in the row rather than around it: one cell per
    level, a bar only where that ancestor still has rows below, and an elbow at
    the row's own level - a tee while siblings follow, a corner for the last of

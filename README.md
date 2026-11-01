@@ -1029,12 +1029,20 @@ with a window of history around it.
 - **Host activity.** The CPU reading in the footer's corner (a bare
   percentage beside the connection dot, which pulses red while the console has
   lost its instance) opens a box under
-  the engine stats. CPU, Latency and Processes each have a chevron to collapse
-  or expand their contents. All three start expanded on a fresh page and keep
-  their choices through live updates and closing/reopening the box. Each node
-  draws its own CPU over the last quarter of an hour - the instance's own chart
-  keeps moving with its live reading - beside its cores, load, memory and
-  uptime. Where backends are paired, the instance
+  the engine stats. CPU, Disk, Latency and Processes each have a chevron to
+  collapse or expand their contents. All four start expanded on a fresh page
+  and keep their choices through live updates and closing/reopening the box.
+  Each node draws its own CPU over the last quarter of an hour - the
+  instance's own chart keeps moving with its live reading - beside its cores,
+  load, memory and uptime. Under Disk, each node lists the free space on every
+  filesystem its work lives on: the one holding Puppy (or the headless
+  backend) and its data, marked **Puppy**, and every one holding a session's
+  project. Each row has a meter of the share in use that turns amber from 90%
+  and red from 95%, and a hover names the filesystem, the sizes and the
+  projects on it. The reading is best effort: a mount that does not answer
+  within a second (a network share whose server went away) shows "no answer"
+  instead of holding up the box, and is asked again on a later read once it
+  has come back. Where backends are paired, the instance
   samples the round trip to each reachable backend every four seconds, even
   with the box closed or no browsers connected. It keeps only the last 40
   successful measurements per backend in memory, so opening the box loads an
@@ -1399,8 +1407,8 @@ node tests/token_usage_ui_test.js    # the Token usage sheet: nodes asked, sums,
 python3 tests/schedules_test.py      # scheduled prompts: timing, shapes, runs through the runner, both runtimes
 node tests/schedules_ui_test.js      # the Schedules sheet, a schedule's history and the editor
 python3 tests/token_usage_test.py    # the token ledger: counts, day records, the report and its route
-node tests/host_panel_ui_test.js     # the host box: charts, latency rows, process tree
-python3 tests/host_metrics_test.py   # CPU history, the process tree and backend latency
+node tests/host_panel_ui_test.js     # the host box: charts, disks, latency rows, process tree
+python3 tests/host_metrics_test.py   # CPU history, disk space, the process tree and backend latency
 python3 tests/backend_test.py        # headless package, auth, protocol, capabilities
 python3 tests/snapshot_test.py       # backup export/import and rollback
 python3 tests/backup_schedule_test.py # daily backups, rotation, downloads, recovery and the archive limit

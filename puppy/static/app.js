@@ -8857,6 +8857,95 @@ function paintHostNode(bid) {
   ].filter(Boolean).join(" · ");
 }
 
+/* ---- the disk section: the free space each node's work lives on ----
+   One row per filesystem holding the node's Puppy (its program or data) or
+   a session's project, on the latency rows' shape: a dot in the footer's dot
+   column, the mount point, a meter in the sparkline's place and the free
+   space at the end. The meter is the share in use on a lighter track of its
+   own hue, blue, and warn and bad from HOST_DISK_WARN and HOST_DISK_BAD, the
+   dot saying the same; the figure beside it says it in words. A mount the
+   node could not ask in time is a muted row that says so - the node never
+   waits on one, and asks it again on a later read. */
+const HOST_DISK_WARN = 0.9;
+const HOST_DISK_BAD = 0.95;
+
+/* Free space at most four figures and a unit ("148G", "55.3G", "1.5T"), so
+   every row's figure fits one width and the meters before it one column. */
+function hostDiskBytes(value) {
+  let amount = Math.max(0, Number(value) || 0), unit = 0;
+  const units = ["B", "K", "M", "G", "T", "P"];
+  while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit++; }
+  const shown = amount >= 100 || unit === 0 ? String(Math.round(amount)) : amount.toFixed(1);
+  return `${shown}${units[unit]}`;
+}
+
+function hostDiskRow(mount) {
+  const line = el("div", "host-disk");
+  const total = Number(mount.total) || 0;
+  const used = Math.max(0, Number(mount.used) || 0);
+  const available = Math.max(0, Number(mount.available) || 0);
+  const known = !mount.stalled && !mount.error && total > 0;
+  const share = known ? used / Math.max(1, used + available) : null;
+  const tone = !known ? "" : share >= HOST_DISK_BAD ? "bad" : share >= HOST_DISK_WARN ? "warn" : "ok";
+  const dot = el("span", "gdot" + (tone ? ` ${tone}` : ""));
+  dot.setAttribute("role", "img");
+  dot.setAttribute("aria-label", !known ? "not read" :
+    tone === "ok" ? "space to spare" : tone === "warn" ? "running low" : "nearly full");
+  line.appendChild(footIcon(dot));
+  line.appendChild(el("span", "host-disk-name", String(mount.mount || "?")));
+  if (mount.puppy) line.appendChild(el("span", "host-disk-tag", "Puppy"));
+  const percent = known ? `${Math.round(share * 100)}% used` : "";
+  if (known) {
+    const meter = el("span", "host-disk-meter" + (tone === "ok" ? "" : ` ${tone}`));
+    meter.setAttribute("role", "img");
+    meter.setAttribute("aria-label", percent);
+    if (share > 0) meter.appendChild(el("span", "host-disk-fill")).style.width =
+      `${Math.min(100, share * 100)}%`;
+    line.appendChild(meter);
+  }
+  line.appendChild(el("span", "host-disk-free" + (known ? "" : " quiet"),
+    known ? `${hostDiskBytes(available)} free` : mount.stalled ? "no answer" : "unreadable"));
+  const projects = Number(mount.projects) || 0;
+  const paths = Array.isArray(mount.paths) ? mount.paths : [];
+  line.title = [
+    String(mount.mount || ""),
+    mount.fs || "",
+    known ? `${hostDiskBytes(used)} of ${hostDiskBytes(total)} used (${percent})` : "",
+    known ? `${hostDiskBytes(available)} free` : "",
+    mount.stalled ? "did not answer in time · asked again on a later read" : "",
+    mount.error ? String(mount.error) : "",
+    mount.puppy ? "holds Puppy" : "",
+    projects ? `${projects} ${projects === 1 ? "project" : "projects"}` +
+      (paths.length ? `: ${paths.join(", ")}${projects > paths.length ? ", …" : ""}` : "") : "",
+  ].filter(Boolean).join(" · ");
+  return line;
+}
+
+function hostDiskGroup(node) {
+  const group = el("div", "host-node");
+  const head = el("div", "host-node-head");
+  head.appendChild(hostNodeDot(node));
+  head.appendChild(el("span", "host-node-name", node.name));
+  group.appendChild(head);
+  const entry = hostPanel.nodes.get(node.bid) || {};
+  const disks = entry.data && entry.data.disks;
+  if (entry.data && (!disks || !Array.isArray(disks.mounts))) {
+    group.appendChild(el("div", "host-empty", "This backend does not report disk space"));
+    return group;
+  }
+  if (!disks) {
+    group.appendChild(el("div", "host-empty", entry.error || "Reading…"));
+    return group;
+  }
+  const stalled = Array.isArray(disks.stalled) ? disks.stalled : [];
+  for (const mount of disks.mounts)
+    if (mount && typeof mount === "object") group.appendChild(hostDiskRow(mount));
+  for (const point of stalled) group.appendChild(hostDiskRow({ mount: point, stalled: true }));
+  if (!disks.mounts.length && !stalled.length)
+    group.appendChild(el("div", "host-empty", "No filesystem found"));
+  return group;
+}
+
 /* ---- the latency section: this instance to each paired backend ---- */
 function hostLatencyRow(row) {
   const line = el("div", "host-ping");
@@ -8994,6 +9083,7 @@ function renderHostPanel() {
   const nodes = hostPanelNodes();
   const sections = [];
   sections.push(hostSection("cpu", "CPU", nodes.map(hostCpuBlock)));
+  sections.push(hostSection("disk", "Disk", nodes.map(hostDiskGroup)));
   const latency = hostLatencySection();
   if (latency) sections.push(latency);
   sections.push(hostSection("processes", "Processes", nodes.map(hostProcessGroup)));

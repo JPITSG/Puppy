@@ -8171,7 +8171,7 @@ async def host_section_checks(instance, capture=False):
                     });
                 })()""")
                 assert spacing, (width, theme)
-                for key in ("cpu", "latency", "processes"):
+                for key in ("cpu", "disk", "latency", "processes"):
                     selector = "#host-section-" + key
                     point = await evaluate(instance, """(() => {
                         const button=document.querySelector(%s+' .disclosure-toggle');
@@ -8210,10 +8210,11 @@ async def host_section_checks(instance, capture=False):
                         and kept["expanded"] == "false", (width, theme, key, kept)
                     await until(instance, "document.querySelector(%s+' .host-sec-body').hidden" %
                                 json.dumps(selector))
-                assert await evaluate(instance, "document.querySelectorAll('.host-sec-body[hidden]').length===3")
+                assert await evaluate(instance, "document.querySelectorAll('.host-sec-body[hidden]').length===4")
                 assert await evaluate(instance, "$('foot-host').scrollHeight <= $('foot-host').clientHeight"), "Collapsed sections must not leave a scrollbar"
                 # Native keyboard activation works with both Enter and Space.
                 for key, name, code, number in [("cpu", "Enter", "Enter", 13),
+                                               ("disk", " ", "Space", 32),
                                                ("latency", " ", "Space", 32),
                                                ("processes", "Enter", "Enter", 13)]:
                     selector = "#host-section-" + key
@@ -8256,7 +8257,8 @@ async def host_section_checks(instance, capture=False):
 async def host_panel_checks(instance, capture=False):
     """The CPU reading's box, in a real browser: a real click opens it, the
     node answers over the real HTTP route, the chart is drawn where the data
-    says, the tree indents, and the box scrolls instead of the sidebar."""
+    says, the disks stand in one column under it, the tree indents, and the
+    box scrolls instead of the sidebar."""
     await instance.call("Emulation.setDeviceMetricsOverride", {
         "width": 1440, "height": 900, "deviceScaleFactor": 1,
         "mobile": False}, session=instance.page_session)
@@ -8329,6 +8331,8 @@ async def host_panel_checks(instance, capture=False):
                              '.gdot', '.host-node-name'),
                 process:measure(document.querySelector('.host-proc'),
                                 '.host-proc-dot', '.host-proc-name'),
+                disk:measure(document.querySelector('.host-disk'),
+                             '.gdot', '.host-disk-name'),
             };
         })()""")
         for row in column.values():
@@ -8407,6 +8411,61 @@ async def host_panel_checks(instance, capture=False):
         assert layout["column"] < 0.5 and layout["stretched"], layout
         assert "×5" in layout["labels"][2] and layout["labels"][3] == "+2 more", layout
         assert layout["inside"], layout
+        # The node's disks, between CPU and the processes: its own answer
+        # first (the mount holding this test's Puppy, marked), then a set of
+        # mounts to measure - every meter and figure in one column at the
+        # row's end, a fill as long as the share in use in its tone, a long
+        # mount point cut short, nothing past the box, in both themes.
+        served_disks = await evaluate(instance, """(() => {
+            const disks=hostPanel.nodes.get(0).data.disks;
+            return {count:disks.mounts.length, puppy:disks.mounts[0].puppy,
+                    stalled:disks.stalled.length,
+                    tag:document.querySelector('#host-section-disk .host-disk-tag')?.textContent,
+                    ids:[...$('foot-host').children].map(c=>c.id)};
+        })()""")
+        assert served_disks["count"] >= 1 and served_disks["puppy"] is True, served_disks
+        assert served_disks["stalled"] == 0 and served_disks["tag"] == "Puppy", served_disks
+        assert served_disks["ids"][:2] == ["host-section-cpu", "host-section-disk"], served_disks
+        assert served_disks["ids"][-1] == "host-section-processes", served_disks
+        for theme in ("dark", "light"):
+            await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+            await asyncio.sleep(.3)
+            disks = await evaluate(instance, """(() => {
+                const G=1024**3;
+                hostPanel.nodes.get(0).data.disks={sampled_at:Date.now()/1000, stalled:['/mnt/archive'], mounts:[
+                  {mount:'/',fs:'ext4',puppy:true,total:100*G,used:40*G,available:55*G,projects:2,paths:['/home/mira/harbor']},
+                  {mount:'/srv/projects',fs:'xfs',puppy:false,total:2048*G,used:1900*G,available:148*G,projects:9,paths:[]},
+                  {mount:'/mnt/a-very-long-mount-point-name/that/keeps/going',fs:'btrfs',puppy:false,
+                   total:10*G,used:9.7*G,available:.3*G,projects:1,paths:[]}]};
+                renderHostPanel();
+                const r=n=>n.getBoundingClientRect();
+                const rows=[...document.querySelectorAll('#host-section-disk .host-disk')];
+                const meters=rows.map(row=>row.querySelector('.host-disk-meter')).filter(Boolean);
+                const free=rows.map(row=>row.querySelector('.host-disk-free'));
+                const probe=v=>{const p=document.createElement('span');p.style.color=v;
+                    document.body.append(p);const c=getComputedStyle(p).color;p.remove();return c;};
+                const name=rows[2].querySelector('.host-disk-name');
+                const box=r($('foot-host'));
+                return {count:rows.length,
+                  meterRights:[...new Set(meters.map(m=>Math.round(r(m).right*2)/2))],
+                  meterHeights:[...new Set(meters.map(m=>r(m).height))],
+                  freeRights:[...new Set(free.map(f=>Math.round(r(f).right*2)/2))],
+                  inside:rows.every(row=>row.scrollWidth<=row.clientWidth+1 && r(row).right<=box.right+.5),
+                  cut:name.scrollWidth>name.clientWidth,
+                  fills:meters.map(m=>Math.round(r(m.querySelector('.host-disk-fill')).width/r(m).width*100)),
+                  colors:meters.map(m=>getComputedStyle(m.querySelector('.host-disk-fill')).backgroundColor),
+                  tones:[probe('var(--acc2)'),probe('var(--warn)'),probe('var(--err)')],
+                  heights:[...new Set(rows.map(row=>Math.round(r(row).height)))],
+                  quiet:getComputedStyle(free[3]).color===probe('var(--txt3)')};
+            })()""")
+            assert disks["count"] == 4, (theme, disks)
+            assert len(disks["meterRights"]) == 1 and disks["meterHeights"] == [4], (theme, disks)
+            assert len(disks["freeRights"]) == 1, (theme, disks)
+            assert disks["inside"] and disks["cut"], (theme, disks)
+            assert disks["fills"] == [42, 93, 97], (theme, disks)
+            assert disks["colors"] == disks["tones"], (theme, disks)
+            assert len(disks["heights"]) == 1 and disks["quiet"], (theme, disks)
+        await evaluate(instance, "applyTheme('dark'); true")
         await host_section_checks(instance, capture)
         # It is the box that scrolls, not the session list under it.
         scrolling = await evaluate(instance, """(() => {
@@ -9845,6 +9904,9 @@ async def main(args):
                 await background_count_checks(*instances, runner.hub(sid))
                 await background_task_list_checks(instances[0])
                 return
+            if args.host_panel_only:
+                await host_panel_checks(instances[0], args.screenshots)
+                return
             if args.notices_only:
                 await notices_panel_checks(instances[0], args.screenshots)
                 await notice_wrapping_checks(instances[0], args.screenshots)
@@ -9946,6 +10008,7 @@ if __name__ == "__main__":
     parser.add_argument("--navigation-only", action="store_true")
     parser.add_argument("--model-substitute-only", action="store_true")
     parser.add_argument("--notices-only", action="store_true")
+    parser.add_argument("--host-panel-only", action="store_true")
     parser.add_argument("--popout-only", action="store_true")
     parser.add_argument("--running-only", action="store_true")
     parser.add_argument("--background-tasks-only", action="store_true")
