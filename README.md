@@ -1030,8 +1030,14 @@ with a window of history around it.
   percentage beside the connection dot, which pulses red while the console has
   lost its instance) opens a box under
   the engine stats. CPU, Disk, Latency and Processes each have a chevron to
-  collapse or expand their contents. All four start expanded on a fresh page
-  and keep their choices through live updates and closing/reopening the box.
+  collapse or expand their contents. Every opening shows them collapsed,
+  except a section whose status is not green, which opens by itself once the
+  box has read it: CPU when a node cannot be read or works at 90% or more,
+  Disk when a filesystem is 90% full or more or did not answer, Latency when
+  a round trip fails (Processes has no status of its own). A section that
+  stops being green while the box is open opens too, and none folds away by
+  itself. A chevron you press keeps your choice through live updates until
+  the box closes; the next opening starts over.
   Each node draws its own CPU over the last quarter of an hour - the
   instance's own chart keeps moving with its live reading - beside its cores,
   load, memory and uptime. Under Disk, each node lists the free space on every

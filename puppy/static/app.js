@@ -2111,6 +2111,8 @@ function disclosureButton(label, body, collapsedKeys, storageKey, itemKey) {
     if (storageKey) saveStringSet(storageKey, collapsedKeys);
     sync(true);
   };
+  /* for an owner that changes the set itself (the host box's sections) */
+  button.syncDisclosure = sync;
   sync();
   return button;
 }
@@ -8489,8 +8491,17 @@ const hostPanel = {
   pings: new Map(),      // bid -> [[seconds, milliseconds]]
   latency: [], latencyError: "",
   charts: new Map(),     // bid -> the parts one live sample repaints
-  collapsed: new Set(),  // section keys; presentation only, expanded on a fresh page
+  /* Section keys folded shut, presentation only. Every opening starts them
+     all shut; a section whose status is not green opens by itself once this
+     opening has read it (HOST_SECTION_ATTENTION), and the sections the
+     person toggled (`touched`) keep their choice until the box closes. */
+  collapsed: new Set(),
+  touched: new Set(),
+  seen: new Set(),       // what this opening has read: "nodes", "latency"
 };
+const HOST_SECTION_KEYS = ["cpu", "disk", "latency", "processes"];
+/* A node working this hard counts as not green, like a disk this full. */
+const HOST_CPU_WARN = 90;
 
 /* The live stream keeps this node's chart moving between polls, so the box
    never looks frozen while it waits for the next fetch. */
@@ -8541,6 +8552,10 @@ function openHostPanel() {
   if (hostPanel.open) return;
   closeNoticesPanel();           // the footer holds one box under the engine stats
   hostPanel.open = true;
+  hostPanel.touched.clear();
+  hostPanel.seen.clear();
+  hostPanel.collapsed.clear();
+  for (const key of HOST_SECTION_KEYS) hostPanel.collapsed.add(key);
   syncHostCpuButton();
   renderHostPanel();
   slideHostPanel();
@@ -8604,6 +8619,7 @@ async function readHostNodes(sequence) {
       keep({ data: previous.data || null, error: error.message || "could not read host activity" });
     }
   }));
+  if (sequence === hostPanel.sequence) hostPanel.seen.add("nodes");
 }
 
 async function readHostLatency(sequence) {
@@ -8611,6 +8627,7 @@ async function readHostLatency(sequence) {
     hostPanel.latency = [];
     hostPanel.pings.clear();
     hostPanel.latencyError = "";
+    hostPanel.seen.add("latency");
     return;
   }
   try {
@@ -8628,11 +8645,13 @@ async function readHostLatency(sequence) {
         point[1] >= 0);
       hostPanel.pings.set(row.id, series);
     }
+    hostPanel.seen.add("latency");
     // Cached latency can paint immediately, even if a node's process read is slow.
     if (hostPanel.open) renderHostPanel();
   } catch (error) {
     if (sequence !== hostPanel.sequence) return;
     hostPanel.latencyError = error.message || "could not measure latency";
+    hostPanel.seen.add("latency");
   }
 }
 
@@ -8784,6 +8803,8 @@ function hostSection(key, title, content) {
     head.appendChild(el("span", "host-sec-title", title));
     const body = el("div", "host-sec-body");
     const button = disclosureButton(title, body, hostPanel.collapsed, null, key);
+    // the person's own choice holds for the rest of this opening
+    button.addEventListener("click", () => hostPanel.touched.add(key));
     head.appendChild(button);
     wireDisclosureSurface(head, button);
     section.appendChild(head);
@@ -8791,8 +8812,50 @@ function hostSection(key, title, content) {
   }
   const body = section.querySelector(".host-sec-body");
   body.replaceChildren(...content);
+  /* a status that opened the section, or a new opening that shut it */
+  const button = section.querySelector(".disclosure-toggle");
+  if ((button.getAttribute("aria-expanded") === "true") === hostPanel.collapsed.has(key))
+    button.syncDisclosure(true);
   refreshDisclosureHeight(body);
   return section;
+}
+
+/* Which sections are not green, from what this opening has read: CPU when a
+   node could not be read or works at HOST_CPU_WARN or more, Disk when a
+   filesystem is at HOST_DISK_WARN or more, did not answer or could not be
+   read, Latency when a round trip failed. Processes have no status of their
+   own. An untouched section that is not green opens; none shuts by itself
+   while the box is open, so nothing folds away under the reader. */
+function hostSectionAttention(nodes) {
+  const attention = new Set();
+  if (hostPanel.seen.has("nodes")) {
+    for (const node of nodes) {
+      const entry = hostPanel.nodes.get(node.bid) || {};
+      if (!node.supported) continue;
+      if (!entry.data && entry.error) attention.add("cpu");
+      const series = hostSeries(node.bid);
+      if (series.length && series[series.length - 1][1] >= HOST_CPU_WARN) attention.add("cpu");
+      const disks = entry.data && entry.data.disks;
+      if (disks && Array.isArray(disks.mounts)) {
+        if (Array.isArray(disks.stalled) && disks.stalled.length) attention.add("disk");
+        for (const mount of disks.mounts) {
+          const total = Number(mount && mount.total) || 0;
+          const used = Math.max(0, Number(mount && mount.used) || 0);
+          const available = Math.max(0, Number(mount && mount.available) || 0);
+          if (!mount || mount.error || total <= 0 ||
+              used / Math.max(1, used + available) >= HOST_DISK_WARN) attention.add("disk");
+        }
+      }
+    }
+  }
+  if (hostPanel.seen.has("latency")) {
+    const paired = new Set(state.backends.filter(backend =>
+      state.remoteOk[backend.id] !== false).map(backend => backend.id));
+    if (paired.size && hostPanel.latencyError) attention.add("latency");
+    for (const row of hostPanel.latency)
+      if (row && paired.has(row.id) && !row.offline && row.ok !== true) attention.add("latency");
+  }
+  return attention;
 }
 
 /* ---- the CPU section: one chart per node, this instance first ---- */
@@ -9081,6 +9144,8 @@ function renderHostPanel() {
   const scrolled = root.scrollTop;
   hostPanel.charts.clear();
   const nodes = hostPanelNodes();
+  for (const key of hostSectionAttention(nodes))
+    if (!hostPanel.touched.has(key)) hostPanel.collapsed.delete(key);
   const sections = [];
   sections.push(hostSection("cpu", "CPU", nodes.map(hostCpuBlock)));
   sections.push(hostSection("disk", "Disk", nodes.map(hostDiskGroup)));

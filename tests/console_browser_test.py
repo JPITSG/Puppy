@@ -30,7 +30,7 @@ os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from puppy import auth, backends, browser, config, db, notices, runner, search, session_directories, session_git, session_tasks, session_aliases, terminal, token_usage, uploads, workspaces
+from puppy import auth, backends, browser, config, db, host_metrics, notices, runner, search, session_directories, session_git, session_tasks, session_aliases, terminal, token_usage, uploads, workspaces
 from puppy import web as webui
 from puppy.drivers import all_drivers, get_driver
 
@@ -8151,6 +8151,12 @@ async def host_section_checks(instance, capture=False):
                 chart:!!document.querySelector('.host-ping .host-chart.spark')};
         })()""")
         assert drawn["count"] >= 3 and drawn["chart"], drawn
+        # the new peer's Latency is green, so it came in shut: open it as the
+        # person would, so every section starts this check open
+        assert await evaluate(instance, "document.querySelector('#host-section-latency "
+                                        ".disclosure-toggle').getAttribute('aria-expanded')==='false'")
+        await evaluate(instance, "document.querySelector('#host-section-latency .disclosure-toggle').click(); true")
+        await until(instance, "!document.querySelector('.host-sec-body.disclosure-animating')")
         for width, height in [(1440, 900), (390, 844)]:
             await instance.call("Emulation.setDeviceMetricsOverride", {
                 "width": width, "height": height, "deviceScaleFactor": 1,
@@ -8270,6 +8276,13 @@ async def host_panel_checks(instance, capture=False):
         return {x:r.x+r.width/2, y:r.y+r.height/2, expanded:chip.getAttribute('aria-expanded')};
     })()""")
     assert point["expanded"] == "false", point
+    # The node's disks answer with one nearly full filesystem while the box
+    # opens, so its Disk section is not green; everything green stays shut.
+    real_disks = host_metrics.disks
+    host_metrics.disks = lambda projects=(), now=None, **_: {
+        "mounts": [{"mount": "/", "fs": "ext4", "puppy": True, "total": 100 << 30,
+                    "used": 96 << 30, "available": 4 << 30, "projects": 1, "paths": []}],
+        "stalled": [], "sampled_at": time.time()}
     for kind in ("mousePressed", "mouseReleased"):
         await instance.call("Input.dispatchMouseEvent", {
             "type": kind, "x": point["x"], "y": point["y"], "button": "left",
@@ -8282,6 +8295,33 @@ async def host_panel_checks(instance, capture=False):
         await until(instance, "hostPanel.open && document.querySelectorAll('.host-proc').length > 0")
         await until(instance, "!document.getElementById('foot-host')"
                               ".classList.contains('disclosure-animating')")
+        # Every opening shows its sections shut and opens what is not green
+        # once it has read it: the disks here, the CPU only at 90% or more.
+        await until(instance, "hostPanel.seen.has('nodes') && document.querySelector("
+                              "'#host-section-disk .disclosure-toggle').getAttribute('aria-expanded')==='true'")
+        opened = await evaluate(instance, """(() => {
+            const series=hostSeries(0), cpu=series.length?series[series.length-1][1]:0;
+            const state=key=>document.querySelector('#host-section-'+key+' .disclosure-toggle')
+                .getAttribute('aria-expanded');
+            return {cpu, states:Object.fromEntries(['cpu','disk','processes'].map(k=>[k,state(k)]))};
+        })()""")
+        assert opened["states"] == {"cpu": "true" if opened["cpu"] >= 90 else "false",
+                                    "disk": "true", "processes": "false"}, opened
+        host_metrics.disks = real_disks
+        # the rest of the box is measured open: real clicks on the shut ones
+        for key in ("cpu", "processes"):
+            toggle = await evaluate(instance, """(() => {
+                const button=document.querySelector('#host-section-%s .disclosure-toggle');
+                if (button.getAttribute('aria-expanded')==='true') return null;
+                const r=button.getBoundingClientRect(); return {x:r.x+r.width/2, y:r.y+r.height/2};
+            })()""" % key)
+            if toggle:
+                for kind in ("mousePressed", "mouseReleased"):
+                    await instance.call("Input.dispatchMouseEvent", dict(
+                        toggle, type=kind, button="left", clickCount=1), session=instance.page_session)
+        await until(instance, "[...document.querySelectorAll('#foot-host .disclosure-toggle')]"
+                              ".every(b=>b.getAttribute('aria-expanded')==='true') && "
+                              "!document.querySelector('.host-sec-body.disclosure-animating')")
         served = await evaluate(instance, """(() => {
             const data=hostPanel.nodes.get(0).data;
             return {pid:data.processes.root.pid, label:data.processes.root.label,
@@ -8510,6 +8550,7 @@ async def host_panel_checks(instance, capture=False):
                            "border": "0px", "margin": "0px",
                            "clipped": True}, closing
     finally:
+        host_metrics.disks = real_disks
         await evaluate(instance, "closeHostPanel(); applyTheme('dark'); true")
     # ...and only once that slide has finished is the box hidden and let go
     await until(instance, "document.getElementById('foot-host').hidden === true")
@@ -9647,8 +9688,15 @@ async def navigation_checks(instance, url, sid, capture=False):
     assert await evaluate(instance, "JSON.stringify(history.state)===hostSectionHistory"), "Host disclosures add no history stop"
     await travel(-1, "!hostPanel.open")
     await travel(1, "hostPanel.open")
-    assert await evaluate(instance, "document.querySelector('#host-section-cpu .disclosure-toggle').getAttribute('aria-expanded')==='false'")
-    await run("document.querySelector('#host-section-cpu .disclosure-toggle').click(); delete window.hostSectionHistory")
+    # Forward is a new opening: the toggle is forgotten and CPU starts shut,
+    # opening by itself only once read at 90% or more
+    assert await evaluate(instance, """(() => {
+        const button=document.querySelector('#host-section-cpu .disclosure-toggle');
+        const series=hostSeries(0);
+        const hot=hostPanel.seen.has('nodes') && series.length && series[series.length-1][1]>=90;
+        return button.getAttribute('aria-expanded')===(hot ? 'true' : 'false');
+    })()""")
+    await run("delete window.hostSectionHistory")
     await run("closeHostPanel()")
     await run("openNoticesPanel()")
     await travel(-1, "!noticesPanel.open")

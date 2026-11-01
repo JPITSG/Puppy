@@ -104,7 +104,8 @@ function consoleFor(options = {}) {
        the box is all that matters here: the panel is asked to move with the
        motion on, and its content is only let go once a close has finished. */
     setDisclosureCollapsed: (body, collapsed, animate, done) => {
-      if (animate) slides.push({ collapsed, animate: true });
+      // the box's own slide; its sections' are the sections test's
+      if (animate && body.id === "foot-host") slides.push({ collapsed, animate: true });
       body.hidden = collapsed;
       if (done) done();
     },
@@ -149,39 +150,48 @@ function consoleFor(options = {}) {
     foot };
 }
 
-/* All three disclosures start open, act independently, and survive both
-   polling and the whole box being closed. A disappearing backend cannot
-   reset Latency's choice or detach a focused Processes control. */
+/* Every opening shows the four sections shut, and opens the ones that are
+   not green once it has read them; a toggle is the person's own until the
+   box closes, survives polls and focus, and a backend that disappears
+   cannot detach a focused control. */
 async function sections() {
+  const calm = () => { const data = metrics(); data.disks.mounts = data.disks.mounts.slice(0, 1);
+    data.disks.stalled = []; return data; };
+  const answers = { "0:host/metrics": metrics(), "2:host/metrics": calm(),
+    "0:backends/latency": { backends: [{ id: 2, name: "Workshop", ok: true, ms: 2 }] } };
   const app = consoleFor({
     backends: [{ id: 2, name: "Workshop", capabilities: ["host-metrics-v1"] }],
-    remoteOk: { 2: true },
-    answers: { "0:host/metrics": metrics(), "2:host/metrics": metrics(),
-      "0:backends/latency": { backends: [{ id: 2, name: "Workshop", ok: true, ms: 2 }] } },
+    remoteOk: { 2: true }, answers,
   });
-  app.context.openHostPanel();
-  await new Promise(resolve => setTimeout(resolve, 0));
   const section = key => app.document.getElementById(`host-section-${key}`);
   const button = key => section(key).querySelector(".disclosure-toggle");
   const body = key => section(key).querySelector(".host-sec-body");
+  const shut = () => ["cpu", "disk", "latency", "processes"].filter(key => body(key).hidden);
+  app.context.openHostPanel();
+  // nothing read yet in this opening: everything shut
+  assert.deepEqual(shut(), ["cpu", "disk", "latency", "processes"]);
   for (const key of ["cpu", "disk", "latency", "processes"]) {
-    assert.equal(button(key).getAttribute("aria-expanded"), "true");
-    assert.equal(button(key).getAttribute("aria-controls"), body(key).id);
-    assert.equal(body(key).hidden, false);
-    button(key).click();
-    assert.equal(body(key).hidden, true);
     assert.equal(button(key).getAttribute("aria-expanded"), "false");
+    assert.equal(button(key).getAttribute("aria-controls"), body(key).id);
     assert.match(button(key).getAttribute("aria-label"), /^Expand /);
+  }
+  await new Promise(resolve => setTimeout(resolve, 0));
+  // this instance's disks are not green (a full one, one that did not answer)
+  assert.deepEqual(shut(), ["cpu", "latency", "processes"]);
+  assert.equal(button("disk").getAttribute("aria-expanded"), "true");
+  for (const key of ["cpu", "disk", "latency", "processes"]) {
+    const was = body(key).hidden;
+    button(key).click();
+    assert.equal(body(key).hidden, !was);
     const control = button(key);
     control.focus();
     await app.context.pollHostPanel();
     assert.equal(button(key), control);
     assert.equal(app.document.activeElement, control);
-    assert.equal(body(key).hidden, true);
+    assert.equal(body(key).hidden, !was, "a toggle holds through polls, the disks' status too");
     button(key).click();
-    assert.equal(body(key).hidden, false);
+    assert.equal(body(key).hidden, was);
   }
-  button("latency").click();
   button("processes").focus();
   const processControl = button("processes");
   app.state.remoteOk[2] = false;
@@ -190,13 +200,54 @@ async function sections() {
   assert.equal(button("processes"), processControl);
   app.state.remoteOk[2] = true;
   app.context.renderHostPanel();
-  assert.equal(body("latency").hidden, true);
-  assert.equal(body("cpu").hidden, false);
-  assert.equal(body("processes").hidden, false);
+  // a section toggled in this opening keeps the person's choice, whatever
+  // its status does: every one was touched above
+  answers["0:backends/latency"] = { backends: [{ id: 2, name: "Workshop", ok: false,
+    error: "connection refused" }] };
+  await app.context.pollHostPanel();
+  assert.deepEqual(shut(), ["cpu", "latency", "processes"]);
+  // a new opening forgets the toggles; a round trip that fails while the
+  // box is open then opens an untouched Latency by itself
   app.context.closeHostPanel();
+  answers["0:backends/latency"] = { backends: [{ id: 2, name: "Workshop", ok: true, ms: 2 }] };
   app.context.openHostPanel();
-  assert.equal(body("latency").hidden, true);
-  assert.equal(body("cpu").hidden, false);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(shut(), ["cpu", "latency", "processes"]);
+  answers["0:backends/latency"] = { backends: [{ id: 2, name: "Workshop", ok: false,
+    error: "connection refused" }] };
+  await app.context.pollHostPanel();
+  assert.deepEqual(shut(), ["cpu", "processes"]);
+  // and when it comes back green nothing folds away under the reader
+  answers["0:backends/latency"] = { backends: [{ id: 2, name: "Workshop", ok: true, ms: 2 }] };
+  await app.context.pollHostPanel();
+  assert.deepEqual(shut(), ["cpu", "processes"]);
+  // a section the person shut stays shut whatever its status says
+  button("disk").click();
+  await app.context.pollHostPanel();
+  assert.equal(body("disk").hidden, true);
+  // a new opening starts over: shut, then what is not green opens
+  app.context.closeHostPanel();
+  answers["0:host/metrics"] = calm();
+  answers["2:host/metrics"] = (() => { const data = calm(); data.cpu.history.push([1040, 96]); return data; })();
+  app.context.openHostPanel();
+  assert.deepEqual(shut(), ["cpu", "disk", "latency", "processes"]);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(shut(), ["disk", "latency", "processes"], "a backend working at 96% opens CPU");
+  // a node that cannot be read opens CPU too; a node from before the disks does not open Disk
+  app.context.closeHostPanel();
+  answers["2:host/metrics"] = new Error("request timed out");
+  answers["0:host/metrics"] = (() => { const data = calm(); delete data.disks; return data; })();
+  app.hostPanel.nodes.delete(2);
+  app.context.openHostPanel();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(shut(), ["disk", "latency", "processes"]);
+  // all green: everything stays shut
+  app.context.closeHostPanel();
+  answers["2:host/metrics"] = calm();
+  answers["0:host/metrics"] = calm();
+  app.context.openHostPanel();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(shut(), ["cpu", "disk", "latency", "processes"]);
   // Clicking the heading uses the same single-click contract as a backend.
   section("latency").querySelector(".host-sec-title").click();
   assert.equal(body("latency").hidden, false);
