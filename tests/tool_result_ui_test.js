@@ -330,3 +330,50 @@ const resultText = card => {
 }
 
 console.log("PASS: tool results fold and reunite; per-call hover clocks retain event starts across reloads and clock skew, tick independently, and stop on completion or interruption; finished calls read Completed or Failed with how long they took between their own stamps, background endings included");
+
+/* A card's head cuts its line for the eye and never the address behind a
+   link: the real linkifyInto with a limit shows that many characters and a
+   "…", while each link it makes opens its whole URL. */
+vm.runInContext(between("/* Links in plain text.", "/* A model id as a spawn"), context);
+{
+  const run = code => vm.runInContext(code, context);
+  const url = "https://shop.example/sockets-and-headers/6936-female-socket-2x20-2-54mm-pitch-" +
+    "for-a-single-board-computer-4b-3b-3b-plus-2b-zero?colour=black&pack=10#details";
+  assert.ok(url.length > 120);
+  context.longUrl = url;
+  // a web search's head, as the transcript draws it from the info row
+  const card = run("toolCardNode({tool: 'web_search', input: {query: longUrl}}, true)");
+  const link = card.querySelector(".t-sum a");
+  assert.equal(link.href, url, "the head's link opens the whole address");
+  assert.equal(link.textContent, url.slice(0, 120) + "…", "only what is shown is cut");
+  assert.equal(link.title, url);
+  // a fetch's url key and a Bash command carrying one take the same road
+  for (const input of ["{url: longUrl}", "{command: 'curl -sL ' + longUrl}"]) {
+    const head = run(`toolCardNode({tool: 'WebFetch', input: ${input}}, true)`).querySelector(".t-sum");
+    assert.equal(head.querySelector("a").href, url, input);
+    assert.ok(head.textContent.endsWith("…") && head.textContent.length === 121, input);
+  }
+  // words before the address count toward what is shown; the address stays whole
+  context.mixed = "fetch " + url + " and compare";
+  const mixed = run("linkifyInto(el('span'), mixed, 40)");
+  assert.equal(mixed.querySelectorAll("a").length, 1);
+  assert.equal(mixed.querySelector("a").href, url);
+  assert.equal(mixed.textContent, "fetch " + url.slice(0, 34) + "…");
+  // a line that fits is shown whole, the text after its link included
+  const whole = run("linkifyInto(el('span'), mixed)");
+  assert.equal(whole.textContent, context.mixed);
+  assert.equal(whole.querySelector("a").href, url);
+  assert.equal(whole.querySelector("a").title || "", "", "an uncut link needs no title");
+  // a second address past the cut is not drawn at all
+  const two = run("linkifyInto(el('span'), 'a https://one.example/x b https://two.example/y', 12)");
+  assert.equal(two.textContent, "a https://on…");
+  assert.deepEqual(two.querySelectorAll("a").map(a => a.href), ["https://one.example/x"]);
+  // a sentence's closing punctuation stays prose, cut or not
+  const dotted = run("linkifyInto(el('span'), 'see https://x.example/a. done', 9)");
+  assert.equal(dotted.querySelector("a").href, "https://x.example/a");
+  assert.equal(dotted.textContent, "see https…");
+  const plain = run("linkifyInto(el('span'), 'see https://x.example/a. done')");
+  assert.equal(plain.querySelector("a").href, "https://x.example/a");
+  assert.equal(plain.textContent, "see https://x.example/a. done");
+}
+console.log("PASS: a tool card's head cuts its line for display only - each link in it opens its whole address, before or across the cut, and an address past it is not drawn");

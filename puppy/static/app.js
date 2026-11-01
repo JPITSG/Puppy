@@ -3314,26 +3314,40 @@ function decorateCodeBlocks(root) {
 }
 
 /* append text to node with URLs as clickable new-tab links (DOM-built, no innerHTML) */
-function linkifyInto(node, text) {
+/* Links in plain text. With a `limit` only that many characters are shown,
+   the cut ending in "…" - but a link cut short on the screen still opens its
+   whole address: the text is cut, never the URL behind it. */
+function linkifyInto(node, text, limit = Infinity) {
   text = String(text == null ? "" : text);
   const re = /https?:\/\/[^\s<>"]+/g;
-  let last = 0, m;
+  let last = 0, room = limit, m;
+  const put = (value, url) => {
+    if (room <= 0) return false;
+    const cut = value.length > room;
+    const shown = cut ? value.slice(0, room) + "…" : value;
+    room -= value.length;
+    if (url) {
+      const a = el("a", "", shown);
+      a.href = url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.onclick = (e) => e.stopPropagation();   // don't toggle tool cards etc.
+      if (cut) a.title = url;
+      node.appendChild(a);
+    } else node.appendChild(document.createTextNode(shown));
+    return !cut;
+  };
   while ((m = re.exec(text))) {
     let url = m[0];
     const trail = url.match(/[)\]'".,;:!?]+$/);
     if (trail) url = url.slice(0, -trail[0].length);
     if (!url) continue;
-    if (m.index > last) node.appendChild(document.createTextNode(text.slice(last, m.index)));
-    const a = el("a", "", url);
-    a.href = url;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    a.onclick = (e) => e.stopPropagation();   // don't toggle tool cards etc.
-    node.appendChild(a);
+    if (m.index > last && !put(text.slice(last, m.index))) return node;
+    if (!put(url, url)) return node;
     last = m.index + url.length;
     re.lastIndex = last;
   }
-  node.appendChild(document.createTextNode(text.slice(last)));
+  put(text.slice(last));
   return node;
 }
 
@@ -17095,19 +17109,23 @@ function toolFinishedTip(mark, startedAt, endedAt) {
 function toolLabel(tool) {
   return String(tool || "tool").replace(/_/g, " ");
 }
-function toolSummary(tool, input) {
+/* The one line a tool card's head shows, cut at `limit` characters. The head
+   asks for it whole and lets linkifyInto cut what is shown, so an address in
+   it opens complete. */
+const TOOL_SUMMARY_SHOWN = 120;
+function toolSummary(tool, input, limit = TOOL_SUMMARY_SHOWN) {
   if (input == null) return "";
-  if (typeof input !== "object") return displayValue(input, 120);
+  if (typeof input !== "object") return displayValue(input, limit);
   const asked = questionRows(tool, input);
-  if (asked) return displayValue(asked.rows.map(row => row.question).join(" · "), 120).replace(/\s+/g, " ");
+  if (asked) return displayValue(asked.rows.map(row => row.question).join(" · "), limit).replace(/\s+/g, " ");
   for (const key of ["command", "file_path", "path", "pattern", "query", "url"])
-    if (input[key]) return displayValue(input[key], 120).replace(/\s+/g, " ");
+    if (input[key]) return displayValue(input[key], limit).replace(/\s+/g, " ");
   if (Array.isArray(input.queries))
-    return displayValue(input.queries.map(x => displayValue(x, 80)).join(" · "), 120);
+    return displayValue(input.queries.map(x => displayValue(x, Math.min(limit, 2000))).join(" · "), limit);
   if (Array.isArray(input.changes)) return displayValue(input.changes.map(c =>
     c && typeof c === "object" ? (c.path || c.file_path || displayValue(c, 50)) : displayValue(c, 50)
-  ).join(", "), 120);
-  return displayValue(input, 120).replace(/\s+/g, " ");
+  ).join(", "), limit);
+  return displayValue(input, limit).replace(/\s+/g, " ");
 }
 /* A side question is put to the model while its turn keeps running: the
    engine answers from a tool-less fork of the same context and never shows
@@ -17742,7 +17760,9 @@ function toolCardNode(data, completed = false) {
   ico.appendChild(toolIconNode(d.tool));
   head.appendChild(ico);
   head.appendChild(el("span", "t-name", toolLabel(d.tool)));
-  head.appendChild(linkifyInto(el("span", "t-sum"), toolSummary(d.tool, d.input)));
+  /* the line is cut for the head; the addresses in it are not */
+  head.appendChild(linkifyInto(el("span", "t-sum"),
+    toolSummary(d.tool, d.input, 12000), TOOL_SUMMARY_SHOWN));
   const stateEl = el("span", "t-state");
   toolStateInto(stateEl, completed, d.is_error);
   head.appendChild(stateEl);
