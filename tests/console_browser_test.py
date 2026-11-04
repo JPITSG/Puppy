@@ -8101,6 +8101,134 @@ async def browser_cursor_checks(console):
         await browser.manager().close(page.browser_id, "Cursor test finished")
 
 
+async def browser_drag_checks(console):
+    """A press in the browser pane is the page's until it is released, through
+    every real layer: real mouse events in the console, its viewer socket, and
+    a real page in another Chromium, read back from that page. A real drag
+    moves the page's own scrollbar (the report: the wheel worked, the thumb did
+    not follow); run off the stage and released over the sidebar it keeps
+    following and the page is not left holding a button. Dragging selects text
+    and moves a slider, page scripts see event.buttons, and a native drag of a
+    link leaves the page taking clicks."""
+    page = await browser.manager().create()
+    tab_id = ""
+    try:
+        await evaluate(console, "openBrowserTab(0, %s); true" % json.dumps(page.browser_id))
+        await until(console, "Object.values(state.views).some(v => v instanceof BrowserView && v.tab.browserId === %s && v.screen.classList.contains('live'))"
+                    % json.dumps(page.browser_id))
+        await evaluate(console, "window.dragView=Object.values(state.views).find(v => v instanceof BrowserView && v.tab.browserId === %s); true"
+                       % json.dumps(page.browser_id))
+        tab_id = await evaluate(console, "dragView.tab.id")
+        html = """<!doctype html><style>
+          body {margin:0;font:16px sans-serif} .b {position:absolute;left:20px}
+        </style>
+        <div style="height:6000px"></div>
+        <a class=b id=link href="#moved" style="top:20px">A link to drag</a>
+        <div class=b id=text style="top:70px;width:500px">Selectable words to drag across</div>
+        <input class=b id=range type=range min=0 max=100 value=0 style="top:120px;width:300px">
+        <button class=b id=button style="top:170px;width:120px;height:30px"
+          onclick="window.clicks=(window.clicks||0)+1">Press</button>
+        <script>
+          window.moves=[];addEventListener('mousemove',e=>moves.push(e.buttons));
+          window.drags=[];for(const t of ['dragstart','dragend'])addEventListener(t,e=>drags.push(t));
+        </script>"""
+        tree = await page.call("Page.getFrameTree", session=page.page_session)
+        await page.call("Page.setDocumentContent", {
+            "frameId": tree["frameTree"]["frame"]["id"], "html": html}, session=page.page_session)
+        await until(page, "document.querySelector('#button') !== null && innerHeight > 0")
+        # the frame of this page has to have reached the screen before its
+        # pixels mean anything; the viewport is the one this pane asked for
+        await until(console, "dragView.screen.naturalWidth === %d" % page.viewport["width"])
+
+        async def place(x, y):
+            return await evaluate(console, """(() => {const r=dragView.screen.getBoundingClientRect();
+                return {x:r.left+r.width*%s/%s, y:r.top+r.height*%s/%s};})()""" %
+                (x, page.viewport["width"], y, page.viewport["height"]))
+
+        async def real(kind, point, button="none", buttons=0, clicks=0):
+            await console.call("Input.dispatchMouseEvent", {
+                "type": kind, "x": point["x"], "y": point["y"], "button": button,
+                "buttons": buttons, "clickCount": clicks}, session=console.page_session)
+
+        async def drag_to(point):
+            await real("mouseMoved", point, "left", 1)
+            await asyncio.sleep(.06)
+
+        async def press(point):
+            await real("mouseMoved", point)
+            await asyncio.sleep(.06)
+            await real("mousePressed", point, "left", 1, 1)
+            await asyncio.sleep(.06)
+
+        width, height = page.viewport["width"], page.viewport["height"]
+        bar = width - 7
+        assert await evaluate(page, "innerWidth - document.documentElement.clientWidth") >= 8, \
+            "the page draws a scrollbar to drag"
+        assert await evaluate(page, "scrollY") == 0
+
+        # the report: a real drag on the page's own scrollbar scrolls it
+        await press(await place(bar, 30))
+        for step in range(1, 5):
+            await drag_to(await place(bar, 30 + step * height * .1))
+        await until(page, "scrollY > 1000")
+        inside = await evaluate(page, "scrollY")
+        # off the stage it keeps following: over the sidebar, the thumb still
+        # tracks the pointer's height with the page's x held at its edge
+        stage = await evaluate(console, """(() => {const r=dragView.stage.getBoundingClientRect();
+            return {left:r.left, top:r.top, right:r.right, bottom:r.bottom};})()""")
+        assert stage["left"] > 60, stage
+        outside = await place(bar, 30 + height * .6)
+        outside["x"] = stage["left"] - 40
+        await drag_to(outside)
+        await until(page, "scrollY > %d" % inside)
+        off_stage = await evaluate(page, "scrollY")
+        # released over the sidebar: the release still reaches the page
+        await real("mouseReleased", outside, "left", 0, 1)
+        await asyncio.sleep(.25)
+        await evaluate(page, "moves.length=0; true")
+        hover = await place(bar, 30)
+        await real("mouseMoved", hover)
+        await asyncio.sleep(.3)
+        assert await evaluate(page, "scrollY") == off_stage, "the thumb was let go with the release"
+        hover = await place(300, 300)
+        await real("mouseMoved", hover)
+        await until(page, "moves.length > 0")
+        assert set(await evaluate(page, "moves")) == {0}, "the page holds no button after a release off the stage"
+        print("PASS: a real drag moves a real page's scrollbar in the browser pane, follows off the stage, and lets go on a release over the sidebar", flush=True)
+
+        # dragging also selects, moves a slider, and page scripts see it held
+        await evaluate(page, "scrollTo(0,0); moves.length=0; true")
+        await until(page, "scrollY === 0")
+        await press(await place(24, 80))
+        for x in (80, 140, 200):
+            await drag_to(await place(x, 80))
+        await real("mouseReleased", await place(200, 80), "left", 0, 1)
+        await until(page, "getSelection().toString().length > 3")
+        assert 1 in await evaluate(page, "moves"), "event.buttons says a button is held"
+        await evaluate(page, "getSelection().removeAllRanges(); true")
+        await press(await place(26, 128))
+        for x in (80, 140, 200):
+            await drag_to(await place(x, 128))
+        await real("mouseReleased", await place(200, 128), "left", 0, 1)
+        await until(page, "Number(document.querySelector('#range').value) > 30")
+        # a native drag starts and ends, and the page goes on taking clicks
+        await evaluate(page, "drags.length=0; window.clicks=0; true")
+        await press(await place(40, 28))
+        for y in (60, 100, 140):
+            await drag_to(await place(120, y))
+        await real("mouseReleased", await place(120, 140), "left", 0, 1)
+        await until(page, "drags.includes('dragstart') && drags.includes('dragend')")
+        button = await place(60, 185)
+        await press(button)
+        await real("mouseReleased", button, "left", 0, 1)
+        await until(page, "window.clicks === 1")
+        print("PASS: drags select text, move a slider and start and end a native drag in the browser pane, event.buttons is true to them, and the page goes on taking clicks", flush=True)
+    finally:
+        if tab_id:
+            await evaluate(console, "closeTab(%s); true" % json.dumps(tab_id))
+        await browser.manager().close(page.browser_id, "Drag test finished")
+
+
 async def host_section_checks(instance, capture=False):
     # Add an invented reachable peer to exercise Latency as well as the two
     # sections a standalone instance has. Pause polling while using this data.
@@ -9955,6 +10083,9 @@ async def main(args):
             if args.host_panel_only:
                 await host_panel_checks(instances[0], args.screenshots)
                 return
+            if args.browser_drag_only:
+                await browser_drag_checks(instances[0])
+                return
             if args.notices_only:
                 await notices_panel_checks(instances[0], args.screenshots)
                 await notice_wrapping_checks(instances[0], args.screenshots)
@@ -10031,6 +10162,7 @@ async def main(args):
             await task_tab_spacing_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
             await browser_cursor_checks(instances[0])
+            await browser_drag_checks(instances[0])
             await terminal_io_checks(instances[0])
             await engine_terminal_checks(instances[0], sid)
             await popout_checks(instances[0], sid)
@@ -10057,6 +10189,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-substitute-only", action="store_true")
     parser.add_argument("--notices-only", action="store_true")
     parser.add_argument("--host-panel-only", action="store_true")
+    parser.add_argument("--browser-drag-only", action="store_true")
     parser.add_argument("--popout-only", action="store_true")
     parser.add_argument("--running-only", action="store_true")
     parser.add_argument("--background-tasks-only", action="store_true")

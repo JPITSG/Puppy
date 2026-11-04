@@ -5324,7 +5324,8 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert flow["streamedOpen"] == ["Session", "New terminal", "New spawn"], flow
     assert flow["streamedBackspace"] == ["Session", "New terminal", "New spawn"], flow
 
-    assert flow["sessionChoices"] == ["All sessions", "API decisions", "Frontend layout notes", "Back"], flow
+    # the session asking is listed too, ahead of the others, so it can be named
+    assert flow["sessionChoices"] == ["All sessions", "Origin", "API decisions", "Frontend layout notes", "Back"], flow
     assert flow["sessionFiltered"] == ["API decisions", "Back"], flow
     assert flow["sessionsInserted"] == "@Session-API-decisions-API1 @Session-Frontend-layout-notes-FRN1 ", flow
     assert flow["allSessionsInserted"] == "@Session-All-ALL1 ", flow
@@ -6439,6 +6440,20 @@ async def main() -> None:
                 else None, message="forwarded input")
             press = next(i for i in inputs if i["params"].get("type") == "mousePressed")
             assert press["params"]["x"] == 450 and press["params"]["y"] == 135, press
+            assert "buttons" not in press["params"], "a viewer that does not say leaves it out"
+            # a drag: the mask the viewer holds reaches the page, the held
+            # button with it, and only a whole mask in range is believed
+            for buttons, expected in ((1, 1), (0, 0), (31, 31), (32, None), (-1, None),
+                                      ("1", None), (True, None), (1.5, None), (None, None)):
+                mark = len(read_lines("input.jsonl"))
+                await ws.send_json({"type": "mouse", "kind": "move", "nx": 0.25, "ny": 0.5,
+                                    "button": "left", "buttons": buttons, "clickCount": 0})
+                moved = await wait_for(
+                    lambda: read_lines("input.jsonl")[mark:] or None, message="forwarded drag")
+                assert moved[0]["params"]["type"] == "mouseMoved", moved
+                assert moved[0]["params"]["button"] == "left", moved
+                assert moved[0]["params"].get("buttons") == expected, (buttons, moved)
+            inputs = read_lines("input.jsonl")
             key = next(i for i in inputs if i["method"] == "Input.dispatchKeyEvent")
             assert key["params"]["text"] == "a", key
             insert = next(i for i in inputs if i["method"] == "Input.insertText")

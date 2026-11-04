@@ -761,7 +761,10 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
 - **Managed browsers.** Enable Browser on a backend that has Chromium and Puppy
   runs isolated headless instances, each with a four-character ID and its own
   profile. You get a live view in a tab with an address bar, back and reload
-  controls, and full mouse and keyboard input. Browser launch can be cancelled;
+  controls, and full mouse and keyboard input. Mouse drags work as they do in a
+  local browser - a page's scrollbars, text selection, sliders and drag and drop
+  follow the pointer, even when it runs off the view, and the release still
+  reaches the page. Browser launch can be cancelled;
   reload becomes **Stop loading** during navigation on backends advertising
   `browser-navigation-stop`. The pointer follows the page's
   standard CSS cursor on a best-effort basis, including links, text fields and

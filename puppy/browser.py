@@ -2111,10 +2111,14 @@ class Manager:
         except (TypeError, ValueError):
             clicks = 0
         x, y = self._point(data)
-        self._fire("Input.dispatchMouseEvent", {
-            "type": event_type, "x": x, "y": y, "button": button,
-            "clickCount": clicks, "modifiers": self._modifiers(data),
-        }, session=self.page_session)
+        event = {"type": event_type, "x": x, "y": y, "button": button,
+                 "clickCount": clicks, "modifiers": self._modifiers(data)}
+        # What the page sees as event.buttons while it holds a press; a viewer
+        # that does not say leaves it to Chromium's default.
+        buttons = data.get("buttons")
+        if type(buttons) is int and 0 <= buttons <= 31:
+            event["buttons"] = buttons
+        self._fire("Input.dispatchMouseEvent", event, session=self.page_session)
 
     def _dispatch_wheel(self, data: dict) -> None:
         if not self.page_session:

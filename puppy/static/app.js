@@ -26594,6 +26594,72 @@ class BrowserView {
     };
   }
 
+  /* The mouse on the page. A press is the page's until it is released: the
+     stage captures the pointer - never the screen, whose image every frame
+     replaces, and a capture goes with its element - so a drag that runs off
+     the stage (a scrollbar stands at its very edge) keeps moving the page,
+     held to the page's edge by point(), and its release still arrives. While
+     a press holds it the pointer keeps the cursor it was pressed with. Every event says
+     which buttons the page holds, counted as the DOM and DevTools both count
+     them, and a move names the one it holds: to Chromium a move without one
+     is hovering, so no scrollbar thumb, selection or slider would follow. A
+     release the stage never saw is made good on the next move, so the page
+     is never left holding a button; a press that began outside the stage is
+     not the page's, so what follows it stays a hover. */
+  wireMouse() {
+    const names = ["left", "middle", "right"];
+    const bits = [1, 4, 2];
+    const heldName = mask => (mask & 1 ? "left" : mask & 4 ? "middle" : mask & 2 ? "right" : "none");
+    let pressed = 0;
+    const mouse = (kind, e, button = e.button) => {
+      const p = this.point(e.clientX, e.clientY);
+      if (!p) return false;
+      this.flushMove(); // a pending drag position must precede button release
+      if (kind === "down") pressed |= bits[button] || 1;
+      else pressed &= ~(bits[button] || 1);
+      this.stage.style.cursor = pressed ? this.screen.style.cursor : "";
+      this.send({ type: "mouse", kind, ...p, button: names[button] || "left", buttons: pressed,
+        clickCount: Math.max(1, Math.min(3, e.detail || 1)),
+        modifiers: BrowserView.modifiers(e) });
+      return true;
+    };
+    this.stage.addEventListener("pointerdown", e => {
+      if (e.pointerType === "touch" || this.isDead()) return;
+      try { this.stage.setPointerCapture(e.pointerId); } catch (error) { /* the pointer already left */ }
+    });
+    this.stage.addEventListener("mousedown", e => {
+      if (this.isDead()) return;
+      e.preventDefault();
+      this.stage.focus({ preventScroll: true });
+      mouse("down", e);
+    });
+    this.stage.addEventListener("mouseup", e => {
+      const bit = bits[e.button] || 1;
+      if (!(pressed & bit)) return;
+      if (this.isDead() || !mouse("up", e)) pressed &= ~bit;
+    });
+    /* Immediate first movement, then only the newest position each frame. */
+    this.stage.addEventListener("mousemove", e => {
+      if (this.isDead()) return;
+      const p = this.point(e.clientX, e.clientY);
+      if (!p) return;
+      bits.forEach((bit, button) => {
+        if (pressed & bit && !(e.buttons & bit)) mouse("up", e, button);
+      });
+      if (!pressed) {
+        if (e.target === this.screen) this.cursorPoint = p;
+        else this.resetCursor();
+      }
+      const held = e.buttons & pressed;
+      this.queueMove({ type: "mouse", kind: "move", ...p, button: heldName(held), buttons: held,
+        clickCount: 0, modifiers: BrowserView.modifiers(e) });
+    });
+    this.stage.addEventListener("mouseleave", () => {
+      this.moveQueued = null;
+      this.resetCursor();
+    });
+  }
+
   start() {
     this.resizeObs = new ResizeObserver(() => this.queueViewport());
     this.resizeObs.observe(this.stage);
@@ -26601,37 +26667,7 @@ class BrowserView {
       e.stopPropagation();
       this.showLinkMenu(this.ownerBtn);
     };
-    const buttons = ["left", "middle", "right"];
-    const mouse = (kind, e) => {
-      const p = this.point(e.clientX, e.clientY);
-      if (!p) return;
-      this.flushMove(); // a pending drag position must precede button release
-      this.send({ type: "mouse", kind, ...p, button: buttons[e.button] || "left",
-        clickCount: Math.max(1, Math.min(3, e.detail || 1)),
-        modifiers: BrowserView.modifiers(e) });
-    };
-    this.stage.addEventListener("mousedown", e => {
-      if (this.isDead()) return;
-      e.preventDefault();
-      this.stage.focus({ preventScroll: true });
-      mouse("down", e);
-    });
-    this.stage.addEventListener("mouseup", e => { if (!this.isDead()) mouse("up", e); });
-    /* Immediate first movement, then only the newest position each frame. */
-    this.stage.addEventListener("mousemove", e => {
-      if (this.isDead()) return;
-      const p = this.point(e.clientX, e.clientY);
-      if (!p) return;
-      if (e.target === this.screen) {
-        this.cursorPoint = p;
-      } else this.resetCursor();
-      this.queueMove({ type: "mouse", kind: "move", ...p, button: "none",
-        clickCount: 0, modifiers: BrowserView.modifiers(e) });
-    });
-    this.stage.addEventListener("mouseleave", () => {
-      this.moveQueued = null;
-      this.resetCursor();
-    });
+    this.wireMouse();
     this.stage.addEventListener("contextmenu", e => e.preventDefault());
     this.stage.addEventListener("wheel", e => {
       if (this.isDead()) return;
