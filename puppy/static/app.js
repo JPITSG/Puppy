@@ -17176,12 +17176,58 @@ function fillAsideAnswer(card, d) {
 /* Task endings stay visible even when their tool's input/output is folded.
    The native tool id is the only association: an absent id or a card outside
    this history window leaves a complete, independently readable update. */
-function taskUpdateNode(label, tone, text, kind) {
-  const n = el("div", "task-update " + kind);
-  n.appendChild(el("div", "task-update-label state-word" + (tone ? " " + tone : ""), label));
+function taskUpdateNode(label, tone, text, kind, foldable = false) {
   const prefix = label + ": ";
   if (text.startsWith(prefix)) text = text.slice(prefix.length);
+  const size = foldable ? taskUpdateFoldSize(text) : "";
+  if (size) return foldedTaskUpdateNode(label, tone, text, kind, size);
+  const n = el("div", "task-update " + kind);
+  n.appendChild(el("div", "task-update-label state-word" + (tone ? " " + tone : ""), label));
   if (text) n.appendChild(linkifyInto(el("div", "task-update-text"), text));
+  return n;
+}
+
+/* An engine's summary of a background task can be a whole script or log - for
+   a command with no description the CLI's summary is the command itself - so a
+   long one stands as one line until it is pressed: the tool head's shape, with
+   its caret, the label, the first line as far as it goes and the size. A short
+   one reads in full as ever, and nothing about the choice outlives the page. */
+const TASK_UPDATE_FOLD_LINES = 3;
+const TASK_UPDATE_FOLD_CHARS = 240;
+const TASK_UPDATE_FIRST_CHARS = 400;
+
+/* What a long update says of its length; "" for one that stays open. */
+function taskUpdateFoldSize(text) {
+  const lines = text.trimEnd().split("\n").length;
+  if (lines > TASK_UPDATE_FOLD_LINES) return `${lines} lines`;
+  return text.length > TASK_UPDATE_FOLD_CHARS ? `${text.length.toLocaleString()} characters` : "";
+}
+
+function foldedTaskUpdateNode(label, tone, text, kind, size) {
+  const n = el("div", `task-update ${kind} task-update-fold`);
+  const head = el("button", "task-update-head");
+  head.type = "button";
+  const caret = el("span", "t-caret");
+  caret.appendChild(choiceSvg("arrow"));
+  head.appendChild(caret);
+  head.appendChild(el("span", "task-update-label state-word" + (tone ? " " + tone : ""), label));
+  const first = el("span", "task-update-first",
+    (text.split("\n").find(line => line.trim()) || "").trim().slice(0, TASK_UPDATE_FIRST_CHARS));
+  /* a glance for the eye: the button is named by its label and size, and the
+     words themselves are read from the text once it opens */
+  first.setAttribute("aria-hidden", "true");
+  head.appendChild(first);
+  head.appendChild(el("span", "task-update-size", size));
+  n.appendChild(head);
+  n.appendChild(linkifyInto(el("div", "task-update-text"), text));
+  const show = open => {
+    n.classList.toggle("open", open);
+    head.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  show(false);
+  head.onclick = () => show(!n.classList.contains("open"));
+  /* a search lands on the words inside, so landing shows them */
+  n._openFold = () => show(true);
   return n;
 }
 
@@ -17287,7 +17333,7 @@ function sessionTaskUpdateNode(d) {
 function backgroundTaskUpdateNode(d) {
   const states = {completed: ["completed", "ok"], failed: ["failed", "bad"], stopped: ["stopped", "warn"]};
   const [label, tone] = Object.prototype.hasOwnProperty.call(states, d.status) ? states[d.status] : ["updated", ""];
-  return taskUpdateNode(`Background task ${label}`, tone, String(d.text || ""), "background-task");
+  return taskUpdateNode(`Background task ${label}`, tone, String(d.text || ""), "background-task", true);
 }
 
 /* What a running background task is, in the list the chat head's chip
@@ -23608,6 +23654,7 @@ class SessionView {
         return;
       }
       this.revealChatEvent(target);
+      if (target._openFold) target._openFold();
       target.scrollIntoView({ block: "center" });
       target.classList.remove("search-flash");
       void target.offsetWidth;   // restart the animation on repeated jumps

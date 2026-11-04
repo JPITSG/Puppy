@@ -561,7 +561,9 @@ background commands, agents and monitors keep their turn alive until they end.
 Their completion, failure and stop updates are labeled and left-aligned, attached
 to the originating tool card when the native tool ID and card are available.
 Updates remain visible with the card collapsed; those without a matching card
-stand on their own. Transient engine failures (such as an OAuth refresh lock)
+stand on their own. A long update (more than 3 lines or 240 characters) folds to
+one line with its first line and size, and opens on a press or a search landing
+on it. Transient engine failures (such as an OAuth refresh lock)
 retry on their own with a back-off note in the transcript.
 
 A task the model left behind does not hold the session forever. Every Claude

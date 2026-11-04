@@ -5750,6 +5750,113 @@ async def queue_expand_checks(instance, capture=False):
           "either theme, with and without a vertical one, and Show fewer collapses it again", flush=True)
 
 
+async def task_fold_checks(instance, name, theme):
+    """A long background task ending, in real layout: one line in the tool
+    head's own shape, with the caret in the head's column, on a card and
+    alone. A real press opens it with nothing else on the row moving and the
+    text wrapped under the label; another shuts it. A pane too narrow for the
+    first line gives that up before the label starts to cut, and keeps the
+    size whole."""
+    probe = await evaluate(instance, """(() => {
+        const card=demoView.toolCards['demo-background-completed'];
+        const row=card.querySelector('.background-task');
+        row.scrollIntoView({block:'center'});
+        const box=n=>{const r=n.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height,r:r.right};};
+        const part=name=>row.querySelector('.task-update-'+name);
+        const toolHead=card.querySelector('.tool-head');
+        const alone=[...demoView.inner.children].find(n=>n.classList.contains('task-update-fold'));
+        return {head:box(part('head')),toolHead:box(toolHead),row:box(row),alone:box(alone),
+            aloneHead:box(alone.querySelector('.task-update-head')),
+            caret:box(part('head').querySelector('.t-caret')),toolCaret:box(toolHead.querySelector('.t-caret')),
+            caretTurn:getComputedStyle(part('head').querySelector('.t-caret svg')).transform,
+            toolTurn:getComputedStyle(toolHead.querySelector('.t-caret svg')).transform,
+            label:box(part('label')),first:box(part('first')),size:box(part('size')),
+            cut:part('first').scrollWidth>part('first').clientWidth,
+            oneLine:part('head').scrollHeight<=part('head').clientHeight+1,
+            shut:getComputedStyle(part('text')).display,
+            fontFirst:getComputedStyle(part('first')).fontFamily,
+            sans:getComputedStyle(document.body).fontFamily};
+    })()""")
+    assert abs(probe["head"]["h"] - probe["toolHead"]["h"]) < .6, (name, theme, probe)
+    assert abs(probe["caret"]["x"] - probe["toolCaret"]["x"]) < .1, (name, theme, probe)
+    assert probe["caretTurn"] == probe["toolTurn"], (name, theme, probe)
+    assert probe["oneLine"] and probe["cut"] and probe["shut"] == "none", (name, theme, probe)
+    assert probe["fontFirst"] == probe["sans"], (name, theme, probe)
+    assert probe["size"]["r"] <= probe["row"]["r"] - 10, (name, theme, probe)
+    assert probe["aloneHead"]["h"] == probe["head"]["h"], (name, theme, probe)
+    assert probe["alone"]["h"] <= probe["aloneHead"]["h"] + 2, (name, theme, probe)
+
+    async def press(x, y):
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(x=x, y=y, type=kind, button="left", clickCount=1),
+                                session=instance.page_session)
+
+    await press(probe["first"]["x"] + 8, probe["head"]["y"] + probe["head"]["h"] / 2)
+    await asyncio.sleep(.4)   # the caret's turn
+    opened = await evaluate(instance, """(() => {
+        const card=demoView.toolCards['demo-background-completed'];
+        const row=card.querySelector('.background-task');
+        const part=name=>row.querySelector('.task-update-'+name);
+        const box=n=>{const r=n.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height,r:r.right};};
+        const text=part('text');
+        return {open:row.classList.contains('open'),expanded:part('head').getAttribute('aria-expanded'),
+            cardOpen:card.classList.contains('open'),
+            head:box(part('head')),label:box(part('label')),size:box(part('size')),first:box(part('first')),
+            firstShown:getComputedStyle(part('first')).visibility,
+            text:box(text),shown:getComputedStyle(text).display,
+            fits:text.scrollWidth<=text.clientWidth+1 && row.scrollWidth<=row.clientWidth+1,
+            turn:getComputedStyle(part('head').querySelector('.t-caret svg')).transform,
+            toolTurn:getComputedStyle(card.querySelector('.tool-head .t-caret svg')).transform,
+            lines:text.offsetHeight};
+    })()""")
+    assert opened["open"] and opened["expanded"] == "true" and not opened["cardOpen"], (name, theme, opened)
+    for key in ("label", "size", "first"):
+        assert opened[key]["x"] == probe[key]["x"] and opened[key]["w"] == probe[key]["w"], (name, theme, key, opened, probe)
+    assert opened["firstShown"] == "hidden" and opened["shown"] == "block", (name, theme, opened)
+    assert opened["fits"] and opened["lines"] > 24, (name, theme, opened)
+    assert abs(opened["text"]["x"] + 27.45 - opened["label"]["x"]) < .1, (name, theme, opened)
+    # The row's caret turns down; the shut card's above it stays turned.
+    assert opened["turn"] == "matrix(1, 0, 0, 1, -1.75, 0)", (name, theme, opened)
+    assert opened["toolTurn"] == probe["toolTurn"], (name, theme, opened)
+    await press(opened["head"]["x"] + 20, opened["head"]["y"] + opened["head"]["h"] / 2)
+    await asyncio.sleep(.4)
+    assert await evaluate(instance, """(() => {
+        const card=demoView.toolCards['demo-background-completed'];
+        const row=card.querySelector('.background-task');
+        // an open card leaves the shut row's caret as it was
+        card.classList.add('open');
+        const turned=getComputedStyle(row.querySelector('.t-caret svg')).transform;
+        card.classList.remove('open');
+        return !row.classList.contains('open') && turned===%s &&
+            getComputedStyle(row.querySelector('.task-update-text')).display==='none';
+    })()""" % json.dumps(probe["caretTurn"])), (name, theme)
+
+    # A pane narrower than the label and size together: the first line goes
+    # first, the label cuts next and the size stays whole inside the row.
+    narrow = await evaluate(instance, """(() => {
+        const inner=demoView.inner, saved=inner.style.width;
+        const row=demoView.toolCards['demo-background-completed'].querySelector('.background-task');
+        const part=name=>row.querySelector('.task-update-'+name);
+        const read=()=>({first:part('first').getBoundingClientRect().width,
+            label:part('label').getBoundingClientRect().width,
+            labelCut:part('label').scrollWidth>part('label').clientWidth,
+            sizeRight:part('size').getBoundingClientRect().right,
+            sizeWhole:part('size').scrollWidth<=part('size').clientWidth,
+            rowRight:row.getBoundingClientRect().right,
+            fits:part('head').scrollWidth<=part('head').clientWidth+1});
+        inner.style.width='330px';
+        const roomy=read();
+        inner.style.width='200px';
+        const tight=read();
+        inner.style.width=saved;
+        return {roomy,tight};
+    })()""")
+    assert not narrow["roomy"]["labelCut"], (name, theme, narrow)
+    assert narrow["tight"]["first"] == 0 and narrow["tight"]["labelCut"], (name, theme, narrow)
+    assert narrow["tight"]["sizeWhole"] and narrow["tight"]["fits"], (name, theme, narrow)
+    assert narrow["tight"]["sizeRight"] <= narrow["tight"]["rowRight"], (name, theme, narrow)
+
+
 async def background_task_checks(instance, capture=False):
     await evaluate(instance, """(async () => {
         window.backgroundSavedEvents=(await api(demoView.tab.bid,
@@ -5796,6 +5903,7 @@ async def background_task_checks(instance, capture=False):
                     return {count:updates.length,
                         standalone:updates.filter(n=>n.parentNode===demoView.inner).length,
                         centered:demoView.inner.querySelectorAll('.info-line').length,
+                        folded:updates.filter(n=>n.classList.contains('task-update-fold')).length,
                         fits:updates.every(n=>n.scrollWidth<=n.clientWidth+1 &&
                             n.querySelector('.task-update-text').scrollWidth<=n.clientWidth+1),
                         left:updates.every(n=>getComputedStyle(n).textAlign==='left'),
@@ -5810,22 +5918,27 @@ async def background_task_checks(instance, capture=False):
                         pageFits:document.documentElement.scrollWidth<=innerWidth};
                 })()""")
                 assert layout["count"] == 14 and layout["standalone"] == 11, layout
+                assert layout["folded"] == 5, layout
                 assert layout["centered"] == 0, layout
                 assert all(layout[k] for k in ("fits", "left", "visible", "collapsed", "pageFits")), layout
                 assert [row["label"] for row in layout["tones"]] == [
                     "Background task completed", "Background task failed", "Background task stopped"], layout
                 assert len({row["color"] for row in layout["tones"]}) == 3, layout
                 assert all(row["color"] == row["head"] for row in layout["tones"]), layout
+                await task_fold_checks(instance, name, theme)
                 if capture:
                     await evaluate(instance, "demoView.scroll.scrollTop=0; true")
                     await asyncio.sleep(.1)
                     data = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
                     (BASE / "data" / ("background-tasks-" + name + "-" + theme + ".png")).write_bytes(base64.b64decode(data["data"]))
-        # Search can land directly on a visible update inside a folded card.
+        # Search can land directly on a visible update inside a folded card,
+        # and landing on a long one shows the words it was looking for.
         assert await evaluate(instance, """(async () => {
             await demoView.jumpToSeq(6);
             const n=demoView.findEventNode(6);
             return n.classList.contains('background-task') && n.classList.contains('search-flash') &&
+                n.classList.contains('open') &&
+                getComputedStyle(n.querySelector('.task-update-text')).display==='block' &&
                 n.getBoundingClientRect().bottom>0 && n.getBoundingClientRect().top<innerHeight;
         })()""")
         # Rebuilding a narrow history window retains the notice. Bringing its
@@ -5856,7 +5969,7 @@ async def background_task_checks(instance, capture=False):
         await evaluate(instance, """demoView.rebuildTranscript(backgroundSavedEvents,{attached:true});
             delete window.backgroundSavedEvents; delete window.backgroundDemoEvents;
             demoView.scrollBottom(true); true""")
-    print("PASS: background-task updates attach by native ID, remain visible in folded cards, wrap on desktop and phone in both themes, and retain history/search targets", flush=True)
+    print("PASS: background-task updates attach by native ID, remain visible in folded cards, a long one standing as one line in the tool head's shape until a real press or a search opens it with nothing else moving, wrap on desktop and phone in both themes, and retain history/search targets", flush=True)
 
 
 async def background_count_checks(a, b, hub):
@@ -10078,6 +10191,7 @@ async def main(args):
                 return
             if args.background_tasks_only:
                 await background_count_checks(*instances, runner.hub(sid))
+                await background_task_checks(instances[0])
                 await background_task_list_checks(instances[0])
                 return
             if args.host_panel_only:

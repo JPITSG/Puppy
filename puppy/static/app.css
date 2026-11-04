@@ -1757,16 +1757,16 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   line-height:18px;
 }
 @media (hover:hover){.tool-head:hover{background:var(--hov-soft)}}
-.tool-head .t-caret{
+.tool-head .t-caret,.task-update-head .t-caret{
   /* The closed chevron's right edge is 7.75 + half its 1.4 stroke.
      End its slot at that painted edge, so the shared gap starts there rather
      than after the SVG's unused right padding. */
   width:8.45px;height:12px;display:flex;align-items:center;color:var(--txt3);flex-shrink:0;
 }
-.tool-head .t-caret svg{display:block;flex:none;transform:rotate(-90deg);transition:transform var(--t-base) var(--ease)}
+.tool-head .t-caret svg,.task-update-head .t-caret svg{display:block;flex:none;transform:rotate(-90deg);transition:transform var(--t-base) var(--ease)}
 /* The down chevron ends at 9.5 instead of 7.75. Keep that same right edge
    when opening, without moving the tool icon or the label column. */
-.tool-card.open .t-caret svg{transform:translateX(-1.75px) rotate(0)}
+.tool-card.open>.tool-head .t-caret svg,.task-update-fold.open .t-caret svg{transform:translateX(-1.75px) rotate(0)}
 .tool-head .t-ico{font-size:var(--fs-sm);flex-shrink:0;width:18px;display:inline-flex;align-items:center;justify-content:center;color:var(--txt3)}
 .tool-head .t-ico svg,.ta-tool .t-ico svg{display:block}
 .tool-head .t-name{font-weight:600;color:var(--txt);flex-shrink:0}
@@ -1820,6 +1820,24 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .tool-card>.task-update{border:0;border-top:1px solid var(--line);border-radius:0}
 .task-update-label{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.09em;color:var(--txt3)}
 .task-update-text{margin-top:4px;color:var(--txt2);white-space:pre-wrap;overflow-wrap:anywhere}
+/* A long background task ending is one line in the tool head's shape until it
+   is pressed. The first line claims no width of its own, so it gives way before
+   the label starts to cut and the size always shows; it is hidden rather than
+   removed when open, so neither of them moves. The open text hangs under the
+   label: 11px of padding, the 8.45px caret and the 8px gap. */
+.task-update-fold{padding:0;overflow:hidden}
+.task-update-head{
+  display:flex;align-items:center;gap:8px;width:100%;padding:7px 11px;background:none;border:0;
+  color:inherit;font:inherit;line-height:18px;text-align:left;cursor:pointer;
+}
+@media (hover:hover){.task-update-head:hover{background:var(--hov-soft)}}
+.task-update-head:focus-visible{outline-offset:-2px}
+.task-update-head .task-update-label{flex:0 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.task-update-first{flex:1 1 0;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--txt3)}
+.task-update-size{flex-shrink:0;font-size:var(--fs-2xs);color:var(--txt3);white-space:nowrap}
+.task-update-fold>.task-update-text{display:none;margin-top:0;padding:1px 11px 9px 27.45px}
+.task-update-fold.open>.task-update-text{display:block}
+.task-update-fold.open .task-update-first{visibility:hidden}
 .info-line{align-self:center;font-size:var(--fs-sm);color:var(--txt3);text-align:center;padding:2px 10px;font-family:var(--mono);white-space:pre-wrap}
 .todo-card{
   align-self:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);

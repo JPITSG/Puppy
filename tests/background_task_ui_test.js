@@ -20,6 +20,7 @@ const context = vm.createContext({
   document, Map, console, choiceSvg: icon, toolIconNode: icon,
   tips: {live() {}},
   xIcon: icon, checkIcon: icon, promptSpinnerNode: icon,
+  navigationRemember() {}, navigationChanged() {}, setTimeout: () => 0,
   linkifyInto: (node, text) => { node.textContent = text; return node; },
 });
 vm.runInContext([
@@ -31,6 +32,7 @@ vm.runInContext([
   between("  findEventNode(seq)", "  /* Dividers mark"),
   between("  buildEventNode(ev)", "  /* live streaming bubble */"),
   between("  atBottom() {", "  /* ---- outgoing ---- */"),
+  between("  async jumpToSeq(seq, recordHistory = true) {", "  inLoadedRange(seq) {"),
   "} globalThis.View = View;",
 ].join("\n"), context);
 /* one row is taller than the 160px of slack atBottom allows, so a single box
@@ -122,6 +124,125 @@ assert.equal(safe.inner.querySelector(".task-update-text").textContent, unknown.
 assert.equal(safe.inner.querySelector("img"), null, "engine text is not markup");
 
 console.log("PASS: background-task labels, exact native tool association, visible folded updates, independent history, late results and search targets");
+
+/* A long ending - a whole command, a log - stands as one line until pressed. */
+const long = (status, text, id, seq = 3) => ({seq, kind: "info", data: {
+  subtype: "task", task_id: "task-long", status, text, ...(id ? {tool_use_id: id} : {}),
+}});
+const SCRIPT = ["cp a.js /tmp/a.keep.js && python3 - <<'EOF'", "s = open('a.js').read()", "s = s.replace('a', 'b')", "EOF"].join("\n");
+const head = row => row.querySelector(".task-update-head");
+const part = (row, name) => row.querySelector(".task-update-" + name);
+{
+  // The bounds: three lines and 240 characters read in full, one more folds.
+  const folds = text => {
+    const v = view();
+    v.renderEvent(long("completed", text), false);
+    const row = v.inner.querySelector(".background-task");
+    assert.equal(part(row, "text").textContent, text, "every word is kept either way");
+    return head(row) ? part(row, "size").textContent : "";
+  };
+  assert.equal(folds("one\ntwo\nthree"), "");
+  assert.equal(folds("one\ntwo\nthree\n"), "", "a closing newline is no line of its own");
+  assert.equal(folds("x".repeat(240)), "");
+  assert.equal(folds("one\ntwo\nthree\nfour"), "4 lines");
+  assert.equal(folds("x".repeat(241)), "241 characters");
+  assert.equal(folds("one\n" + "x".repeat(1500)), (1504).toLocaleString() + " characters",
+    "two lines of that size are counted by what makes them long");
+
+  // On its card: the head's shape, the card's state and its fold untouched.
+  const v = view();
+  [tool("one"), result("one"), long("completed", SCRIPT, "one", 5)].forEach(ev => v.renderEvent(ev, true));
+  const card = v.toolCards.one, row = card.querySelector(".background-task");
+  assert.equal(v.inner.children.length, 1, "the row belongs to its card");
+  assert.equal(v.findEventNode(5), row, "search finds the row");
+  assert.ok(row.classList.contains("task-update-fold") && row.classList.contains("task-update"));
+  assert.equal(head(row).tagName.toLowerCase(), "button");
+  assert.equal(head(row).type, "button");
+  assert.equal(head(row).getAttribute("aria-expanded"), "false");
+  assert.equal(head(row).children[0].className, "t-caret", "the tool head's caret comes first");
+  assert.equal(part(row, "label").textContent, "Background task completed");
+  assert.ok(part(row, "label").classList.contains("ok"));
+  assert.ok(card.querySelector(".t-state").classList.contains("ok"), "the card still takes the ending's state");
+  assert.equal(part(row, "first").textContent, "cp a.js /tmp/a.keep.js && python3 - <<'EOF'");
+  assert.equal(part(row, "first").getAttribute("aria-hidden"), "true", "the button is named by its label and size");
+  assert.equal(part(row, "size").textContent, "4 lines");
+  assert.equal(part(row, "text").textContent, SCRIPT);
+  assert.equal(part(row, "text").parentNode, row, "the text stands outside the button, to be selected and followed");
+  assert.equal(row.classList.contains("open"), false, "it arrives shut");
+
+  head(row).onclick();
+  assert.ok(row.classList.contains("open"));
+  assert.equal(head(row).getAttribute("aria-expanded"), "true");
+  assert.equal(card.classList.contains("open"), false, "a press on the row leaves the card's own fold alone");
+  card.querySelector(".tool-head").onclick();
+  assert.ok(card.classList.contains("open") && row.classList.contains("open"), "and the card's press the row's");
+  head(row).onclick();
+  assert.equal(row.classList.contains("open"), false);
+  assert.equal(head(row).getAttribute("aria-expanded"), "false");
+  assert.ok(card.classList.contains("open"));
+}
+{
+  // A failed one reads without its "Background task failed:" and keeps its tone.
+  const v = view();
+  v.renderEvent(long("failed", "Background task failed: npm run e2e\n  FAIL a\n  FAIL b\n  pass c"), false);
+  const row = v.inner.querySelector(".background-task");
+  assert.ok(part(row, "label").classList.contains("bad"));
+  assert.equal(part(row, "first").textContent, "npm run e2e");
+  assert.equal(part(row, "text").textContent, "npm run e2e\n  FAIL a\n  FAIL b\n  pass c");
+
+  // The first line is the first with words on it, and its length is bounded.
+  const blank = view();
+  blank.renderEvent(long("completed", "\n  \n  the first words  \nb\nc\nd"), false);
+  assert.equal(part(blank.inner.querySelector(".background-task"), "first").textContent, "the first words");
+  const huge = view();
+  huge.renderEvent(long("stopped", "x".repeat(20000)), false);
+  const hugeRow = huge.inner.querySelector(".background-task");
+  assert.equal(part(hugeRow, "first").textContent.length, 400);
+  assert.equal(part(hugeRow, "text").textContent.length, 20000);
+  assert.ok(part(hugeRow, "label").classList.contains("warn"));
+
+  // Engine text is never markup, on either line.
+  const markup = view();
+  markup.renderEvent(long("completed", '<img src=x onerror="alert(1)">\nb\nc\nd'), false);
+  assert.equal(markup.inner.querySelector("img"), null);
+
+  // Only a background task's ending folds: any other card reads in full.
+  const other = view();
+  other.renderEvent({seq: 1, kind: "info", data: {subtype: "background_wait", text: "a\nb\nc\nd\ne"}}, false);
+  assert.equal(other.inner.querySelector(".task-update-head"), null);
+  assert.equal(part(other.inner, "text").textContent, "a\nb\nc\nd\ne");
+
+  // Loading the earlier tool moves the same row, shut or opened as it was.
+  const history = view();
+  history.renderEvent(long("completed", SCRIPT, "one", 9), false);
+  const moved = history.findEventNode(9);
+  assert.equal(moved.parentNode, history.inner);
+  head(moved).onclick();
+  history.renderEvent(tool("one"), false);
+  assert.equal(moved.parentNode, history.toolCards.one);
+  assert.ok(moved.classList.contains("open"), "the reader's choice survives the move");
+}
+(async () => {
+  // A search lands on the words inside, so landing shows them - and a landing
+  // on anything else opens nothing.
+  const v = view();
+  v.session = {};
+  v.cancelNavigationWindow = () => {};
+  v.loadAround = async () => {};
+  v.revealChatEvent = () => {};
+  [tool("one"), result("one"), long("completed", SCRIPT, "one", 5), tool("two", 6)]
+    .forEach(ev => v.renderEvent(ev, false));
+  const row = v.findEventNode(5);
+  await v.jumpToSeq(6);
+  assert.equal(row.classList.contains("open"), false);
+  await v.jumpToSeq(5);
+  assert.ok(row.classList.contains("open"));
+  assert.equal(head(row).getAttribute("aria-expanded"), "true");
+  assert.ok(row.classList.contains("search-flash"));
+  head(row).onclick();
+  assert.equal(row.classList.contains("open"), false, "and it can still be shut");
+  console.log("PASS: a long ending folds past three lines or 240 characters to the tool head's line (caret, label, first line, size), its text outside the button, on a card and alone, in every tone, opening on a press or a search landing on it, its card's own fold apart, keeping its state when history moves it; nothing else folds");
+})().catch(error => { console.error(error); process.exit(1); });
 
 /* The tail follows a card that grows in place. An ending folded into a card
    already on screen adds its box to the transcript exactly as an appended node
