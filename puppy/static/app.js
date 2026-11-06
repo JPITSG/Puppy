@@ -24695,9 +24695,22 @@ class SessionView {
   queueRow(item, marker, held, paused = false, from = null) {
     const cfg = !!(item && typeof item === "object");
     const ident = cfg ? item.key || "" : item;
+    /* A change or tool made for one engine, standing where another is in
+       force: a drag took it past a switch, or the switch was cancelled. The
+       node skips such a row when it comes up (never applying what another
+       engine validated), so the row says so while it can still be moved
+       back. A held row is refused at its re-send instead. */
+    const skipped = cfg && !held && !!from && item.kind !== "engine" &&
+      !!item.engine && item.engine !== from.engine;
     const row = el("div", "q-item" + (cfg ? " q-cfg" : "") +
-      (held ? " q-held" : "") + (paused ? " q-paused" : ""));
+      (held ? " q-held" : "") + (paused ? " q-paused" : "") +
+      (skipped ? " q-skipped" : ""));
     row.appendChild(el("span", "q-n" + (held ? " q-bang" : ""), marker));
+    if (skipped) {
+      const owner = engineInfo(this.tab.bid, item.engine);
+      row.appendChild(el("span", "q-skip state-word warn",
+        `Skipped here · made for ${(owner && owner.label) || item.engine}`));
+    }
     let text;
     if (cfg) text = this.describeQueuedConfig(item, from);
     else {
@@ -24803,7 +24816,7 @@ class SessionView {
         cfg ? "Cancel this queued change" : "Cancel this queued message");
       x.onclick = () => this.unqueue(i, ident);   // full text, not the capped copy
       row.appendChild(x);
-      if (!cfg && q.length > 1 && backendSupportsQueueReorder(this.tab.bid))
+      if (q.length > 1 && backendSupportsQueueReorder(this.tab.bid))
         this.wireQueueDrag(row);
       live.appendChild(row);
     });

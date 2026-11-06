@@ -4662,6 +4662,200 @@ async def drag_scroll_checks(instance):
     print("PASS: a held session row scrolls the list past either end and lands there, the slot follows the "
           "rows under a still pointer, a cancelled drag puts them back, and a held tab scrolls its strip", flush=True)
 
+async def queue_drag_checks(a, b, hub):
+    """A waiting change moves like a waiting prompt, in real Chromium through
+    the drag the browser itself starts and the node's own queue. A real drag
+    takes an effort change behind a switch to another engine and back, then
+    the switch to the top and a Compact ahead of it: every row is offered the
+    drag, the node holds each new order (a paused prompt staying paused), a
+    second console follows, every row's from side reads from where it now
+    stands, and a row away from its engine says it will be skipped, whole, in
+    the warn tone, on a desktop and a phone in both themes. A prompt still
+    drags among them, a cancelled drag changes nothing, and a press on a
+    change's cross cancels it without starting one."""
+    def row(kind, key_of, **fields):
+        return {"kind": kind, "fields": fields, "key": key_of(fields)}
+    effort = row("config", runner._queued_config_key, engine="claude", effort="low")
+    compact = row("tool", runner._queued_tool_key, engine="claude", tool="compact")
+    switch = row("engine", runner._queued_engine_key, engine="codex", model="", effort="", fast_mode="off",
+                 permission_mode=str(runner.get_driver("codex").permission_options()[0]["value"]))
+    later = row("config", runner._queued_config_key, engine="codex", effort="high")
+    start = ["first prompt", effort, compact, "second prompt", switch, later]
+    intercepted = []
+    original_on_message = a._on_message
+
+    def on_message(message):
+        if message.get("method") == "Input.dragIntercepted":
+            intercepted.append(message.get("params") or {})
+        return original_on_message(message)
+
+    read = """[...demoView.queueEl.querySelectorAll('.q-live')].map(row=>({
+        n:row.querySelector('.q-n').textContent, text:row.querySelector('.q-t').textContent,
+        skip:(row.querySelector('.q-skip')||{}).textContent||'',
+        sortable:row.classList.contains('q-sortable') && row.draggable,
+        cursor:getComputedStyle(row).cursor}))"""
+
+    async def mouse(kind, x, y, **extra):
+        await a.call("Input.dispatchMouseEvent", {"type": kind, "x": x, "y": y, **extra}, session=a.page_session)
+
+    async def drag(source, target, kind="drop"):
+        """Press a row, wait for the node's hold, move until the browser starts
+        its drag, carry it over a row's far half and let go."""
+        points = await evaluate(a, """(() => {
+            const rows=[...demoView.queueEl.querySelectorAll('.q-live')];
+            const from=rows[%d].getBoundingClientRect(), to=rows[%d].getBoundingClientRect();
+            return {x:from.left+160, y:from.top+from.height/2,
+                    to:%d>%d ? to.bottom-1 : to.top+1};
+        })()""" % (source, target, target, source))
+        x, y = points["x"], points["y"]
+        intercepted.clear()
+        await mouse("mouseMoved", x, y)
+        await mouse("mousePressed", x, y, button="left", clickCount=1)
+        await until(a, "!!demoView.queueDrag && demoView.queueDrag.ready")
+        for step in range(1, 8):
+            await mouse("mouseMoved", x, y + step * 2, button="left", buttons=1)
+            await asyncio.sleep(.04)
+        end = time.monotonic() + 5
+        while not intercepted and time.monotonic() < end:
+            await asyncio.sleep(.03)
+        assert intercepted, "the browser started a drag on row %d" % source
+        data = intercepted[0]["data"]
+
+        async def carry(event, at):
+            await a.call("Input.dispatchDragEvent", {"type": event, "x": x, "y": at, "data": data},
+                         session=a.page_session)
+        await carry("dragEnter", y)
+        await until(a, "!!demoView.queueEl.querySelector('.q-item.dragging')")
+        await carry("dragOver", points["to"])
+        await carry("dragOver", points["to"])
+        await asyncio.sleep(.25)   # the rows' slide
+        if kind == "drop":
+            await carry("drop", points["to"])
+        else:
+            await carry("dragCancel", points["to"])
+        await mouse("mouseReleased", x, points["to"], button="left", clickCount=1)
+        await until(a, "!demoView.queueDrag && !demoView.queueEl.querySelector('.q-item.dragging')")
+
+    async def landed(expected):
+        end = time.monotonic() + 5
+        while hub.queue != expected and time.monotonic() < end:
+            await asyncio.sleep(.03)
+        assert hub.queue == expected, hub.queue
+        assert hub._queue_reorder is None
+        await until(a, "demoView.queueEl.querySelectorAll('.q-live').length===%d && "
+                       "!demoView.queuePendingRequest" % len(expected))
+        # The answer and the broadcast are two frames in either order, and a
+        # repaint ends any drag begun under it: a person's next press is never
+        # this quick, this one has to wait for the second frame.
+        await asyncio.sleep(.2)
+        return await evaluate(a, read)
+
+    hub.status = "running"
+    a._on_message = on_message
+    try:
+        await a.call("Input.setInterceptDrags", {"enabled": True}, session=a.page_session)
+        hub.queue = list(start)
+        hub.paused_queue = {3}
+        await evaluate(a, "demoView.queueOpen=true; true")
+        await evaluate(b, "demoView.queueOpen=true; true")
+        hub._broadcast_queue()
+        rows = await landed(start)
+        assert all(r["sortable"] and r["cursor"] == "grab" for r in rows), rows
+        assert [r["skip"] for r in rows] == [""] * 6, rows
+        assert rows[1]["text"].startswith("Effort ") and rows[2]["text"] == "Compact context", rows
+        assert " → Codex" in rows[4]["text"], rows
+
+        # the effort change behind the switch: on the far side of its engine
+        await drag(1, 5)
+        rows = await landed(["first prompt", compact, "second prompt", switch, later, effort])
+        assert [r["n"] for r in rows] == list("123456"), rows
+        assert rows[5]["skip"] == "Skipped here · made for Claude Code", rows
+        assert not any(r["skip"] for r in rows[:5]), rows
+        assert hub._paused_wire() == [2], "the paused prompt keeps its pause"
+        await until(b, "demoView.queueEl.querySelectorAll('.q-skip').length===1 && "
+                       "demoView.queueEl.querySelectorAll('.q-live')[5].querySelector('.q-skip')!==null")
+
+        # what the note looks like, wherever it may be read
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone")]:
+            await a.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1, "mobile": name == "phone"},
+                session=a.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(a, "applyTheme(%s); true" % json.dumps(theme))
+                await asyncio.sleep(.05)
+                look = await evaluate(a, """(() => {
+                    const note=demoView.queueEl.querySelector('.q-skip'), row=note.closest('.q-item');
+                    const plain=demoView.queueEl.querySelectorAll('.q-live')[0];
+                    const probe=document.createElement('span');
+                    probe.style.color='var(--warn)'; document.body.appendChild(probe);
+                    const warn=getComputedStyle(probe).color; probe.remove();
+                    const box=note.getBoundingClientRect(), own=row.getBoundingClientRect();
+                    return {color:getComputedStyle(note).color, warn,
+                        whole:note.scrollWidth<=note.clientWidth,
+                        inside:box.right<=own.right+.5,
+                        oneLine:Math.abs(own.height-plain.getBoundingClientRect().height)<.6,
+                        fits:document.documentElement.scrollWidth<=innerWidth};
+                })()""")
+                assert look["color"] == look["warn"], (name, theme, look)
+                assert all(look[key] for key in ("whole", "inside", "oneLine", "fits")), (name, theme, look)
+        await a.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=a.page_session)
+        await evaluate(a, "applyTheme('dark'); true")
+        await asyncio.sleep(.1)
+
+        # and back above the switch: the note goes with the stranding
+        await drag(5, 1)
+        rows = await landed(["first prompt", effort, compact, "second prompt", switch, later])
+        assert not any(r["skip"] for r in rows), rows
+
+        # a drag let go nowhere changes nothing and releases the hold
+        await drag(1, 3, "cancel")
+        rows = await landed(["first prompt", effort, compact, "second prompt", switch, later])
+
+        # the switch to the top: both Claude rows now stand behind it, and the
+        # row that follows it reads from the switch rather than the session
+        await drag(4, 0)
+        rows = await landed([switch, "first prompt", effort, compact, "second prompt", later])
+        assert [bool(r["skip"]) for r in rows] == [False, False, True, True, False, False], rows
+        assert hub._paused_wire() == [4]
+
+        # the Compact ahead of it: at home again, whatever it passed
+        await drag(3, 0)
+        rows = await landed([compact, switch, "first prompt", effort, "second prompt", later])
+        assert [bool(r["skip"]) for r in rows] == [False, False, False, True, False, False], rows
+
+        # a prompt still moves among them
+        await drag(2, 5)
+        rows = await landed([compact, switch, effort, "second prompt", later, "first prompt"])
+        assert rows[5]["text"] == "first prompt" and hub._paused_wire() == [3], rows
+
+        # a press on a change's cross is that and no drag
+        spot = await evaluate(a, """(() => {
+            const r=demoView.queueEl.querySelectorAll('.q-live')[2].querySelector('.q-x').getBoundingClientRect();
+            return {x:r.left+r.width/2, y:r.top+r.height/2};
+        })()""")
+        await mouse("mouseMoved", spot["x"], spot["y"])
+        await mouse("mousePressed", spot["x"], spot["y"], button="left", clickCount=1)
+        await mouse("mouseReleased", spot["x"], spot["y"], button="left", clickCount=1)
+        await landed([compact, switch, "second prompt", later, "first prompt"])
+        assert not await evaluate(a, "!!demoView.queueDrag")
+    finally:
+        a._on_message = original_on_message
+        await a.call("Input.setInterceptDrags", {"enabled": False}, session=a.page_session)
+        hub.queue = []
+        hub.paused_queue = set()
+        hub.status = "idle"
+        hub.active_since = None
+        hub._broadcast_queue()
+        for instance in (a, b):
+            await evaluate(instance, "demoView.queueOpen=false; true")
+            await until(instance, "!demoView.queued.length")
+    print("PASS: a real drag moves a waiting change, engine switch and Compact like a prompt over the node's own "
+          "queue, every row reading from where it now stands and one away from its engine saying it will be "
+          "skipped on a desktop and a phone in both themes; a cancelled drag and a cross press start no move",
+          flush=True)
+
+
 async def session_mention_checks(instance):
     await evaluate(instance, "demoView.composer.set('', true); demoView.composer.ta.focus(); true")
     await type_text(instance, "@Session-P")
@@ -6569,6 +6763,7 @@ async def git_sheet_checks(a):
 
 async def checks(a, b, hub, capture=False):
     await background_count_checks(a, b, hub)
+    await queue_drag_checks(a, b, hub)
     await git_mark_checks(a, b)
     await git_sheet_checks(a)
     await icon_alignment_checks(a)
@@ -10211,6 +10406,9 @@ async def main(args):
             if args.show_focus_only:
                 await show_focus_checks(instances[0])
                 return
+            if args.queue_drag_only:
+                await queue_drag_checks(*instances, runner.hub(sid))
+                return
             if args.thinking_only:
                 await thinking_disclosure_checks(instances[0])
                 return
@@ -10304,6 +10502,7 @@ if __name__ == "__main__":
     parser.add_argument("--notices-only", action="store_true")
     parser.add_argument("--host-panel-only", action="store_true")
     parser.add_argument("--browser-drag-only", action="store_true")
+    parser.add_argument("--queue-drag-only", action="store_true")
     parser.add_argument("--popout-only", action="store_true")
     parser.add_argument("--running-only", action="store_true")
     parser.add_argument("--background-tasks-only", action="store_true")

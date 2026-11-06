@@ -1996,6 +1996,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 38px),transparent);
           mask-image:linear-gradient(90deg,#000 calc(100% - 38px),transparent);
 }
+/* A change standing where the engine it was made for is not in force: its
+   words stay whole, and what it would have done fades behind them. */
+.queue-strip .q-skip{flex:0 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.queue-strip .q-item.q-skipped .q-t{opacity:.72}
 /* cancels this message before its turn starts; the row's fade masks the text
    span only, so the button stays crisp at the edge */
 .queue-strip .q-x{

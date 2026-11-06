@@ -6,7 +6,10 @@
    it, and the whole queue for a held row, which re-sends to the queue's
    end; an engine switch names both engines and reads each side with its own
    engine's catalog; a default on either side is called that; a tool row
-   keeps its name. No browser, engine, network or quota. */
+   keeps its name. Every waiting row can be dragged, a change as much as a
+   prompt, and after a move each row reads from where it now stands, one made
+   for an engine not in force there saying it will be skipped. No browser,
+   engine, network or quota. */
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -22,6 +25,7 @@ function between(from, to) {
 
 const document = new FakeDocument();
 const icon = () => document.createElement("svg");
+let reorderable = false;
 const state = {
   backends: [], engCache: {},
   engines: [
@@ -60,7 +64,7 @@ const context = vm.createContext({
   document, state, console, syncSessionBrowserChips() {},
   refreshIcon: icon, xIcon: icon, queueEditIcon: icon, queuePauseIcon: icon,
   backendSupportsQueueEdit: () => false, backendSupportsQueuePause: () => false,
-  backendSupportsQueueReorder: () => false,
+  backendSupportsQueueReorder: () => reorderable,
   sessionToolLabel: value => value === "compact" ? "Compact context" : "Session tool",
   splitAttachmentMarkers: text => ({ text, attachments: [] }),
 });
@@ -79,6 +83,7 @@ vm.runInContext([
   "  }",
   "  followingTail(fn) { this.paints = (this.paints || 0) + 1; fn(); }",
   "  cancelQueueDrag() {} wireQueueDropZone() {} syncQueueFade() {} syncQueueEditBusy() {}",
+  "  wireQueueDrag(row) { row.classList.add('q-sortable'); }",
   "  setBackgroundTasks() {} updateHead() { this.heads = (this.heads || 0) + 1; }",
   between("  /* A queue entry is a prompt string", "  prepareQueueDrag(row, event) {"),
   /* the socket's session_meta frame, as the real handler takes it */
@@ -263,4 +268,78 @@ const claude = { engine: "claude", model: "claude-fable-5-1", effort: "max",
   assert.equal(prompts.paints, before, "prompts and tool rows read nothing from the session");
 }
 
-console.log("PASS: queued changes name both sides of every field against what is in force where they stand");
+/* every waiting row can be dragged - a prompt, a change, an engine switch and
+   a tool alike - where the node reorders at all and there is somewhere to go;
+   a held row keeps its own place */
+{
+  const queue = ["one",
+    { kind: "config", key: "c1", engine: "claude", effort: "low" },
+    { kind: "engine", key: "e1", engine: "codex", model: "gpt-5.5", effort: "high",
+      permission_mode: "read-only", fast_mode: "off" },
+    { kind: "tool", key: "t1", engine: "codex", tool: "compact" }];
+  const held = [{ kind: "config", key: "h1", engine: "claude", effort: "high" }];
+  const sortable = host => host.queueEl.querySelectorAll(".q-item")
+    .map(row => row.classList.contains("q-sortable"));
+  assert.deepEqual(sortable(mount(claude, queue, held)), [false, false, false, false, false],
+    "a node that cannot reorder offers no drag");
+  reorderable = true;
+  assert.deepEqual(sortable(mount(claude, queue, held)), [false, true, true, true, true]);
+  assert.deepEqual(sortable(mount(claude, [queue[1]])), [false], "one row has nowhere to go");
+  reorderable = false;
+}
+
+/* moved, a row reads from where it now stands: the same three rows in two
+   orders, each from side following what is ahead of it */
+{
+  const switchRow = { kind: "engine", key: "e1", engine: "codex", model: "gpt-5.5",
+    effort: "high", permission_mode: "read-only", fast_mode: "off" };
+  const effortRow = { kind: "config", key: "c1", engine: "codex", effort: "low" };
+  const claudeRow = { kind: "config", key: "c2", engine: "claude", model: "claude-opus-5" };
+  const skip = host => host.queueEl.querySelectorAll(".q-item").map(row => {
+    const note = row.querySelector(".q-skip");
+    return note ? note.textContent : "";
+  });
+  const first = mount(claude, [claudeRow, "go on", switchRow, effortRow]);
+  assert.deepEqual(rows(first).map(r => r.text), [
+    "Model Fable 5.1 → Opus 5", "go on",
+    "Engine Claude → Codex · Model Opus 5 → 5.5 · Effort Max → High · Permission Auto → Read only · Fast off → off",
+    "Effort High → Low",
+  ]);
+  assert.deepEqual(skip(first), ["", "", "", ""], "every row stands under its own engine");
+
+  // the switch dragged to the top: the Claude change is stranded behind it
+  const moved = mount(claude, [switchRow, claudeRow, "go on", effortRow]);
+  assert.deepEqual(rows(moved).map(r => r.text), [
+    "Engine Claude → Codex · Model Fable 5.1 → 5.5 · Effort Max → High · Permission Auto → Read only · Fast off → off",
+    "Model 5.5 → Opus 5", "go on", "Effort High → Low",
+  ]);
+  assert.deepEqual(skip(moved), ["", "Skipped here · made for Claude", "", ""]);
+  const stranded = moved.queueEl.querySelectorAll(".q-item")[1];
+  assert.ok(stranded.classList.contains("q-skipped"));
+  const note = stranded.querySelector(".q-skip");
+  assert.ok(note.classList.contains("state-word") && note.classList.contains("warn"), "in the warn voice");
+  assert.equal(stranded.children[1], note, "ahead of the words a narrow row fades out");
+
+  // the Codex change dragged above the switch: stranded on the other side,
+  // and the row behind it no longer counts it
+  const above = mount(claude, [effortRow, switchRow, "go on"]);
+  assert.deepEqual(skip(above), ["Skipped here · made for Codex", "", ""]);
+  assert.equal(rows(above)[0].text, "Effort Max → Low");
+
+  // a tool row is made for its engine the same way, and a prompt or a row with
+  // no engine named has nothing to say
+  const tool = { kind: "tool", key: "t1", engine: "claude", tool: "compact" };
+  const tools = mount(claude, [switchRow, tool, "next", { kind: "tool", key: "t2", tool: "compact" }]);
+  assert.deepEqual(skip(tools), ["", "Skipped here · made for Claude", "", ""]);
+  assert.equal(rows(tools)[1].text, "Compact context");
+
+  // an engine the catalog does not know is named as the node names it
+  const unknown = mount(claude, [{ kind: "config", key: "c3", engine: "gone", effort: "low" }]);
+  assert.deepEqual(skip(unknown), ["Skipped here · made for gone"]);
+
+  // a held row re-sends to the queue's end and is refused there if it must be
+  const parked = mount(claude, [switchRow], [claudeRow]);
+  assert.deepEqual(skip(parked), ["", ""], "a held row never says skipped");
+}
+
+console.log("PASS: queued changes name both sides of every field against what is in force where they stand; every waiting row can be dragged, and one moved away from its engine says it will be skipped");

@@ -235,7 +235,12 @@ reading anywhere further up is never pulled away from it.
   the queue and applies in order, its row naming both sides of every field
   (*Effort Max → Medium*) against what is in force where it stands - the
   session's settings plus every change queued ahead of it, or the whole
-  queue for a held row, which re-sends to the queue's end. Claude's saved
+  queue for a held row, which re-sends to the queue's end. Drag a waiting
+  change, engine switch or Compact to run it at another point in the queue,
+  and every row reads again from where it now stands; a change or Compact
+  moved away from the engine it was made for says *Skipped here · made for
+  Claude Code*, and is skipped with a note in the transcript unless it is
+  moved back. Claude's saved
   aliases and full model IDs, including `[1m]` context selectors, use the
   matching catalog name and effort
   choices without rewriting the saved request: every spelling the CLI has
@@ -260,7 +265,7 @@ reading anywhere further up is never pulled away from it.
 - **Pins, colors, archive, drag-and-drop.** Sessions carry a color, can be
   pinned to the top, archived out of the way, renamed, and reordered by
   dragging. Every list reordered by dragging - sessions, the footer's
-  backends, tabs and queued prompts - scrolls itself while the dragged item
+  backends, tabs and the queue - scrolls itself while the dragged item
   is held near its edge, faster toward the edge, and keeps scrolling with
   the item at the last visible slot while it is held past that edge over
   the rest of the sidebar, tab bar or queue box; releasing it there still

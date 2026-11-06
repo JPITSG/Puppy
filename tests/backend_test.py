@@ -5713,6 +5713,50 @@ async def exercise_queue_reorder(runner, db) -> None:
         assert settled["ok"] is True and settled["started"] is False
         assert h.active_since is None and h.last_completion_status == "ok"
         assert h._queue_waiting_completion is None
+
+        # A change, an engine switch and a tool row move like prompts. The new
+        # order is durable, a paused prompt stays paused wherever it lands, and
+        # everything runs where it was left: the switch first, then the prompt
+        # under it, and the rows made for the engine it left are skipped by
+        # name rather than applied.
+        def row(kind, key_of, **fields):
+            return {"kind": kind, "fields": fields, "key": key_of(fields)}
+        effort_row = row("config", runner._queued_config_key,
+                         engine="claude", effort="low")
+        switch_row = row("engine", runner._queued_engine_key, engine="codex",
+                         model="", effort="", fast_mode="off",
+                         permission_mode=str(runner.get_driver("codex")
+                                             .permission_options()[0]["value"]))
+        tool_row = row("tool", runner._queued_tool_key, engine="claude", tool="compact")
+        h.status = "running"
+        h.queue = ["one", effort_row, "two", switch_row, tool_row]
+        h.paused_queue = {2}
+        h._broadcast_queue()
+        revision = h.queue_revision
+        assert h.begin_queue_reorder(owner, "drag-5", revision)["ok"] is True
+        moved = h.reorder_queue(owner, "drag-5", revision, [3, 0, 1, 4, 2])
+        assert moved["ok"] is True and moved["started"] is False
+        assert h.queue == [switch_row, "one", effort_row, tool_row, "two"]
+        assert moved["queued"] == h._queue_wire()
+        assert h._paused_wire() == [4]
+        record = db.meta_get("session_queue.{}".format(sid))
+        assert record["queue"] == h.queue and record["paused"] == [4]
+        assert all(runner._valid_restored_item(item) for item in record["queue"])
+
+        started.clear()
+        h.status = "idle"
+        assert h._start_queue_if_ready() is True
+        assert started == ["one"]
+        assert db.get_session(sid)["engine"] == "codex", "the switch moved ahead of the prompt"
+        assert [e for e in db.get_events(sid) if e["kind"] == "engine_switch"]
+        h.status = "idle"
+        effort_before = db.get_session(sid)["effort"]
+        assert h._start_queue_if_ready() is True
+        assert started == ["one", tool_row], "the paused prompt is passed"
+        assert db.get_session(sid)["effort"] == effort_before, "a row made for claude is not applied"
+        note = db.get_events(sid)[-1]
+        assert note["kind"] == "info" and note["data"]["subtype"] == "config_skipped"
+        assert h.queue == ["two"] and h._paused_wire() == [0]
     finally:
         runner.drop_hub(sid)
         db.delete_session(sid)
