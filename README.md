@@ -967,6 +967,9 @@ alert command with the notice's text as `{message}`. See
 ### Find anything, on any backend
 
 The sidebar box filters sessions by title, location and backend as you type.
+While it is in use, three ticks inside it - Name, Path and Backend - choose
+which of those it looks in: all three by default, at least one always, and
+remembered in this browser.
 The advanced **Search** tab searches the full history of every online backend:
 prompts, replies, thinking, tool activity and system notes, with phrases,
 `-exclusion`, `OR`, kind filters, a time window, relevance or newest ordering,

@@ -7409,10 +7409,13 @@ async def main() -> None:
             # the footer's host box opens on the same slide, so it carries its
             # own gap, padding and rule down with its height
             # the host box and its own sections open on that same slide
+            # and so do the quick search's choices
             assert (".foot-engine-body.disclosure-animating,\n"
                     ".host-sec-body.disclosure-animating,\n"
+                    ".side-search-in.disclosure-animating,\n"
                     ".foot-host.disclosure-animating,\n"
                     ".foot-notices.disclosure-animating{") in css_source
+            assert ".side-search-in[hidden]{display:none}" in css_source
             assert ".host-sec-body[hidden]{display:none}" in css_source
             assert ".foot-host[hidden]{display:none}" in css_source
             assert "--disclosure-gap:8px;" in css_source

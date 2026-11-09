@@ -5162,10 +5162,29 @@ function backendName(bid) {
 }
 
 /* What the sidebar quick-search can see: exactly the identity a row shows -
-   its title, its full location, and the node it executes on. */
+   its title, its full location, and the node it executes on - as far as the
+   box's choices say. A bit each, all three by default; the browser keeps a
+   narrower choice as one exact digit and reads anything else as all three,
+   without writing over it. Nothing is ever searched in nothing: the last
+   choice left cannot be taken away. */
+const SIDE_SEARCH_FIELDS = [
+  { label: "Name", bit: 1 },
+  { label: "Path", bit: 2 },
+  { label: "Backend", bit: 4 },
+];
+const SIDE_SEARCH_ALL = 7;
+const SIDE_SEARCH_KEY = "puppy.sideSearchIn";
+let sideSearchIn = (() => {
+  let raw = null;
+  try { raw = lsGet(SIDE_SEARCH_KEY); } catch (_) { /* optional browser storage */ }
+  return raw !== null && /^[1-7]$/.test(raw) ? Number(raw) : SIDE_SEARCH_ALL;
+})();
 function sessionFilterHaystack(bid, s) {
-  return (`${s.name || `Session ${s.id}`}\n${sessionLocationTitle(s, bid)}\n` +
-    backendName(bid)).toLowerCase();
+  const parts = [];
+  if (sideSearchIn & 1) parts.push(s.name || `Session ${s.id}`);
+  if (sideSearchIn & 2) parts.push(sessionLocationTitle(s, bid));
+  if (sideSearchIn & 4) parts.push(backendName(bid));
+  return parts.join("\n").toLowerCase();
 }
 
 /* The engine whose own CLI a terminal tab runs, named as the footer names it;
@@ -11391,7 +11410,39 @@ $("toggle-archived").onclick = () => { state.showArchived = !state.showArchived;
 /* ---- sidebar quick-search ----
    Typing filters the visible session rows immediately; while anything is
    typed the magnifier becomes the clear cross. The sliders open the
-   full-history Search tab, carrying whatever was typed here. */
+   full-history Search tab, carrying whatever was typed here. Focusing the box
+   slides out what it looks in - name, path, backend - inside its own border,
+   and they stay out until the box is left empty. A press on a choice keeps
+   the caret where it was, so the typing goes on. */
+let sideSearchOpen = false;
+
+function syncSideSearchIn() {
+  for (const choice of $("side-search-in").querySelectorAll(".side-search-choice")) {
+    const bit = Number(choice.dataset.bit), on = !!(sideSearchIn & bit);
+    choice.setAttribute("aria-checked", String(on));
+    choice.querySelector(".menu-check-mark").replaceChildren(...(on ? [checkIcon(13)] : []));
+    if (on && sideSearchIn === bit) choice.setAttribute("aria-disabled", "true");
+    else choice.removeAttribute("aria-disabled");
+  }
+}
+
+function setSideSearchIn(mask) {
+  if (!Number.isInteger(mask) || mask < 1 || mask > SIDE_SEARCH_ALL) return;
+  sideSearchIn = mask;
+  try {
+    if (mask === SIDE_SEARCH_ALL) lsDel(SIDE_SEARCH_KEY);
+    else lsSet(SIDE_SEARCH_KEY, String(mask));
+  } catch (_) { /* this page keeps it */ }
+  syncSideSearchIn();
+  if (state.sessionFilter) renderSidebar();
+}
+
+function showSideSearchIn(open) {
+  if (sideSearchOpen === open) return;
+  sideSearchOpen = open;
+  setDisclosureCollapsed($("side-search-in"), !open, true);
+}
+
 function syncSideSearch() {
   const go = $("side-search-go");
   const active = !!state.sessionFilter;
@@ -11415,6 +11466,30 @@ function clearSideSearch() {
 
 {
   const input = $("side-search-input");
+  const box = $("side-search");
+  const choices = el("div", "side-search-choices");
+  for (const { label, bit } of SIDE_SEARCH_FIELDS) {
+    const choice = el("button", "side-search-choice");
+    choice.type = "button";
+    choice.dataset.bit = String(bit);
+    choice.setAttribute("role", "checkbox");
+    choice.append(el("span", "menu-check-mark"), el("span", "", label));
+    choice.addEventListener("pointerdown", event => {
+      if (event.pointerType !== "touch") event.preventDefault();
+    });
+    choice.onclick = () => {
+      if (choice.getAttribute("aria-disabled") === "true") return;
+      setSideSearchIn(sideSearchIn ^ bit);
+    };
+    choices.appendChild(choice);
+  }
+  $("side-search-in").appendChild(choices);
+  syncSideSearchIn();
+  input.addEventListener("focus", () => showSideSearchIn(true));
+  box.addEventListener("focusout", event => {
+    if (box.contains(event.relatedTarget)) return;
+    if (!input.value.trim()) showSideSearchIn(false);
+  });
   input.addEventListener("input", applySideSearch);
   input.addEventListener("keydown", event => {
     if (event.key === "Enter") {

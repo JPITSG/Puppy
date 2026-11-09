@@ -446,13 +446,32 @@ html.popout body::after{--side-w:0px}
 /* ---------- sidebar quick-search ---------- */
 /* One bordered field holding the input and its two icon actions, sitting
    between the session list and the status box below. The container is the
-   field, so the buttons live inside the text area as designed. */
+   field, so the buttons live inside the text area as designed. While the box
+   is in use, what it looks in slides out inside the same border above the
+   input, set off by a hairline: the three choices spread from the text's
+   column to the same inset at the right, with the room shared between them. */
 .side-search{
-  display:flex;align-items:center;gap:2px;flex-shrink:0;
-  height:var(--toolbar-h);margin:10px 14px;padding:0 4px 0 9px;
+  display:flex;flex-direction:column;flex-shrink:0;margin:10px 14px;
   background:var(--panel2);border:1px solid var(--line2);border-radius:var(--r-md);
   transition:border-color var(--t-base) var(--ease),box-shadow var(--t-base) var(--ease);
 }
+.side-search-row{
+  display:flex;align-items:center;gap:2px;
+  height:calc(var(--toolbar-h) - 2px);padding:0 4px 0 9px;
+}
+.side-search-in[hidden]{display:none}
+.side-search-choices{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  height:var(--toolbar-h);padding:0 9px;border-bottom:1px solid var(--line);
+}
+.side-search-choice{
+  display:inline-flex;align-items:center;gap:5px;min-width:0;height:22px;margin:0;padding:0;
+  border:0;background:none;color:var(--txt2);font:var(--fs-xs) var(--sans);white-space:nowrap;cursor:pointer;
+  transition:color var(--t-fast) var(--ease);
+}
+.side-search-choice .menu-check-mark{width:13px;height:13px;margin-left:0}
+.side-search-choice[aria-disabled=true]{cursor:default}
+@media (hover:hover){.side-search-choice:not([aria-disabled=true]):hover{color:var(--txt)}}
 .side-search:focus-within{border-color:var(--focus-line);box-shadow:0 0 0 3px var(--focus-ring)}
 .side-search.filtering{border-color:var(--acc-line-soft)}
 .side-search input[type=text]{
@@ -500,6 +519,7 @@ html.popout body::after{--side-w:0px}
    collapses to nothing rather than to a hairline. */
 .foot-engine-body.disclosure-animating,
 .host-sec-body.disclosure-animating,
+.side-search-in.disclosure-animating,
 .foot-host.disclosure-animating,
 .foot-notices.disclosure-animating{
   overflow:hidden;

@@ -4856,6 +4856,133 @@ async def queue_drag_checks(a, b, hub):
           flush=True)
 
 
+async def side_search_checks(instance):
+    """What the sidebar's quick search looks in, in real layout. A real click
+    in the box slides the three choices out inside its border, above the
+    input and set off by a hairline; the box is the same 30px as before while
+    they are away. They spread from the text's own column to the same inset at
+    the right with the room shared between them, on one line, at the default
+    width and the narrowest the sidebar takes, in both themes. A real click on
+    a choice leaves the caret in the box and the list follows at once; the
+    last one left cannot be taken away; the browser keeps the choice through a
+    reload. Left with words in it, the box keeps them out; Escape clears the
+    words and then lets the box go, and they slide away with it."""
+    box, panel, field = "$('side-search')", "$('side-search-in')", "$('side-search-input')"
+    rows = "document.querySelectorAll('#sess-groups .sess-item').length"
+
+    async def mouse(x, y):
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {"type": kind, "x": x, "y": y, "button": "left",
+                                                             "clickCount": 1}, session=instance.page_session)
+
+    async def click(expression):
+        spot = await evaluate(instance, "(() => { const r = (%s).getBoundingClientRect();"
+                              " return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()" % expression)
+        await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": spot["x"], "y": spot["y"]},
+                            session=instance.page_session)
+        await mouse(spot["x"], spot["y"])
+
+    async def escape():
+        for kind in ("keyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Escape", "code": "Escape",
+                                                           "windowsVirtualKeyCode": 27}, session=instance.page_session)
+
+    choice = lambda n: "%s.querySelectorAll('.side-search-choice')[%d]" % (panel, n)
+    settled = "!%s.classList.contains('disclosure-animating')" % panel
+    measure = """(() => {
+        const rect=n=>n.getBoundingClientRect();
+        const outer=rect(%s), input=rect(%s), choices=%s.querySelector('.side-search-choices');
+        const items=[...choices.children].map(item=>{
+            const range=document.createRange(); range.selectNodeContents(item.children[1]);
+            return {tick:rect(item.children[0]), label:range.getBoundingClientRect(), item:rect(item)};
+        });
+        return {height:outer.height, panel:rect(%s).height, row:rect(choices).height,
+            left:outer.left+1, right:outer.right-1, input:input.left,
+            items:items.map(i=>({tick:i.tick.left, labelRight:i.label.right, top:i.item.top, height:i.item.height})),
+            fits:choices.scrollWidth<=choices.clientWidth && document.querySelector('.side-content').scrollWidth<=document.querySelector('.side-content').clientWidth};
+    })()""" % (box, field, panel, panel)
+
+    try:
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        await evaluate(instance, "lsDel(SIDE_SEARCH_KEY); sideSearchIn = SIDE_SEARCH_ALL; syncSideSearchIn(); "
+                                 "clearSideSearch(); document.activeElement.blur(); true")
+        await until(instance, "%s.hidden && %s" % (panel, settled))
+        closed = await evaluate(instance, "(%s).getBoundingClientRect().height" % box)
+        assert closed == 30, closed
+
+        await click(field)
+        assert await evaluate(instance, "document.activeElement === %s" % field)
+        await until(instance, "!%s.hidden && %s" % (panel, settled))
+        for width in ("default", "narrowest"):
+            if width == "narrowest":
+                await evaluate(instance, "document.documentElement.style.setProperty('--side-w', sideMinWidth + 'px');"
+                                         "document.documentElement.style.setProperty('--side-w-open', sideMinWidth + 'px'); true")
+                await asyncio.sleep(.3)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                m = await evaluate(instance, measure)
+                where = (width, theme, m)
+                assert m["height"] == 30 + m["panel"] and m["row"] == 30, where
+                assert abs(m["items"][0]["tick"] - m["input"]) < .5, where
+                inset = m["input"] - m["left"]
+                assert abs((m["right"] - m["items"][2]["labelRight"]) - inset) < 1, where
+                gaps = [m["items"][i + 1]["tick"] - m["items"][i]["labelRight"] for i in range(2)]
+                assert abs(gaps[0] - gaps[1]) < 1 and gaps[0] >= 8, where
+                assert len({round(i["top"]) for i in m["items"]}) == 1 and all(i["height"] == 22 for i in m["items"]), where
+                assert m["fits"], where
+        await evaluate(instance, "applyTheme('dark'); const saved = savedSideWidth();"
+                                 "document.documentElement.style.setProperty('--side-w', saved + 'px');"
+                                 "document.documentElement.style.setProperty('--side-w-open', saved + 'px'); true")
+        await asyncio.sleep(.3)
+
+        # a press on a choice keeps the caret, and the list follows at once
+        await instance.call("Input.insertText", {"text": "mira"}, session=instance.page_session)
+        await until(instance, rows + " === 5")
+        await click(choice(1))
+        assert await evaluate(instance, "document.activeElement === %s && %s.getAttribute('aria-checked') === 'false'"
+                              % (field, choice(1)))
+        await until(instance, rows + " === 0 && !!document.querySelector('#sess-groups .sess-empty')")
+        assert await evaluate(instance, "lsGet(SIDE_SEARCH_KEY)") == "5"
+        await click(choice(1))
+        await until(instance, rows + " === 5")
+        # the last one left stays
+        await click(choice(0))
+        await click(choice(1))
+        assert await evaluate(instance, "%s.getAttribute('aria-disabled')" % choice(2)) == "true"
+        await click(choice(2))
+        assert await evaluate(instance, "sideSearchIn") == 4 and await evaluate(instance, "lsGet(SIDE_SEARCH_KEY)") == "4"
+        assert await evaluate(instance, "document.activeElement === %s" % field)
+
+        # left with words in it, they stay; Escape clears and keeps them; the
+        # empty box let go takes them away
+        await mouse(800, 450)
+        await asyncio.sleep(.4)
+        assert await evaluate(instance, "document.activeElement !== %s && !%s.hidden" % (field, panel))
+        await click(field)
+        await escape()
+        assert await evaluate(instance, "%s.value === '' && document.activeElement === %s && !%s.hidden"
+                              % (field, field, panel))
+        await escape()
+        await until(instance, "%s.hidden && %s" % (panel, settled))
+        assert await evaluate(instance, "(%s).getBoundingClientRect().height" % box) == 30
+
+        # the browser keeps the choice
+        await instance.call("Page.reload", session=instance.page_session)
+        await until(instance, "typeof state !== 'undefined' && state.sessions.length > 0 && !!state.views['s:0:1']")
+        await evaluate(instance, "window.demoView = state.views['s:0:1'].activeView(); true")
+        await until(instance, "demoView.draftReady")
+        assert await evaluate(instance, "sideSearchIn") == 4
+        assert await evaluate(instance, "[...%s.querySelectorAll('.side-search-choice')].map(c => c.getAttribute('aria-checked')).join()"
+                              % panel) == "false,false,true"
+    finally:
+        await evaluate(instance, "lsDel(SIDE_SEARCH_KEY); true")
+    print("PASS: the quick search's choices slide out inside its border on a real click, spread from the text's "
+          "column to the same inset at either width in both themes, keep the caret and filter at once, never "
+          "leave nothing, stay while words are in the box, go with it when left empty, and are kept by the browser",
+          flush=True)
+
+
 async def session_mention_checks(instance):
     await evaluate(instance, "demoView.composer.set('', true); demoView.composer.ta.focus(); true")
     await type_text(instance, "@Session-P")
@@ -6764,6 +6891,7 @@ async def git_sheet_checks(a):
 async def checks(a, b, hub, capture=False):
     await background_count_checks(a, b, hub)
     await queue_drag_checks(a, b, hub)
+    await side_search_checks(a)
     await git_mark_checks(a, b)
     await git_sheet_checks(a)
     await icon_alignment_checks(a)
@@ -10409,6 +10537,9 @@ async def main(args):
             if args.queue_drag_only:
                 await queue_drag_checks(*instances, runner.hub(sid))
                 return
+            if args.side_search_only:
+                await side_search_checks(instances[0])
+                return
             if args.thinking_only:
                 await thinking_disclosure_checks(instances[0])
                 return
@@ -10503,6 +10634,7 @@ if __name__ == "__main__":
     parser.add_argument("--host-panel-only", action="store_true")
     parser.add_argument("--browser-drag-only", action="store_true")
     parser.add_argument("--queue-drag-only", action="store_true")
+    parser.add_argument("--side-search-only", action="store_true")
     parser.add_argument("--popout-only", action="store_true")
     parser.add_argument("--running-only", action="store_true")
     parser.add_argument("--background-tasks-only", action="store_true")

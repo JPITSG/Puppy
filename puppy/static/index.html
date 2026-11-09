@@ -26,11 +26,15 @@
         <button class="linklike" id="toggle-archived">Show archived</button>
       </div>
       <div class="side-search" id="side-search">
-        <input type="text" id="side-search-input" placeholder="Search sessions"
-          aria-label="Search sessions" autocomplete="off" autocapitalize="off" spellcheck="false">
-        <button class="side-search-btn" id="side-search-adv" type="button"
-          aria-label="Advanced search"></button>
-        <button class="side-search-btn" id="side-search-go" type="button" aria-label="Search"></button>
+        <div class="side-search-in" id="side-search-in" role="group" aria-label="Search in" hidden></div>
+        <div class="side-search-row">
+          <input type="text" id="side-search-input" placeholder="Search sessions"
+            aria-label="Search sessions" aria-controls="side-search-in"
+            autocomplete="off" autocapitalize="off" spellcheck="false">
+          <button class="side-search-btn" id="side-search-adv" type="button"
+            aria-label="Advanced search"></button>
+          <button class="side-search-btn" id="side-search-go" type="button" aria-label="Search"></button>
+        </div>
       </div>
       <div class="side-foot">
         <div class="foot-engines" id="foot-engines"></div>
