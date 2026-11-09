@@ -330,7 +330,7 @@ function header(sid = 1, bid = 0) {
     v.updateApprovalControl = v.setSteeringState = v.setSideQuestionState =
     v.initializeDraft = v.rebuildTranscript = v.mergeSkipped = v.renderQueue =
     v.updateHead = v.syncLiveStatus = v.hideApproval = v.clearLive =
-    v.renderEvent = v.syncTailPill = () => {};
+    v.renderEvent = v.syncTailPill = v.syncFolderState = () => {};
   v.setStatus = text => { v.statusText = text; };
   v.skippedEvents = [];
   v.atBottom = () => false;

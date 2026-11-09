@@ -40,6 +40,7 @@ const context = vm.createContext({
   workspaceLocationTitle: () => "/home/mira/projects/harbor",
   renderTabs() {},
   linkifyInto: (node, text) => { node.textContent = text; return node; },
+  findSessionMeta: () => null,
 });
 vm.runInContext([
   between("const el = ", "/* Close buttons"),
@@ -48,6 +49,7 @@ vm.runInContext([
   between("function taskUpdateNode(", "function sessionTaskUpdateNode("),
   between("function effectiveQueuedConfig(", "/* Whether two session rows differ"),
   between("class SessionView {", "/* ================= TermView"),
+  between("/* A session's working folder is gone on its node", "/* Confirm copy:"),
   "globalThis.SessionView = SessionView;",
 ].join("\n"), context);
 const c = context;

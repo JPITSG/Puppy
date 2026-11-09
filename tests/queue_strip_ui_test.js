@@ -71,6 +71,7 @@ const context = vm.createContext({
 vm.runInContext([
   between("const el = ", "/* Close buttons"),
   between("const QUEUE_ROWS = ", "\n"),
+  between("/* A session's working folder is gone on its node", "/* Confirm copy:"),
   between("function engineInfo(", "function engineReady("),
   between("function engineModelOption(", "function engineOffersModel("),
   between("const headWord = ", '/* "5.6-Sol Max"'),
@@ -84,6 +85,7 @@ vm.runInContext([
   "  followingTail(fn) { this.paints = (this.paints || 0) + 1; fn(); }",
   "  cancelQueueDrag() {} wireQueueDropZone() {} syncQueueFade() {} syncQueueEditBusy() {}",
   "  wireQueueDrag(row) { row.classList.add('q-sortable'); }",
+  "  folderPaused() { return !!this.folderGone; }",
   "  setBackgroundTasks() {} updateHead() { this.heads = (this.heads || 0) + 1; }",
   between("  /* A queue entry is a prompt string", "  prepareQueueDrag(row, event) {"),
   /* the socket's session_meta frame, as the real handler takes it */
@@ -342,4 +344,32 @@ const claude = { engine: "claude", model: "claude-fable-5-1", effort: "max",
   assert.deepEqual(skip(parked), ["", ""], "a held row never says skipped");
 }
 
-console.log("PASS: queued changes name both sides of every field against what is in force where they stand; every waiting row can be dragged, and one moved away from its engine says it will be skipped");
+/* a paused session - its working folder gone - says what its queue waits
+   for, and a held prompt or tool waits with it; a held change to the
+   settings needs no folder and stays a press away */
+{
+  const held = ["held prompt",
+    { kind: "config", key: "h1", engine: "claude", effort: "low" },
+    { kind: "tool", key: "t1", engine: "claude", tool: "compact" }];
+  const host = mount(claude, ["one"], held);
+  const head = () => host.queueEl.querySelector(".q-head").textContent;
+  const resends = () => host.queueEl.querySelectorAll(".q-resend")
+    .map(button => [button.disabled, button.getAttribute("aria-label")]);
+  assert.equal(head(), "queued · 4");
+  assert.deepEqual(resends().map(r => r[0]), [false, false, false]);
+  host.folderGone = true;
+  host.renderQueue(host.queued, host.held, [], 2);
+  assert.equal(head(), "queued · 4 · waiting for the folder");
+  assert.deepEqual(resends(), [
+    [true, "Paused · the working folder is unavailable"],
+    [false, "Apply this held change"],
+    [true, "Paused · the working folder is unavailable"],
+  ]);
+  const heldOnly = mount(claude, [], ["held prompt"]);
+  heldOnly.folderGone = true;
+  heldOnly.renderQueue([], ["held prompt"], [], 2);
+  assert.equal(heldOnly.queueEl.querySelector(".q-head").textContent, "queued · 1",
+    "held work waits for a decision, not for the folder");
+}
+
+console.log("PASS: queued changes name both sides of every field against what is in force where they stand; every waiting row can be dragged, and one moved away from its engine says it will be skipped; a paused session's queue says it waits for the folder and its held prompts wait with it");

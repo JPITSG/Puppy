@@ -125,6 +125,33 @@ async def clean_apply_and_fold():
     print("PASS: a finished task set to apply when done is applied, folded and closed; Main's index untouched")
 
 
+async def main_folder_gone_waits():
+    """Main's working folder gone is a wait, never a reason to give up: a
+    finished task set to apply when done stays armed with the reason on its
+    line and no row saying it was not applied, a new task is refused naming
+    the folder rather than a missing repository, and once the folder is back
+    the task applies and folds as usual."""
+    path, parent = project("gone")
+    sid, copy = await new_task(parent, "gone")
+    (copy / "b.txt").write_text("b from the task\n")
+    finish(sid)
+    path.rename(ROOT / "gone-away")
+    try:
+        await worker_pass()
+        assert tasks.auto_record(sid) is not None, "the switch stays on"
+        assert db.get_session(sid) is not None
+        assert tasks.public(sid)["auto_apply"]["note"] == "waiting for Main's working folder"
+        assert not any("not applied automatically" in text for text in texts(parent))
+        await rejected(tasks.create(parent, {"prompt": "Another", "request_id": "gone-2"}),
+                       "Main's working folder is unavailable")
+    finally:
+        (ROOT / "gone-away").rename(path)
+    await worker_pass()
+    assert (path / "b.txt").read_text() == "b from the task\n"
+    assert db.get_session(sid) is None and tasks.auto_record(sid) is None
+    print("PASS: a task set to apply when done waits for Main's working folder, and applies once it is back")
+
+
 async def merged_with_main_drift():
     path, parent = project("drift")
     sid, copy = await new_task(parent, "drift")
@@ -625,6 +652,7 @@ async def main():
     from puppy.drivers.base import Driver
     with patch.object(Driver, "refresh_model_options", AsyncMock()):
         await clean_apply_and_fold()
+        await main_folder_gone_waits()
         await merged_with_main_drift()
         await conflict_rounds()
         await rounds_bound_and_switch_off()

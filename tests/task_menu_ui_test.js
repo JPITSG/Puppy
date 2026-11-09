@@ -24,7 +24,7 @@ const context = vm.createContext({
   menuCheckRow: () => document.createElement("button"),
   chatLogMenu: () => document.createElement("div"),
   sessionViewShowsMeta: () => true, setSessionShowsMeta() {}, appendSessionTasksToggle() {},
-  sessionWorkspace: () => null, isScratchWorkspace: () => true,
+  sessionWorkspace: () => null, isScratchWorkspace: () => true, findSessionMeta: () => null,
   positionAnchoredMenu() {},
   modalReviewTask: (workspace, session) => { reviewed = { workspace, session }; },
   api: (bid, path, opts) => new Promise((resolve, reject) => {
@@ -38,6 +38,7 @@ vm.runInContext([
   between("function canMoveScratch(", "function modalMoveWorkspace("),
   between("function liveViews(", "/* A removed task's condensed conversation"),
   between("class SessionView {", "/* ================= TermView"),
+  between("/* A session's working folder is gone on its node", "/* Confirm copy:"),
   'globalThis.SessionView = SessionView;',
   'globalThis.Workspace = class {',
   between("  ensureTask(task) {", "  openTask(sid) {"),
@@ -164,5 +165,54 @@ for (const bid of [0, 7]) {
   state.nodeCapabilities = ["session-task-refresh", "session-task-auto-apply"];
   assert.equal(open(), undefined, "Main has no switch of its own");
 }
-console.log("PASS: local and remote task menus follow live states; refresh sits below review, gates capability, deduplicates requests and reports success, no-op, refusal and cancellation; the Apply to Main when done switch reads the list and asks for the opposite");
+
+/* A working folder gone: Review reads the task's own copy and greys with
+   it; Refresh from Main also needs Main's folder; Main's Move project has
+   nothing to move. Each follows the list, which the stream keeps current. */
+{
+  const metas = {
+    12: { id: 12, name: "Task", task: { parent: 10, state: "ready" } },
+    10: { id: 10, name: "Main", workspace_kind: "directory", cwd: "/home/mira/projects/harbor" },
+  };
+  context.findSessionMeta = (bid, sid) => metas[sid] || null;
+  state.nodeCapabilities = ["session-task-refresh", "project-move"];
+  const view = Object.create(context.SessionView.prototype);
+  view.tab = { bid: 0, sid: 12, type: "session" };
+  view.root = document.createElement("div");
+  view.session = { ...metas[12] };
+  const workspace = new context.Workspace();
+  workspace.tab = { bid: 0, sid: 10 };
+  workspace.taskViews = new Map([[12, view]]);
+  state.views["s:0:10"] = workspace;
+  const anchor = document.createElement("button");
+  document.body.appendChild(anchor);
+  const open = () => {
+    document.querySelectorAll(".menu").forEach(menu => menu.remove());
+    view.showMenu(anchor);
+    return [view.taskReviewMenuButton.disabled, view.taskRefreshMenuButton.disabled];
+  };
+  assert.deepEqual(open(), [false, false], "both folders there: both a press away");
+  metas[10] = { ...metas[10], cwd_available: false };
+  assert.deepEqual(open(), [false, true], "Main's folder gone: the changes read, the refresh waits");
+  metas[12] = { ...metas[12], cwd_available: false };
+  assert.deepEqual(open(), [true, true], "the task's own copy gone: nothing to review");
+  metas[10] = { ...metas[10], cwd_available: true };
+  metas[12] = { ...metas[12], cwd_available: true };
+  assert.deepEqual(open(), [false, false]);
+  // Main's own menu: Move project stays on the menu, greyed while the folder is gone
+  const main = Object.create(context.SessionView.prototype);
+  main.tab = { bid: 0, sid: 10, type: "session" };
+  main.root = document.createElement("div");
+  main.session = { ...metas[10] };
+  const move = () => {
+    document.querySelectorAll(".menu").forEach(menu => menu.remove());
+    main.showMenu(anchor);
+    return document.querySelector(".menu").children.find(row => row.textContent === "Move project");
+  };
+  assert.equal(move().disabled, false);
+  metas[10] = { ...metas[10], cwd_available: false };
+  assert.equal(move().disabled, true, "there is nothing to move");
+  delete state.views["s:0:10"];
+}
+console.log("PASS: local and remote task menus follow live states; refresh sits below review, gates capability, deduplicates requests and reports success, no-op, refusal and cancellation; the Apply to Main when done switch reads the list and asks for the opposite; Review, Refresh from Main and Move project grey with the folders they need");
 })().catch(error => { console.error(error); process.exitCode = 1; });

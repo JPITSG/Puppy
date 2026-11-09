@@ -92,6 +92,8 @@ vm.runInContext([
   between("/* Under the anchor, or at a point when one was given. */",
           "/* ================= composer @-mentions"),
   between("function liveViews()", "/* The wrapper that owns"),
+  between("/* A session's working folder is gone on its node", "/* Confirm copy:"),
+  between("function isScratchWorkspace(", "/* Whether a session shows its head strip"),
   between("function applyNodeStateSnapshot(", "function applyRemoteStreamState("),
   between("function syncRemoteStateViews()", "function remoteStoppingMessage("),
   between("const SESSION_TOOLS =", "function sessionToolLabel("),
@@ -199,6 +201,19 @@ function engineCatalog(fast = false) {
   state.engines[0].tool_options = []; update();
   assert.equal(button(withdrawn, "Compact context").disabled, true, "withdrawn actions disable live");
   withdrawn.remove();
+  /* a session whose working folder is gone offers no session tool - each
+     starts a turn in that folder - and says why; the list brings it back */
+  state.engines[0].tool_options = [{ value: "compact" }];
+  const keptSessions = state.sessions;
+  state.sessions = [{ id: 1, cwd_available: false }];
+  const pausedTools = toolsMenu(view, anchor);
+  assert.equal(button(pausedTools, "Compact context").disabled, true, "a paused session runs no tool");
+  assert.ok(view.toolsMenuSpec().opts.every(o => o.disabled && o.hint === "Paused · the working folder is unavailable"));
+  state.sessions[0].cwd_available = true; update();
+  assert.equal(button(pausedTools, "Compact context").disabled, false, "the folder back, the tool is back");
+  pausedTools.remove();
+  state.sessions = keptSessions;
+  state.engines[0].tool_options = [];
   view.tab.bid = 7; state.engCache[7] = state.engines;
   view.session.permission_mode = "safe";
   const perm = view.showPermMenu(anchor);

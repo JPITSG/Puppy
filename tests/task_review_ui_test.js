@@ -56,12 +56,13 @@ const context = vm.createContext({ state, modal, api, el: (...args) => new Eleme
   backendName: bid => bid ? "Remote" : "Local",
   fmtStamp: () => "12:00", TOAST_LONG: 7000, toast: text => notices.push(text),
   activateTab: id => navigation.push(["activate", id]),
-  refreshSessionList: async () => { if (refreshFailure) throw new Error(refreshFailure); }, renderSidebar() {} });
+  refreshSessionList: async () => { if (refreshFailure) throw new Error(refreshFailure); }, renderSidebar() {}, findSessionMeta: () => null });
 vm.runInContext([
   between("function backendSupportsTaskFold(", "/* \"Enable tasks\""),
   between("const TASK_STATES =", "/* two offset frames:"),
   between("async function removeTaskSession(", "async function removeTask("),
   between("async function modalReviewTask(", "class SessionView {"),
+  between("/* A session's working folder is gone on its node", "/* Confirm copy:"),
 ].join("\n"), context);
 async function open(data = changed) {
   response = data; failure = ""; requests = []; notices = []; held = null; workspace.opened = null;
@@ -239,5 +240,17 @@ const lastBody = () => JSON.parse(JSON.stringify(requests.at(-1).body));
   assert.equal(dialog.nodes["#tr-apply"].disabled, true);
   assert.equal(dialog.nodes["#tr-resolve"].disabled, true);
   assert.equal(dialog.nodes["#tr-fold"].disabled, true);
-  console.log("PASS: review toggles, apply then fold, fold retry, defaults, duplicate guard, progress, errors, Main focus, empty changes and local/remote capabilities");
+
+  // Main's working folder gone: the task's changes still read from its own
+  // copy, but nothing is applied into a folder that is not there
+  context.findSessionMeta = (bid, sid) => sid === workspace.tab.sid ? { id: sid, cwd_available: false } : null;
+  nodes = await open();
+  assert.equal(nodes["#tr-apply"].disabled, true, "Apply waits for Main's folder");
+  assert.equal(nodes[".task-review-note"].textContent, "Main's working folder is unavailable · apply once it is back.");
+  assert.equal(nodes[".task-review-note"].classes.has("hidden"), false);
+  assert.match(nodes["#tr-files"].textContent, /a\.txt/, "the changes still show");
+  context.findSessionMeta = () => null;
+  nodes = await open();
+  assert.equal(nodes["#tr-apply"].disabled, false, "and it is a press away once the folder is back");
+  console.log("PASS: review toggles, apply then fold, fold retry, defaults, duplicate guard, progress, errors, Main focus, empty changes, local/remote capabilities and Apply waiting for Main's folder");
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -4856,6 +4856,147 @@ async def queue_drag_checks(a, b, hub):
           flush=True)
 
 
+async def folder_pause_checks(instance, sid):
+    """A session whose working folder is gone on its node is paused in the
+    console, in real layout: the node's verdict reaches the list, and with it
+    the sidebar's path and the head's location read red, the Git and notes
+    marks become readings, the chat box keeps its draft but takes no typing,
+    says why on its own line in the same red and greys Send, a real Enter is
+    refused with the reason, the tools offer no session tool, the menus grey
+    Move project, the task strip greys its +, and the queue says what it
+    waits for - on a desktop and a phone in both themes. The folder back,
+    every one of them is a press away again."""
+    cwd = db.get_session(sid)["cwd"]
+    hub = runner.hub(sid)
+
+    async def mouse(x, y, button="left"):
+        await instance.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y},
+                            session=instance.page_session)
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {"type": kind, "x": x, "y": y, "button": button,
+                                                             "clickCount": 1}, session=instance.page_session)
+
+    async def click(expression, button="left"):
+        spot = await evaluate(instance, "(() => { const n = %s; n.scrollIntoView({block:'nearest'});"
+                              " const r = n.getBoundingClientRect();"
+                              " return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()" % expression)
+        await mouse(spot["x"], spot["y"], button)
+
+    async def key(name, code, vk):
+        for kind in ("keyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": name, "code": code,
+                                                           "windowsVirtualKeyCode": vk}, session=instance.page_session)
+
+    async def verdict(value):
+        session_directories._records[cwd] = value
+        runner.broadcast_sessions()
+        await until(instance, "(demoView.composer.pausedReason === '') === %s" % ("true" if value else "false"))
+
+    row = "document.querySelector(\"[data-session-key='0:%d']\")" % sid
+    read = """(() => {
+        const row = %s, box = demoView.composer.box, line = box.querySelector('.composer-presence');
+        const probe = document.createElement('span'); probe.style.color = 'var(--err)';
+        document.body.appendChild(probe); const err = getComputedStyle(probe).color; probe.remove();
+        const chip = demoView.root.querySelector('.chip.cwd');
+        const add = document.querySelector('.task-add-button');
+        return {path: row.querySelector('.si-sub').classList.contains('bad'),
+            marks: [...row.querySelectorAll('.si-git,.si-notes')].map(m => m.getAttribute('role')),
+            chip: chip.classList.contains('bad'), chipRed: getComputedStyle(chip).color === err,
+            readOnly: demoView.composer.ta.readOnly, paused: box.classList.contains('paused'),
+            line: line.classList.contains('hidden') ? '' : line.querySelector('.composer-presence-text').textContent,
+            lineRed: getComputedStyle(line).color === err,
+            lineFits: line.scrollWidth <= line.clientWidth + 1,
+            send: demoView.sendBtn.disabled, sendLabel: demoView.sendBtn.getAttribute('aria-label'),
+            attach: demoView.composer.attachButton.disabled,
+            add: add ? add.disabled : null,
+            head: (demoView.queueEl.querySelector('.q-head') || {}).textContent || '',
+            edit: (demoView.queueEl.querySelector('.q-edit') || {}).disabled,
+            fits: document.documentElement.scrollWidth <= innerWidth};
+    })()""" % row
+    try:
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        await evaluate(instance, "applyTheme('dark'); demoView.composer.set('Keep this draft', true); true")
+        hub.queue = ["Later, the release notes"]
+        hub._broadcast_queue()
+        await until(instance, "demoView.queueEl.querySelectorAll('.q-item').length === 1")
+        before = await evaluate(instance, read)
+        assert not before["path"] and not before["chip"] and not before["readOnly"] and not before["send"], before
+        assert before["marks"] == ["button", "button"] and before["add"] is False, before
+        assert before["head"] == "queued · 1" and before["edit"] is False, before
+
+        await verdict(False)
+        for width, height, name in [(1440, 900, "desktop"), (390, 844, "phone")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1, "mobile": name == "phone"},
+                session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                await asyncio.sleep(.1)
+                after = await evaluate(instance, read)
+                where = (name, theme, after)
+                assert after["path"] and after["chip"] and after["chipRed"], where
+                assert after["marks"] == ["img", "img"], where
+                assert after["readOnly"] and after["paused"] and after["attach"], where
+                assert after["line"] == "Paused · the working folder is unavailable" and after["lineRed"], where
+                assert after["lineFits"] and after["fits"], where
+                assert after["send"] and after["sendLabel"] == "Send · Paused · the working folder is unavailable", where
+                assert after["add"] is True, where
+                assert after["head"] == "queued · 1 · waiting for the folder", where
+                assert after["edit"] is True, where
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+        await evaluate(instance, "applyTheme('dark'); true")
+        assert await evaluate(instance, "demoView.composer.ta.value") == "Keep this draft"
+
+        # a real Enter in the box is refused with the reason, and nothing is sent
+        await evaluate(instance, "window.folderSent = []; const realSend = demoView.ws.send.bind(demoView.ws);"
+                                 "demoView.ws.send = text => { folderSent.push(text); return realSend(text); }; true")
+        await click("demoView.composer.ta")
+        await key("Enter", "Enter", 13)
+        await until(instance, "[...document.querySelectorAll('.toast')].some(t =>"
+                              " t.textContent.includes('Could not send · the working folder is unavailable'))")
+        assert await evaluate(instance, "folderSent.filter(t => JSON.parse(t).type === 'message').length") == 0
+        assert await evaluate(instance, "demoView.composer.ta.value") == "Keep this draft"
+
+        # the tools: every session tool greys, with the reason
+        await click("demoView.composer.box.querySelector('.tools-open')")
+        await until(instance, "!!document.querySelector('.choice-menu.dyn')")
+        tools = await evaluate(instance, """[...document.querySelector('.choice-menu.dyn')
+            .querySelectorAll('button')].filter(b => /Compact context|Undo last turn/.test(b.textContent))
+            .map(b => b.disabled)""")
+        assert tools and all(tools), tools
+        await mouse(800, 300)   # a press outside closes the float
+        await until(instance, "!document.querySelector('.choice-menu.dyn')")
+
+        # the head's ⋮ and the row's own menu grey Move project
+        for opener in ("demoView.root.querySelector('.menu-btn')", row):
+            await click(opener, "right" if opener == row else "left")
+            await until(instance, "!!document.querySelector('.menu.dyn')")
+            move = await evaluate(instance, "[...document.querySelector('.menu.dyn').children]"
+                                            ".filter(b => b.textContent === 'Move project').map(b => b.disabled)")
+            assert move == [True], (opener, move)
+            await evaluate(instance, "closeAllMenus(null); true")
+            await until(instance, "!document.querySelector('.menu.dyn')")
+
+        # the folder back: every one of them is a press away again
+        await verdict(True)
+        back = await evaluate(instance, read)
+        assert not back["path"] and not back["chip"] and not back["readOnly"] and not back["paused"], back
+        assert back["line"] == "" and not back["send"] and not back["attach"] and back["add"] is False, back
+        assert back["marks"] == ["button", "button"] and back["head"] == "queued · 1", back
+        assert back["edit"] is False, back
+    finally:
+        session_directories._records[cwd] = True
+        runner.broadcast_sessions()
+        hub.queue = []
+        hub._broadcast_queue()
+        await evaluate(instance, "demoView.composer.set('', true); applyTheme('dark'); true")
+    print("PASS: a session whose folder is gone is paused in the console - red path and location, inert marks, "
+          "a read-only box saying why, Send and Enter refused, no session tools, Move project and + greyed, the "
+          "queue waiting - on a desktop and a phone in both themes, and all of it back with the folder", flush=True)
+
+
 async def side_search_checks(instance):
     """What the sidebar's quick search looks in, in real layout. A real click
     in the box slides the three choices out inside its border, above the
@@ -6892,6 +7033,7 @@ async def checks(a, b, hub, capture=False):
     await background_count_checks(a, b, hub)
     await queue_drag_checks(a, b, hub)
     await side_search_checks(a)
+    await folder_pause_checks(a, hub.id)
     await git_mark_checks(a, b)
     await git_sheet_checks(a)
     await icon_alignment_checks(a)
@@ -10540,6 +10682,9 @@ async def main(args):
             if args.side_search_only:
                 await side_search_checks(instances[0])
                 return
+            if args.folder_pause_only:
+                await folder_pause_checks(instances[0], sid)
+                return
             if args.thinking_only:
                 await thinking_disclosure_checks(instances[0])
                 return
@@ -10635,6 +10780,7 @@ if __name__ == "__main__":
     parser.add_argument("--browser-drag-only", action="store_true")
     parser.add_argument("--queue-drag-only", action="store_true")
     parser.add_argument("--side-search-only", action="store_true")
+    parser.add_argument("--folder-pause-only", action="store_true")
     parser.add_argument("--popout-only", action="store_true")
     parser.add_argument("--running-only", action="store_true")
     parser.add_argument("--background-tasks-only", action="store_true")

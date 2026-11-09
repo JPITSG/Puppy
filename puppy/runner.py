@@ -66,6 +66,45 @@ def hub(session_id: int) -> "SessionHub":
     return h
 
 
+# Why nothing may start in a session whose working folder is gone. The
+# console says the same in its own words; this is what a refused request
+# answers with.
+FOLDER_PAUSED = "The working folder is unavailable · this session waits until it is back"
+
+
+def folder_paused(session) -> str:
+    """Why nothing may start in this session: its working folder is
+    unavailable to the node. Empty when it is not, or when nobody knows yet.
+
+    The node's own cached verdict (session_directories) is the evidence -
+    never a filesystem call here, on the loop - so an unknown folder is not a
+    missing one. A scratch Main is never paused: its next turn gives it a new
+    folder, as it always has. A task's copy, a linked session's mirror and an
+    ordinary project folder cannot be made again, so their work waits for the
+    folder, and folders_returned moves it on once the folder is back."""
+    if not session:
+        return ""
+    if workspaces.is_temporary(session) and session_tasks.record(int(session["id"])) is None:
+        return ""
+    if session_directories.record(session.get("cwd")) is not False:
+        return ""
+    return FOLDER_PAUSED
+
+
+def folders_returned(cwds) -> None:
+    """Working folders the node can read again: a queue that waited for one
+    moves on, as if the turn ahead of it had just ended."""
+    cwds = {str(cwd) for cwd in cwds or () if cwd}
+    if not cwds:
+        return
+    for session_id, h in list(_hubs.items()):
+        if h.status == "running" or not h.queue:
+            continue
+        session = db.get_session(session_id)
+        if session is not None and str(session.get("cwd") or "") in cwds:
+            h._start_queue_if_ready()
+
+
 def drop_hub(session_id: int) -> None:
     """Forget a session's hub when the session itself is being deleted.
 
@@ -1467,6 +1506,11 @@ class SessionHub:
         session = db.get_session(self.id)
         if session is None:
             return {"error": "session gone"}
+        # Nothing new starts or queues while the folder it would run in is
+        # gone: the session is paused until the folder is back.
+        paused = folder_paused(session)
+        if paused:
+            return {"error": paused}
         # The upgrade route checks the opposite direction before claiming its
         # slot. Check here as well so a message cannot spawn an engine after
         # its installed package has begun being rewritten in place. A new
@@ -2010,6 +2054,9 @@ class SessionHub:
         session = db.get_session(self.id)
         if session is None:
             return {"error": "session gone"}
+        paused = folder_paused(session)
+        if paused:
+            return {"error": paused}
         label = SESSION_TOOLS.get(tool, tool)
         engine = self.pending_config()["engine"]
         try:
@@ -2606,6 +2653,8 @@ class SessionHub:
         the queue still."""
         if self._queue_reorder is not None or _draining:
             return False
+        if folder_paused(db.get_session(self.id)):
+            return False   # nothing behind the wait could start
         return any(index not in self.paused_queue and
                    (not isinstance(item, dict) or _is_queued_tool(item))
                    for index, item in enumerate(self.queue))
@@ -2642,7 +2691,10 @@ class SessionHub:
             return None
         next_prompt = next((index for index in prompt_indexes
                             if index not in self.paused_queue), None)
-        if next_prompt is None:
+        # A folder gone from under the session holds the whole queue as it
+        # stands - nothing is applied or started - until folders_returned
+        # moves it on.
+        if next_prompt is None or folder_paused(db.get_session(self.id)):
             self.status = "idle"
             self.active_since = None
             return None

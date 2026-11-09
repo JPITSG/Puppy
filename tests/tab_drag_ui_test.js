@@ -87,6 +87,7 @@ function harness(bid = 0, namespace = "") {
   vm.runInContext([
     'let dragTab = null, tabDropMarker = null;',
     between("const el = ", "/* Close buttons"),
+    between("/* A session's working folder is gone on its node", "/* Confirm copy:"),
     between("function promptStatusBase(", "/* Claude exposes a streaming thinking block"),
     between("function guardNativeTouchDrag(", "/* A compact backend label"),
     between("const SLIDE_MOTION_MS =", "/* Sticky manual ordering"),

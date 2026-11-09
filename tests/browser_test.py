@@ -606,6 +606,13 @@ async def mcp_request(proc, request_id, method, params=None):
     return response
 
 
+def folder_rule(ui_source: str) -> str:
+    """The console's one rule for a session whose working folder is gone,
+    for the scripts below that build views from the console's own source."""
+    return ui_source[ui_source.index("/* A session's working folder is gone on its node"):
+                     ui_source.index("/* Confirm copy:")]
+
+
 def check_free_identifiers(ui_source: str) -> None:
     """Class methods must not reach for a name only the constructor has.
     `node --check` parses such a reference happily and a string assert never
@@ -742,6 +749,8 @@ def check_session_task_visibility(ui_source: str) -> None:
     bootstrap has not arrived is never read as disabled."""
     start = ui_source.index("function liveViews()")
     end = ui_source.index("async function modalNewTask(", start)
+    # the strip reads Main's folder through the console's one rule
+    folder = folder_rule(ui_source)
     script = """
 const assert = require("assert");
 let session = { id: 1, tasks_enabled: true, status: "idle", color: "#abc", engine: "codex" };
@@ -790,7 +799,7 @@ session = null;
 view.refreshTasks();
 console.log(JSON.stringify({ painted, disabledWithoutBootstrap: view.root.classList.contains("tasks-disabled"),
   mainShown: main.root.classList.contains("on") }));
-""" % ui_source[start:end]
+""" % (folder + ui_source[start:end])
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr[:800]
     assert json.loads(proc.stdout) == {
@@ -2370,6 +2379,8 @@ const noteSessionActivity=()=>{};
 const scrollCaretIntoView=()=>{};
 const spellLearnSent=()=>{};
 const toast=()=>{};
+const findSessionMeta=()=>null;
+%s
 %s
 %s
 %s
@@ -2554,7 +2565,7 @@ console.log(JSON.stringify({sent:first.sent,pendingJournal,journalCleared,follow
            revoked:URL.revoked.includes("blob:editing"),
            attachments:editing.view.composer.attachments.length,
            journal:storage.has("puppy.draft.s:0:50")}}));
-""" % (draft_helpers, attachment_helpers, composer, session_view)
+""" % (folder_rule(ui_source), draft_helpers, attachment_helpers, composer, session_view)
     # The embedded SessionView class exceeds the kernel's single-argument cap
     # (MAX_ARG_STRLEN, 128 KiB), so this script rides stdin rather than -e.
     proc = subprocess.run(["node"], input=script, capture_output=True, text=True)
@@ -3167,8 +3178,7 @@ def check_active_turn_steering_ui(ui_source: str, css_source: str) -> None:
     # square. Width, height, padding, and the icon's zero margin make both
     # centres geometric rather than font-dependent.
     assert "'<span class=\"stop-sq\" aria-hidden=\"true\"></span>'" in ui_source
-    assert 'this.sendBtn.setAttribute("aria-label", running ? "Stop" : "Send")' \
-        in ui_source
+    assert 'this.sendBtn.setAttribute("aria-label", running ? "Stop" :' in ui_source
     assert '>Stop</button>' not in ui_source
     assert ".btn-send.stop{" in css_source
     assert "width:32px;min-width:32px;padding:0;gap:0;" in css_source
@@ -4681,7 +4691,9 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
     assert 'backend.capabilities.includes("session-git")' in git_mark
     assert 'backend.capabilities.includes("session-git-detail")' in git_mark
     assert 'backend.capabilities.includes("session-git-actions")' in git_mark
-    assert 'const opens = !!git && git.repo === true && backendSupportsSessionGitDetail(bid);' in git_mark
+    assert 'const opens = !!git && git.repo === true && backendSupportsSessionGitDetail(bid) && !missing;' in git_mark
+    # ... and never while the folder it reads is gone
+    assert 'const missing = sessionFolderMissing(s);' in git_mark
     assert 'mark.setAttribute("role", opens ? "button" : "img");' in git_mark
     assert "mark.appendChild(sessionGitIcon(14));" in git_mark
     assert "if (!opens) return mark;" in git_mark
@@ -4730,7 +4742,7 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
     drag = ui_source[
         ui_source.index("let dragSess = null;"):
         ui_source.index("\n// below this much", ui_source.index("let dragSess = null;"))]
-    assert 'e.target.closest(".si-pin,.si-notes,.si-git[role=button]")' in drag
+    assert 'e.target.closest(".si-pin,.si-notes[role=button],.si-git[role=button]")' in drag
     assert "sessionOrderPending.has(nodeKey)" in drag
     assert "orderSnapshot: sessionOrderSnapshot(bid)" in drag
     assert "sameSessionOrderSnapshot(" in drag
@@ -4760,7 +4772,7 @@ def check_session_pins(ui_source: str, css_source: str) -> None:
     assert ".sess-item .si-pin svg,.sess-item .si-git svg,.sess-item .si-notes svg" \
         "{width:14px;height:14px}" in css_source
     assert ".sess-item .si-git.has{opacity:1;color:var(--acc2)}" in css_source
-    assert ".sess-item .si-pin,.sess-item .si-notes,.sess-item .si-git[role=button]{cursor:pointer}" in css_source
+    assert ".sess-item .si-pin,.sess-item .si-notes[role=button],.sess-item .si-git[role=button]{cursor:pointer}" in css_source
     assert ".sess-item .si-git[role=button]:focus-visible{" in css_source
     assert "mark.appendChild(sessionPinIcon(14));" in ui_source
     assert "mark.appendChild(sessionGitIcon(14));" in ui_source

@@ -48,6 +48,7 @@ const context = vm.createContext({
 vm.runInContext(between("function precisePointer()", "function choiceSvg("), context);
 // The real SessionView keeps its name inside a closure so the harness can
 // build a small view on its prototype's place, landing and transcript methods.
+vm.runInContext(between("/* A session's working folder is gone on its node", "/* Confirm copy:"), context);
 vm.runInContext("(() => {" + between("class SessionView {", "/* ================= TermView") +
   "\nglobalThis.Chat = SessionView; })();", context);
 

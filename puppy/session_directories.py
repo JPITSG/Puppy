@@ -162,11 +162,15 @@ class Monitor:
                 answers = await asyncio.shield(pending)
                 pending = None
                 changed = any(_records.get(cwd) != value for cwd, value in answers.items())
+                # a folder that was gone and is back: work waiting for it moves on
+                returned = {cwd for cwd, value in answers.items()
+                            if value and _records.get(cwd) is False}
                 _records.clear()
                 _records.update(answers)
                 if changed:
                     from puppy import runner
                     runner.broadcast_sessions()
+                    runner.folders_returned(returned)
                 try:
                     await asyncio.wait_for(self.wake.wait(), CHECK_SECONDS)
                     # Coalesce a rename/recreate burst without delaying an

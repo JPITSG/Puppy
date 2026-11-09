@@ -144,6 +144,88 @@ async def contract(factory, fallback=False):
     print("PASS: {} {}".format(factory.__module__, "periodic fallback" if fallback else "filesystem events"))
 
 
+async def paused_sessions(factory):
+    """A session whose working folder is gone is paused on its node, with the
+    real monitor and real filesystem events: a message, a session tool and a
+    held prompt's re-send are refused with the reason and start nothing; a
+    queue that comes up holds as it stands, applies nothing and says nothing
+    is waiting to start; a task's copy pauses like a folder, a scratch Main
+    never does (its next turn makes it a new folder). When the folder comes
+    back the waiting queue moves on by itself, its first prompt starting."""
+    from puppy import session_tasks
+    root = ROOT / ("paused-" + factory.__module__.replace(".", "-"))
+    project = root / "project"
+    project.mkdir(parents=True)
+    sid = db.create_session("Paused", "claude", str(project), "", "", "", "default")
+    tid = db.create_session("Task", "claude", str(project / "copy"), "", "", "", "default",
+                            workspace_kind="temporary")
+    scratch = db.create_session("Scratch", "claude", str(root / "scratch-gone"), "", "", "", "default",
+                                workspace_kind="temporary")
+    app = factory()
+    app.on_startup.clear()
+    app.on_shutdown.clear()
+    app.on_cleanup.clear()
+    started = []
+    hubs = {key: runner.hub(key) for key in (sid, tid, scratch)}
+    for key, h in hubs.items():
+        h._start_turn = lambda item, h=h, key=key: (started.append((key, item)),
+                                                    setattr(h, "status", "running"))
+    real_record = session_tasks.record
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(directories, "CHECK_SECONDS", 3600))
+        stack.enter_context(patch.object(directories, "DEBOUNCE_SECONDS", .01))
+        stack.enter_context(patch.object(runner, "publish_state"))
+        stack.enter_context(patch.object(session_tasks, "record",
+                                         lambda key: {"parent": sid} if key == tid else real_record(key)))
+        worker = directories._lifecycle(app)
+        await worker.__anext__()
+        try:
+            directories.record(str(project))
+            await until(lambda: directories.record(str(project)) is True)
+            assert runner.folder_paused(db.get_session(sid)) == ""
+
+            project.rename(root / "elsewhere")
+            await until(lambda: directories.record(str(project)) is False)
+            await until(lambda: directories.record(str(project / "copy")) is False and
+                        directories.record(str(root / "scratch-gone")) is False)
+            h = hubs[sid]
+            assert runner.folder_paused(db.get_session(sid)) == runner.FOLDER_PAUSED
+            assert h.send_message("go on") == {"error": runner.FOLDER_PAUSED}
+            assert h.send_loop("again", 2) == {"error": runner.FOLDER_PAUSED}
+            assert h.request_tool("compact") == {"error": runner.FOLDER_PAUSED}
+            assert not h.queue and not started, "nothing was queued or started"
+            h.held = ["held prompt"]
+            assert h.requeue_held(0, "held prompt") == {"error": runner.FOLDER_PAUSED}
+            assert h.held == ["held prompt"], "a refused re-send stays held"
+            h.held = []
+
+            # a turn that ends with prompts waiting holds them as they stand
+            h.status = "running"
+            h.queue = ["first", "second"]
+            assert h._prompt_waiting() is False, "nothing behind the turn could start"
+            assert h._take_next_turn() is None
+            assert h.status == "idle" and h.queue == ["first", "second"] and not started
+
+            # a task's copy pauses like a folder; a scratch Main never does
+            assert hubs[tid].send_message("in the task") == {"error": runner.FOLDER_PAUSED}
+            assert runner.folder_paused(db.get_session(scratch)) == ""
+            assert hubs[scratch].send_message("make me a folder") == {"queued": False}
+            assert started == [(scratch, "make me a folder")]
+
+            # the folder back: the waiting queue moves on by itself
+            (root / "elsewhere").rename(project)
+            await until(lambda: (sid, "first") in started)
+            assert h.queue == ["second"] and h.status == "running"
+            assert runner.folder_paused(db.get_session(sid)) == ""
+        finally:
+            await worker.aclose()
+            for key in (sid, tid, scratch):
+                runner.drop_hub(key)
+                db.delete_session(key)
+    print("PASS: {} pauses a session whose folder is gone and moves its queue on when it is back".format(
+        factory.__module__))
+
+
 async def main():
     try:
         config.load()
@@ -155,6 +237,8 @@ async def main():
         await contract(build_app)
         await contract(backend_app)
         await contract(backend_app, fallback=True)
+        await paused_sessions(build_app)
+        await paused_sessions(backend_app)
     finally:
         shutil.rmtree(ROOT, ignore_errors=True)
 

@@ -282,6 +282,19 @@ reading anywhere further up is never pulled away from it.
   consoles through the existing session stream, without browser polling.
   An offline backend alone does not mark its paths missing. Linked workspaces
   report availability of the executing backend's synchronized copy.
+  While the directory is unavailable the session is paused: its chat box
+  keeps the draft but takes no typing or files and says why, Send, Queue
+  and the session tools are greyed, **New loop** leaves the `@` list, and
+  the backend refuses new prompts, tools and re-sends of held prompts. A
+  queue that was waiting holds as it stands and moves on by itself once the
+  directory is back. Whatever else reads or writes the directory waits too:
+  the agent notes and Git marks open nothing, **Move project** is greyed,
+  and the task strip's **+**, a task's **Review changes** (its own copy),
+  **Refresh from Main** and the review's **Apply to Main** grey with the
+  directory they need. A task set to apply when done waits for Main's
+  directory instead of giving up. A running turn keeps Stop, Steer and Ask,
+  and a scratch workspace session is the exception: sending still gives it
+  a new one, as before.
 - **Git repositories.** A branch mark on every session row, between the pin
   and the agent notes, shows whether the session's directory is inside a Git
   repository - and turns orange when that repository is holding work you have

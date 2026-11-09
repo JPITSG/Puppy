@@ -168,6 +168,7 @@ vm.runInContext([
   between("const CARET_MIRROR_STYLES", "/* ctrl+j ->"),
   between("const MENTION_QUERY_MAX", "/* ================= Composer ================="),
   between("/* ================= Composer =================", "/* ================= SessionView ================="),
+  between("/* A session's working folder is gone on its node", "/* Confirm copy:"),
   between("const ATTACHMENT_PREVIEW_TYPES", "/* Resolve the configuration at the queue tail"),
   between("const DRAFT_JOURNAL_VERSION", "function snapshotBrowserState"),
   between("class SharedDraft {", "class SessionView {"),
@@ -1400,6 +1401,54 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   state.backends.at(-1).capabilities.push('session-loops');
   assert.ok(remoteLoop.composer.mentionCandidates().some(row => row.kind === 'new-loop'));
   remoteLoop.composer.destroy(); state.backends.pop();
+  // a paused session's "@" list offers no loop: there is nothing to run it in
+  let hostPaused = true;
+  const pausedLoop = makeBox({ loop() {}, paused: () => hostPaused });
+  assert.ok(!pausedLoop.composer.mentionCandidates().some(row => row.kind === "new-loop"));
+  hostPaused = false;
+  assert.ok(pausedLoop.composer.mentionCandidates().some(row => row.kind === "new-loop"));
+  pausedLoop.composer.destroy();
+
+  /* A paused box - its session's working folder is gone - keeps its draft
+     but takes no typing or files, and says why on its own status line above
+     anything else it would say there; a busy box going idle again does not
+     undo the pause, and lifting the pause gives the box back as it was. */
+  {
+    let held = null;   // the host reads its own box's pause, as the chat does
+    const paused = makeBox({ uploadsBlocked: () => held && held.composer.pausedReason ? "Paused" : "" });
+    held = paused;
+    const row = paused.box.querySelector(".composer-presence");
+    const label = row.querySelector(".composer-presence-text");
+    type(paused.ta, "Keep this draft");
+    paused.composer.showPresence(0, true);
+    assert.equal(label.textContent, "Your draft is kept here");
+    paused.composer.setPaused("Paused · the working folder is unavailable");
+    assert.equal(paused.ta.readOnly, true, "a paused box takes no typing");
+    assert.equal(paused.ta.value, "Keep this draft", "and keeps the draft it had");
+    assert.ok(paused.box.classList.contains("paused"));
+    assert.ok(!row.classList.contains("hidden") && row.classList.contains("paused"));
+    assert.equal(label.textContent, "Paused · the working folder is unavailable",
+      "the pause is said above a draft's own state");
+    assert.ok(!row.querySelector(".composer-draft-review").classList.contains("hidden"),
+      "a draft's own button stays beside it");
+    assert.equal(paused.composer.attachButton.disabled, true, "and no files");
+    paused.composer.showPresence(2);
+    assert.equal(label.textContent, "Paused · the working folder is unavailable");
+    assert.ok(row.querySelector(".typing-dots").classList.contains("hidden"));
+    paused.composer.setBusy(true);
+    paused.composer.setBusy(false);
+    assert.equal(paused.ta.readOnly, true, "the end of a busy spell is not the end of the pause");
+    paused.composer.setPaused("");
+    assert.equal(paused.ta.readOnly, false);
+    assert.ok(!paused.box.classList.contains("paused") && !row.classList.contains("paused"));
+    assert.equal(label.textContent, "Others are typing…", "the line goes back to what it would say");
+    assert.equal(paused.composer.attachButton.disabled, false);
+    paused.composer.showPresence();
+    assert.ok(row.classList.contains("hidden"));
+    paused.composer.setPaused("Paused · the working folder is unavailable");
+    assert.ok(!row.classList.contains("hidden"), "a pause shows the line on its own");
+    paused.composer.destroy();
+  }
 
   const openLoop = (bid = 0) => {
     context.modalNewLoop(bid, 10);

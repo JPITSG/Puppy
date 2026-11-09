@@ -110,6 +110,7 @@ vm.runInContext([
   between("function engineStatusText(", "const headWord ="),
   between("const MENTION_QUERY_MAX", "/* ================= Composer ================="),
   between("/* ================= Composer =================", "/* ================= SessionView ================="),
+  between("/* A session's working folder is gone on its node", "/* Confirm copy:"),
   between("const ATTACHMENT_PREVIEW_TYPES", "/* Resolve the configuration at the queue tail"),
   between("function nodeHasCapability(", "/* \"Enable tasks\""),
   between("async function modalNewTask(", "/* The review sheet:"),
@@ -409,5 +410,16 @@ const deletes = from => requests.slice(from).filter(r => r.method === "DELETE").
   }
   capabilities.pop();
 
-  console.log("PASS: task modal engine defaults, engine/model dependencies, catalog refresh and delayed initialization, provisional catalogs, custom/retired choices, local/remote nodes, retry lifecycle, its shared prompt box (Enter, attachments, discard on cancel), and Apply to Main when done offered only where the node runs it");
+  // a task is a copy of Main's folder: with it gone none can start, and the
+  // dialog says why rather than failing on the node
+  context.findSessionMeta = (bid, sid) => sid === 10 ? { id: 10, cwd_available: false } : null;
+  n = await open();
+  await settle();
+  assert.equal(n["#nt-start"].disabled, true, "nothing to copy");
+  assert.equal(n[".form-error"].textContent, "Main's working folder is unavailable · a task can start once it is back");
+  assert.equal(n[".form-error"].classList.contains("hidden"), false);
+  dialog.close();
+  context.findSessionMeta = () => null;
+
+  console.log("PASS: task modal engine defaults, engine/model dependencies, catalog refresh and delayed initialization, provisional catalogs, custom/retired choices, local/remote nodes, retry lifecycle, its shared prompt box (Enter, attachments, discard on cancel), Apply to Main when done offered only where the node runs it, and no task started from a folder that is gone");
 })().catch(error => { console.error(error); process.exitCode = 1; });

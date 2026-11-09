@@ -53,6 +53,7 @@ const context = vm.createContext({
   modal() { throw new Error("no dialog expected"); },
   removeTask: (bid, session) => new Promise(resolve => { removals.push([bid, session]); settle = resolve; }),
 });
+vm.runInContext(between("/* A session's working folder is gone on its node", "/* Confirm copy:"), context);
 vm.runInContext(`
 class SessionView {
   constructor(tab) { this.tab = tab; this.root = el("div", "view chat"); this.session = null; }
@@ -297,6 +298,37 @@ workspace.refreshTasks();
     "Phone navigation": "" });
   assert.ok(workspace.overview.querySelector(".task-card-auto").classList.contains("help"), "the help voice");
 
+  /* ---- a working folder gone: + makes a task from Main's folder and greys
+     with it; Review reads the task's own copy and greys with that - in the
+     strip and on the sheet alike ---- */
+  {
+    const keep = main;
+    const add = workspace.root.querySelector(".task-add-button");
+    sessions = [main, task(2, "Card spacing", "ready")];
+    workspace.select(2);
+    workspace.refreshTasks();
+    assert.deepEqual([face(add), reviewFace()], ["live", "live"]);
+    main = { ...keep, cwd_available: false };
+    sessions = [main, task(2, "Card spacing", "ready")];
+    workspace.refreshTasks();
+    assert.equal(face(add), "greyed", "no task is made from a folder that is gone");
+    assert.equal(add.getAttribute("aria-label"), "New task · Main's working folder is unavailable");
+    assert.equal(reviewFace(), "live", "a task's changes are read from its own copy");
+    sessions = [main, { ...task(2, "Card spacing", "ready"), cwd_available: false }];
+    workspace.refreshTasks();
+    assert.equal(reviewFace(), "greyed", "a task whose copy is gone has nothing to review");
+    workspace.overview = el("div", "task-list");
+    workspace.renderedOverview = "";
+    workspace.renderOverview(workspace.tasks());
+    assert.equal(workspace.overview.querySelector(".task-card-actions").children[1].disabled, true,
+      "and the sheet's Review agrees");
+    main = keep;
+    sessions = [main, task(2, "Card spacing", "ready")];
+    workspace.refreshTasks();
+    assert.deepEqual([face(add), reviewFace()], ["live", "live"], "both come back with the folders");
+    assert.equal(add.getAttribute("aria-label"), "New task");
+  }
+
   /* a name cut by its ellipsis is sized to its ink once the tabs are drawn, and again whenever the
      workspace comes onto the screen - a strip drawn while hidden had no layout to fit */
   {
@@ -313,5 +345,5 @@ workspace.refreshTasks();
     assert.equal(mine(), before, "hidden: nothing to fit");
   }
 
-  console.log("PASS: the task strip's Review and bin between Tasks and +, shown for the selected task and never for Main or an unnamed selection, Review greyed exactly as the menu's row and the bin greyed for a working or queued task, both named like the tab's close mark, one press one sheet or one request, focus handed to the selected tab when a verb greys or goes, and the Tasks sheet's Remove on the bin's rule; a task set to apply when done carries its mark and its card's line; the tab names are fitted after a render and on show");
+  console.log("PASS: the task strip's Review and bin between Tasks and +, shown for the selected task and never for Main or an unnamed selection, Review greyed exactly as the menu's row and the bin greyed for a working or queued task, both named like the tab's close mark, one press one sheet or one request, focus handed to the selected tab when a verb greys or goes, and the Tasks sheet's Remove on the bin's rule; a task set to apply when done carries its mark and its card's line; + greys with Main's folder and Review with the task's copy; the tab names are fitted after a render and on show");
 })().catch(error => { console.error(error); process.exit(1); });

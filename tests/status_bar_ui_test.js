@@ -67,6 +67,7 @@ vm.runInContext([
   between("function isScratchWorkspace(", "/* A linked remote workspace rides"),
   between("function sessionsFor(", "/* Pinning and drag-reorder"),
   between("function findSessionMeta(", "function targetWorkspacePane("),
+  between("/* A session's working folder is gone on its node", "/* Confirm copy:"),
   between("function syncSessionMetaVisibility(", "function syncTabsWithSessions("),
   between("function liveViews(", "/* A removed task's condensed conversation"),
   between("function sessionContextMenu(", "/* Live sortable layouts."),

@@ -401,7 +401,7 @@ html.popout body::after{--side-w:0px}
 /* The pin and the notes are actions, and so is a repository's Git mark
    (role=button, it opens the sheet); the other Git marks are readings that
    keep the row's own cursor, so a press on them is a press on the row. */
-.sess-item .si-pin,.sess-item .si-notes,.sess-item .si-git[role=button]{cursor:pointer}
+.sess-item .si-pin,.sess-item .si-notes[role=button],.sess-item .si-git[role=button]{cursor:pointer}
 /* One drawing size for the set: every glyph is cut on the same 18-unit grid
    at the same stroke, so the marks read as one weight rather than three. */
 .sess-item .si-pin svg,.sess-item .si-git svg,.sess-item .si-notes svg{width:14px;height:14px}
@@ -413,7 +413,7 @@ html.popout body::after{--side-w:0px}
 .sess-item .si-git.has.warn{color:var(--warn)}
 .sess-item .si-notes.has{opacity:1;color:var(--acc2)}
 @media (hover:hover){
-  .sess-item .si-pin:hover,.sess-item .si-notes:hover,.sess-item .si-git[role=button]:hover{
+  .sess-item .si-pin:hover,.sess-item .si-notes[role=button]:hover,.sess-item .si-git[role=button]:hover{
     opacity:1;background:var(--hov);color:var(--txt)
   }
 }
@@ -424,11 +424,11 @@ html.popout body::after{--side-w:0px}
   .sess-item .si-pin,.sess-item .si-git,.sess-item .si-notes{opacity:.55}
 }
 .sess-item .si-pin:focus-visible,
-.sess-item .si-notes:focus-visible,
+.sess-item .si-notes[role=button]:focus-visible,
 .sess-item .si-git[role=button]:focus-visible{
   opacity:1;outline:2px solid var(--acc);outline-offset:2px
 }
-.sess-item .si-pin:active,.sess-item .si-notes:active,.sess-item .si-git[role=button]:active{background:var(--hov)}
+.sess-item .si-pin:active,.sess-item .si-notes[role=button]:active,.sess-item .si-git[role=button]:active{background:var(--hov)}
 /* Quiet text actions share one voice: the archive toggle here, the queue
    strip's "+N more" and a search hit's "Show all". Each rule below adds only
    its own placement. */
@@ -1365,7 +1365,8 @@ select.choice-native{display:none!important}
 /* another model answering in place of the requested one: its name takes the
    console's warn tone, as the composer's Model value does below */
 .chip.eng .eng-model.substituted{color:var(--warn)}
-.chip.cwd.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-dim)}
+/* a working folder the node cannot read: the sidebar path's own red */
+.chip.cwd.bad{color:var(--err);border-color:var(--err-line);background:var(--err-dim)}
 /* Live session activity shares one blue pill, and every one is a control:
    browser/terminal/VNC pills show their tab, the background-task count
    opens the list of what the engine still runs, its dropdown's own arrow
@@ -2043,8 +2044,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease),transform var(--t-fast) var(--ease);
 }
 .queue-strip .q-edit::after{content:"";position:absolute;inset:-7px -1px -7px -6px}
-@media (hover:hover){.queue-strip .q-edit:hover{background:var(--hov);color:var(--acc)}}
-.queue-strip .q-edit:active{transform:scale(.88);background:var(--hov);color:var(--acc)}
+@media (hover:hover){.queue-strip .q-edit:not(:disabled):hover{background:var(--hov);color:var(--acc)}}
+.queue-strip .q-edit:not(:disabled):active{transform:scale(.88);background:var(--hov);color:var(--acc)}
+.queue-strip .q-edit:disabled{opacity:.4;cursor:not-allowed}
 /* Only ordinary queued prompts receive this toggle. A paused prompt keeps its
    visible position while later runnable prompts may pass it; the play icon
    remains easy to find on both pointer and touch layouts. */
@@ -2077,8 +2079,10 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease),transform var(--t-fast) var(--ease);
 }
 .queue-strip .q-resend::after{content:"";position:absolute;inset:-7px -6px}
-@media (hover:hover){.queue-strip .q-resend:hover{background:var(--hov);color:var(--ok)}}
-.queue-strip .q-resend:active{transform:scale(.88);background:var(--hov);color:var(--ok)}
+@media (hover:hover){.queue-strip .q-resend:not(:disabled):hover{background:var(--hov);color:var(--ok)}}
+.queue-strip .q-resend:not(:disabled):active{transform:scale(.88);background:var(--hov);color:var(--ok)}
+/* a held prompt waits for its session's folder like the queue does */
+.queue-strip .q-resend:disabled{opacity:.4;cursor:not-allowed}
 /* expands the tail past the cap, and collapses it again */
 .queue-strip .q-more{align-self:flex-start;padding:3px 2px;font-family:var(--sans)}
 /* An expanded queue scrolls rather than shoving the composer off the screen.
@@ -2170,6 +2174,11 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   color:var(--txt3);font-size:var(--fs-xs);padding:0 3px;
 }
 .composer-presence-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* A paused box: its session's working folder is gone. The draft stays
+   readable, faded like a disabled control, and the status line says why in
+   the sidebar path's own red. */
+.composer-box.paused textarea{opacity:.5;cursor:not-allowed}
+.composer-presence.paused{color:var(--err)}
 .composer-draft-review{
   flex-shrink:0;border:0;background:none;color:var(--acc);cursor:pointer;
   font:inherit;min-height:var(--btn-h-sm);padding:0 5px;border-radius:var(--btn-r);

@@ -23,7 +23,7 @@ import time
 
 from aiohttp import web
 
-from puppy import db, operations, session_git, session_titles, uploads, workspaces
+from puppy import db, operations, session_directories, session_git, session_titles, uploads, workspaces
 
 log = logging.getLogger("puppy.session_tasks")
 
@@ -595,6 +595,9 @@ def _git(cwd, *args, data=None, timeout=60, env=None):
 
 def _repo(session):
     from puppy import workspace_sync
+    # Main's own folder, said plainly rather than as a missing repository
+    if not session_directories.inspect(str(session.get("cwd") or "")):
+        raise TaskError("Main's working folder is unavailable · {}".format(session.get("cwd") or ""))
     if workspace_sync.session_workspace(session):
         raise TaskError("Tasks need a local Git directory; open Main on the node that owns the project")
     try:
@@ -1633,6 +1636,11 @@ async def _auto_apply(app, parent_id, sid, resolve):
         if auto["resolving"]:
             auto = dict(auto, resolving=False)
             _save_auto(sid, auto)
+        # Main's folder gone is a wait, never a reason to give up: the task
+        # applies once the folder is back, like after a busy Main.
+        if not await operations.to_thread(session_directories.inspect, str(parent.get("cwd") or "")):
+            _note(sid, "waiting for Main's working folder")
+            return "busy"
         try:
             root = await operations.to_thread(_repo, parent)
         except TaskError as exc:

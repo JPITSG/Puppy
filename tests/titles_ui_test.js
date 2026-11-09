@@ -275,6 +275,7 @@ const same = (actual, expected) => assert.equal(JSON.stringify(actual), JSON.str
   assert.equal(context.titlePending({ auto_title: null }), false);
   assert.equal(context.titlePending(null), false);
   // ... and the sidebar's row builder puts the shimmer on the name alone
+  vm.runInContext(between("/* A session's working folder is gone on its node", "/* Confirm copy:"), context);
   vm.runInContext(between("function sessionRowRows(", "/* Merge authoritative node lists"), context);
   Object.assign(context, {
     sessDot: () => document.createElement("span"), provIcon: () => document.createElement("span"),

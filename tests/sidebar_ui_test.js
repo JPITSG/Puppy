@@ -23,6 +23,7 @@ function between(from, to) {
     titlePending: () => false, sessionLocationLabel: s => s.cwd,
     sessionLocationTitle: s => s.cwd, sessionWorkspace: () => null,
     backendName: bid => `Backend ${bid}`});
+  vm.runInContext(between("/* A session's working folder is gone on its node", "/* Confirm copy:"), context);
   vm.runInContext(between("function sessionRowRows(", "/* Merge authoritative node lists"), context);
   const s = {id: 1, cwd: "/demo/project"};
   for (const bid of [0, 2]) {
@@ -59,7 +60,7 @@ function consoleFor(sessions, remoteSessions, marks = false) {
     sessionActivityAnchors: new Map(), sessionActivityKey: (bid, sid) => `${bid}:${sid}`,
     ingestOneSessionActivity() {}, formatSessionActivity: () => "1s", syncPromptSpinnerPhase() {},
     backendName: bid => `Backend ${bid}`, taskActivityLabel: () => "",
-    sessionFilterHaystack: (bid, session) => session.name.toLowerCase(),
+    sessionFilterHaystack: (bid, session) => session.name.toLowerCase(), liveViews: () => [],
     sessionRowRows: () => ({ r1: el("div"), r2: el("div") }),
     backendSupportsSessionPinning: () => marks, backendSupportsAgentNotes: () => marks,
     backendSupportsSessionGit: () => marks, backendConnectionAllowed: () => true,
@@ -72,6 +73,7 @@ function consoleFor(sessions, remoteSessions, marks = false) {
     animateSessionRows: (root, rebuild) => rebuild(),
   });
   vm.runInContext([
+    between("/* A session's working folder is gone on its node", "/* Confirm copy:"),
     between("function sidebarSessionKey(", "function focusedSessionKey("),
     between("function mergeSidebarRows(", "const AGENT_NOTE_FILES ="),
     between("function sessionOrderSnapshot(", "function acceptSessionListPayload("),
@@ -245,6 +247,42 @@ assert.deepEqual(rows.map(row => row.querySelector(".si-git").classList.contains
 // a plain mark carries no tooltip: its label already says all there is
 assert.deepEqual(rows.map(row => row.querySelector(".si-git").title), [undefined, undefined, undefined, undefined, undefined]);
 assert.equal(rows[0].querySelector(".si-notes").classList.contains("has"), true);
+
+// A working folder gone on its node: the path reads red, and the marks that
+// open the folder's own Git sheet and notes editor become readings - labelled,
+// focusable by nothing, a press on them a press on the row.
+{
+  const gone = consoleFor([
+    session(1, 40, { cwd_available: false, git: { repo: true, checked_at: 1, changes: 0, unpushed: 0 },
+                     agent_notes: ["AGENTS.md"] }),
+    session(2, 30, { cwd_available: true, git: { repo: true, checked_at: 1, changes: 0, unpushed: 0 } }),
+    session(3, 20, { workspace_kind: "temporary", workspace_missing: true }),
+  ], {}, true);
+  gone.render();
+  const goneRows = gone.document.getElementById("sess-groups").children
+    .filter(node => node.classList.contains("sess-item"));
+  const read = row => [".si-git", ".si-notes"].map(selector => {
+    const mark = row.querySelector(selector);
+    return [mark.getAttribute("role"), mark.tabIndex, mark.getAttribute("aria-label"), mark.classList.contains("has")];
+  });
+  assert.deepEqual(read(goneRows[0]), [
+    ["img", undefined, "Git · the working folder is unavailable", true],
+    ["img", undefined, "Agent notes · the working folder is unavailable", false],
+  ]);
+  assert.deepEqual(read(goneRows[1]).map(mark => mark[0]), ["button", "button"], "a folder that is there opens both");
+  assert.deepEqual(read(goneRows[2]).map(mark => mark[0]), ["img", "img"], "a scratch copy gone is gone too");
+  opened.length = 0;
+  selected.length = 0;
+  for (const selector of [".si-git", ".si-notes"]) {
+    const click = new FakeEvent("click", { bubbles: true });
+    goneRows[0].querySelector(selector).dispatchEvent(click);
+    assert.ok(!click.propagationStopped, "a press on a reading is a press on the row");
+  }
+  assert.deepEqual(opened, [], "no sheet opened");
+  assert.deepEqual(selected, [[0, 1], [0, 1]]);
+  opened.length = 0;
+  selected.length = 0;
+}
 
 // The heads-up: a repository holding uncommitted changes or commits no
 // remote has takes the warn tone as well as full strength, and its label

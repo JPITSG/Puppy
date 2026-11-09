@@ -2761,6 +2761,25 @@ function sessionLocationTitle(session, bid) {
   return workspaceLocationPath(session);
 }
 
+/* A session's working folder is gone on its node: the node's own verdict
+   (cwd_available) or a scratch copy it knows is missing. An unknown verdict,
+   an older node or an offline backend is never a missing folder. Everything
+   that reads or writes the folder waits while it is: the agent's notes, the
+   Git sheet, a move, a task made from it. */
+function sessionFolderMissing(session) {
+  return !!session && (session.cwd_available === false || session.workspace_missing === true);
+}
+
+/* ... and so is the session itself: nothing may start a turn there. The one
+   exception is a scratch Main, whose next turn gives it a new folder as it
+   always has; a task's copy, a linked session's mirror and an ordinary
+   project folder cannot be made again, so their work waits for the folder
+   and the node moves a waiting queue on once it is back. */
+function sessionFolderPaused(session) {
+  return sessionFolderMissing(session) && !(isScratchWorkspace(session) && !session.task);
+}
+const FOLDER_PAUSED_TEXT = "Paused · the working folder is unavailable";
+
 /* Confirm copy: a blank line starts a new paragraph (modalCopyHtml), so what
    is removed stands apart from what is lost or left alone. */
 function sessionDeleteMessage(session) {
@@ -6148,7 +6167,7 @@ function sessionRowRows(bid, s, slots = []) {
   for (const slot of slots) if (slot) r1.appendChild(slot);
   const r2 = el("div", "si-row sub");
   r2.appendChild(provIcon(s.engine));
-  const unavailable = s.cwd_available === false || s.workspace_missing === true;
+  const unavailable = sessionFolderMissing(s);
   const workspace = el("div", "si-sub" + (unavailable ? " bad" : ""),
     sessionLocationLabel(s, bid));
   workspace.setAttribute("aria-label", sessionLocationTitle(s, bid) +
@@ -6202,6 +6221,7 @@ function sessionOrderRecency(session) {
 
 function renderSidebar() {
   for (const view of Object.values(state.views)) if (view && view.taskViews) view.refreshTasks();
+  for (const view of liveViews()) if (view && view.syncFolderState) view.syncFolderState();
   if (dragSess && dragSess.item && dragSess.item.isConnected) {
     dragSess.renderPending = true;
     return;
@@ -6406,9 +6426,11 @@ function sessionGitMark(bid, s) {
   const work = sessionGitWork(git);
   const mark = el("span", "si-git" + (git && git.repo === true ? " has" : "") +
     (work && (work.changes || work.unpushed) ? " warn" : ""));
-  const opens = !!git && git.repo === true && backendSupportsSessionGitDetail(bid);
+  const missing = sessionFolderMissing(s);
+  const opens = !!git && git.repo === true && backendSupportsSessionGitDetail(bid) && !missing;
   mark.setAttribute("role", opens ? "button" : "img");
-  mark.setAttribute("aria-label", sessionGitLabel(git) + (opens ? " · open details" : ""));
+  mark.setAttribute("aria-label", missing ? "Git · the working folder is unavailable" :
+    sessionGitLabel(git) + (opens ? " · open details" : ""));
   const tip = sessionGitTip(git);
   if (tip) mark.title = tip;
   mark.appendChild(sessionGitIcon(14));
@@ -6602,6 +6624,15 @@ function sessionPinMark(bid, s) {
    a role=button span rather than a nested button, because the row is one. */
 function agentNotesMark(bid, s) {
   const names = Array.isArray(s.agent_notes) ? s.agent_notes : [];
+  /* the notes live in the working folder: with it gone the mark is a
+     reading, like a Git mark that opens nothing, and a press is the row's */
+  if (sessionFolderMissing(s)) {
+    const mark = el("span", "si-notes");
+    mark.setAttribute("role", "img");
+    mark.setAttribute("aria-label", "Agent notes · the working folder is unavailable");
+    mark.appendChild(agentNotesIcon(14));
+    return mark;
+  }
   const mark = el("span", "si-notes" + (names.length ? " has" : ""));
   mark.setAttribute("role", "button");
   mark.tabIndex = 0;
@@ -7374,6 +7405,7 @@ function sessionContextMenu(ev, bid, s, options = {}) {
     const b = el("button", danger ? "danger" : "", label);
     b.onclick = (e) => { e.stopPropagation(); menu.remove(); fn(); };
     menu.appendChild(b);
+    return b;
   };
   /* The tab's own verb, ahead of the session's: only a tab moves (a sidebar
      row has none to take along), and a session's own window is already one. */
@@ -7445,7 +7477,7 @@ function sessionContextMenu(ev, bid, s, options = {}) {
   if (canMoveScratch(bid, s))
     add("Move to directory", () => modalMoveWorkspace(bid, s));
   if (canMoveProject(bid, s))
-    add("Move project", () => modalMoveWorkspace(bid, s));
+    add("Move project", () => modalMoveWorkspace(bid, s)).disabled = sessionFolderMissing(s);
   if (isScratchWorkspace(s)) add(s.workspace_missing ? "Recreate scratch workspace" :
     "Reset scratch workspace", async () => {
     const ok = await modalConfirm(
@@ -7704,7 +7736,7 @@ function wireSessionDrag(item, bid, sid) {
   item.draggable = true;
   const blockTouchDrag = guardNativeTouchDrag(item);
   item.addEventListener("dragstart", (e) => {
-    if (e.target && e.target.closest && e.target.closest(".si-pin,.si-notes,.si-git[role=button]")) {
+    if (e.target && e.target.closest && e.target.closest(".si-pin,.si-notes[role=button],.si-git[role=button]")) {
       e.preventDefault();
       return;
     }
@@ -14757,7 +14789,10 @@ function spellAutocorrection(word) {
                        true)
      directory()       {bid, path}: the folder "./" means in this box, or null
                        for none (optional; by default the directory the
-                       session's agent works in, on the backend holding it) */
+                       session's agent works in, on the backend holding it)
+     paused()          whether the session this box speaks for is paused (its
+                       working folder is gone), so rows that would start its
+                       work stay out of the "@" list (optional) */
 function composerBoxHtml({ id = "", placeholder = "", rows = 1, className = "",
                            controls = "", actions = "" } = {}) {
   return `<div class="composer-box${className ? " " + esc(className) : ""}">
@@ -15076,18 +15111,30 @@ class Composer {
   }
 
   showPresence(count = 0, conflict = false, enabled = true, error = "", sendError = false) {
+    this.presenceState = { count, conflict, enabled, error, sendError };
+    this.paintPresence();
+  }
+
+  /* The box's own status line: a paused box says so above anything else,
+     for as long as it is paused, since that is what a press on its send
+     would run into; a draft's error or conflict keeps its button beside it. */
+  paintPresence() {
+    const { count = 0, conflict = false, enabled = true, error = "", sendError = false } =
+      this.presenceState || {};
+    const paused = this.pausedReason || "";
     const row = this.box.querySelector(".composer-presence");
-    const hidden = !enabled || (!count && !conflict && !error);
+    const hidden = !paused && (!enabled || (!count && !conflict && !error));
     const resized = row.classList.contains("hidden") !== hidden;
     const anchor = resized && this.host.beforeResize ? this.host.beforeResize() : undefined;
     row.classList.toggle("hidden", hidden);
-    row.querySelector(".typing-dots").classList.toggle("hidden", !count);
+    row.querySelector(".typing-dots").classList.toggle("hidden", !count || !!paused);
+    row.classList.toggle("paused", !!paused);
     const typing = count > 1 ? "Others are typing…" : "Someone else is typing…";
-    const text = error ? (sendError ? "Message not sent" : "Draft not saved") : conflict ? (count ? "Typing · your draft is kept here" : "Your draft is kept here") :
-      (count ? typing : "");
+    const text = paused || (error ? (sendError ? "Message not sent" : "Draft not saved") : conflict ? (count ? "Typing · your draft is kept here" : "Your draft is kept here") :
+      (count ? typing : ""));
     const label = row.querySelector(".composer-presence-text");
     if (label.textContent !== text) label.textContent = text;
-    label.title = error;
+    label.title = paused ? "" : error;
     const review = row.querySelector(".composer-draft-review");
     review.textContent = error ? (sendError ? "Retry send" : "Retry save") : "Review drafts";
     review.classList.toggle("hidden", !conflict && !error);
@@ -15682,11 +15729,26 @@ class Composer {
       this.stopHistory();
       this.releaseHistoryAttachments();
     }
-    this.ta.readOnly = this.busy;
+    this.ta.readOnly = this.busy || !!this.pausedReason;
     this.syncUploadButton();
     this.attachStrip.querySelectorAll(".attach-x").forEach(button => {
       button.disabled = this.busy;
     });
+  }
+
+  /* The host's reason nothing can be sent from this box right now - its
+     session's working folder is gone - or "". The box keeps its draft but
+     takes no typing or files and says why on its own status line; the host
+     greys its send controls and refuses a send that still arrives. */
+  setPaused(reason) {
+    const text = String(reason || "");
+    if ((this.pausedReason || "") === text) return;
+    this.pausedReason = text;
+    this.box.classList.toggle("paused", !!text);
+    this.ta.readOnly = this.busy || !!text;
+    if (text) { this.hideMention(); this.stopHistory(); }
+    this.syncUploadButton();
+    this.paintPresence();
   }
 
   /* with field-sizing the browser autosizes natively; otherwise measure on the
@@ -16030,7 +16092,8 @@ class Composer {
     const bid = Number(this.host.bid) || 0;
     const view = sessionViewFor(bid, this.host.sid);
     const session = (view && view.session) || findSessionMeta(bid, this.host.sid);
-    if (!session || session.workspace_missing) return null;
+    /* the folder's state is the list's, which the stream keeps current */
+    if (!session || sessionFolderMissing(findSessionMeta(bid, this.host.sid) || session)) return null;
     const ws = sessionWorkspace(session);
     if (ws) {
       const link = linkForSession(bid, session.id);
@@ -16344,7 +16407,8 @@ class Composer {
     if (taskRole === "task")
       push("apply-when-done", "Apply when done", "apply to Main, fold and close when finished",
         "@Apply when done");
-    if (this.host.loop && (!bid || backendHasCapability(backend, "session-loops")))
+    if (this.host.loop && !(this.host.paused && this.host.paused()) &&
+        (!bid || backendHasCapability(backend, "session-loops")))
       push("new-loop", "New loop", "repeat a prompt in this session", "");
     return items;
   }
@@ -19838,7 +19902,7 @@ class SessionWorkspaceView {
     this.removeButton.appendChild(trashIcon(14));
     this.removeButton.onclick = () => this.removeSelectedTask();
     this.removing = false;
-    const add = el("button", "icon-btn task-add-button");
+    const add = this.addButton = el("button", "icon-btn task-add-button");
     add.type = "button";
     add.setAttribute("aria-label", "New task");
     add.appendChild(plusIcon(14));
@@ -19980,7 +20044,7 @@ class SessionWorkspaceView {
       open.onclick = () => { this.closeTaskOverview(); this.openTask(session.id); };
       const review = el("button", "btn btn-sm" + (task.state === "ready" ? " btn-pri" : ""), "Review changes");
       review.type = "button";
-      review.disabled = !taskReviewable(task);
+      review.disabled = !taskReviewable(task) || sessionFolderMissing(session);
       review.onclick = () => { this.closeTaskOverview(); modalReviewTask(this, session); };
       const remove = el("button", "btn btn-sm btn-danger", "Remove");
       remove.type = "button";
@@ -20055,6 +20119,19 @@ class SessionWorkspaceView {
     // Visibility is independent of the strip's render cache: a toggle must
     // land even when the task list itself has not changed.
     this.root.classList.toggle("tasks-disabled", !!main && main.tasks_enabled === false);
+    /* A task is made from Main's folder: with it gone the + greys, its focus
+       passing to the selected tab like a greyed verb's. */
+    const mainMissing = sessionFolderMissing(main);
+    if (this.addButton && this.addButton.disabled !== mainMissing) {
+      const heldAdd = document.activeElement === this.addButton;
+      this.addButton.disabled = mainMissing;
+      this.addButton.setAttribute("aria-label", mainMissing ?
+        "New task · Main's working folder is unavailable" : "New task");
+      if (heldAdd && mainMissing) {
+        const tab = this.strip.querySelector(".task-tab.active");
+        if (tab) tab.focus();
+      }
+    }
     // The strips too: every task tab shows and hides its head with Main's,
     // and a toggle from any menu or console lands through the list here.
     if (main) for (const view of this.taskViews.values()) view.syncMetaVisibility();
@@ -20089,7 +20166,8 @@ class SessionWorkspaceView {
     // The drop validates against opened before committing; removed or newly
     // opened tabs invalidate that permutation just like the outer tab bar.
     if (dragTab && dragTab.taskWorkspace === this && dragTab.item.isConnected) return;
-    const face = s => [s.id, s.name, s.status, s.color, s.engine, s.task, titlePending(s)];
+    const face = s => [s.id, s.name, s.status, s.color, s.engine, s.task, titlePending(s),
+      sessionFolderMissing(s)];
     const signature = JSON.stringify([this.selected, this.opened, this.seen, main ? face(main) : null, tasks.map(face)]);
     if (signature === this.rendered) return;
     this.rendered = signature;
@@ -20111,7 +20189,7 @@ class SessionWorkspaceView {
        the page. */
     const chosen = tasks.find(s => s.id === this.selected);
     const onTask = this.selected !== this.tab.sid && !!chosen;
-    const reviewable = onTask && taskReviewable(chosen.task);
+    const reviewable = onTask && taskReviewable(chosen.task) && !sessionFolderMissing(chosen);
     const removable = onTask && taskRemovable(chosen.task);
     const held = document.activeElement;
     const verbHeldFocus = (held === this.reviewButton && !reviewable) ||
@@ -20245,6 +20323,10 @@ async function modalNewTask(workspace) {
   }
   const start = m.querySelector("#nt-start");
   const error = m.querySelector(".form-error");
+  if (sessionFolderMissing(findSessionMeta(bid, sid))) {
+    error.textContent = "Main's working folder is unavailable · a task can start once it is back";
+    error.classList.remove("hidden");
+  }
   /* The task box is the chat's own prompt box - the same "@" list, pasted
      and dropped files, Enter to start and Shift+Enter for a new line - hosted
      here with Main as the session it speaks for. Escape is left to the
@@ -20270,8 +20352,11 @@ async function modalNewTask(workspace) {
   const custom = m.querySelector("#nt-model-custom"), customWrap = m.querySelector("#nt-model-custom-wrap");
   const getModel = () => model.value === "__custom__" ? custom.value.trim() : model.value;
   const choices = () => ({ engine, model: getModel(), effort: effort.value, permission_mode: permission.value });
+  /* a task is a copy of Main's folder: none can be made while it is gone */
+  const mainMissing = () => sessionFolderMissing(findSessionMeta(bid, sid));
   const syncBusy = () => {
-    start.disabled = preparing || !choicesReady || !engines.some(item => item.key === engine);
+    start.disabled = preparing || !choicesReady || !engines.some(item => item.key === engine) ||
+      mainMissing();
     start.textContent = preparing ? "Preparing…" : "Start task";
     m.setAttribute("aria-busy", String(preparing));
     for (const control of m.querySelectorAll("input,textarea,select,#nt-engines button")) {
@@ -20653,7 +20738,11 @@ async function modalReviewTask(workspace, session) {
       resolve.disabled = false; resolveWrap.classList.remove("hidden");
     }
     apply.textContent = data.has_changes ? "Apply to Main" : "Mark as reviewed";
-    apply.disabled = false;
+    /* the changes can be read from the task's copy; applying them writes
+       into Main's folder, which waits for it to be back */
+    const mainMissing = sessionFolderMissing(findSessionMeta(workspace.tab.bid, workspace.tab.sid));
+    if (mainMissing) note.textContent = "Main's working folder is unavailable · apply once it is back.";
+    apply.disabled = mainMissing;
     if (backendSupportsTaskFold(workspace.tab.bid)) {
       fold.disabled = false; foldWrap.classList.remove("hidden");
     }
@@ -22006,6 +22095,9 @@ class SessionView {
       /* this session's rows in the box's own tools menu */
       tools: () => this.toolsMenuSpec(),
       runTool: (tool) => this.runSessionTool(tool),
+      paused: () => this.folderPaused(),
+      /* a paused, idle box takes no files: there is nothing to send them with */
+      uploadsBlocked: () => this.composer && this.composer.pausedReason ? FOLDER_PAUSED_TEXT : "",
       menuOwner: () => this.root,
       /* re-pin the transcript when the box's height moved it, on the same
          reading of "following the tail" as everything else in the view */
@@ -22336,8 +22428,7 @@ class SessionView {
     } else if (this.tab.bid) {
       this.resumeConnection();
     }
-    this.sendBtn.disabled = stopping || unavailable;
-    this.queueBtn.disabled = stopping || unavailable;
+    this.syncSendControls();
     this.updateSteerControl();
     this.updateApprovalControl();
     this.renderStatus();
@@ -23309,6 +23400,60 @@ class SessionView {
     this.root.classList.toggle("meta-hidden", !sessionViewShowsMeta(this));
   }
 
+  /* The working folder's state is the node's verdict on the session list the
+     stream keeps current; the view's own snapshot only stands in until the
+     list has the session, since it is not re-sent when the folder goes. */
+  folderMeta() {
+    return findSessionMeta(this.tab.bid, this.tab.sid) || this.session;
+  }
+
+  folderPaused() {
+    return sessionFolderPaused(this.folderMeta());
+  }
+
+  /* What a gone folder pauses here, in one place, run on every list and every
+     run state: an idle box takes no new message, Send and Queue grey, the
+     head's location reads red, the queue says what it waits for. A running
+     turn keeps Stop, Steer and Ask - none of them starts anything. */
+  syncFolderState() {
+    if (!this.root) return;
+    const meta = this.folderMeta();
+    const paused = sessionFolderPaused(meta);
+    if (this.composer)
+      this.composer.setPaused(paused && this.status !== "running" ? FOLDER_PAUSED_TEXT : "");
+    this.syncSendControls();
+    const cwd = this.root.querySelector(".chip.cwd");
+    if (cwd && meta) {
+      const missing = sessionFolderMissing(meta);
+      cwd.classList.toggle("bad", missing);
+      cwd.setAttribute("aria-label", `Project location · ${workspaceLocationTitle(meta, this.tab.bid)}` +
+        (missing ? " · unavailable" : ""));
+    }
+    if (this.folderPausedShown !== paused) {
+      const known = this.folderPausedShown !== undefined;
+      this.folderPausedShown = paused;
+      if (known && ((this.queued || []).length || (this.held || []).length))
+        this.renderQueue(this.queued, this.held, this.pausedQueue, this.queueRevision);
+    }
+  }
+
+  /* Send, Queue and the Stop the send button becomes: a stopping or
+     unreachable backend takes them all; a paused folder takes Send and Queue,
+     never Stop. */
+  syncSendControls() {
+    if (!this.sendBtn) return;
+    const stopping = !!remoteStoppingMessage(this.tab.bid);
+    const unavailable = !!this.tab.bid && !backendConnectionAllowed(this.tab.bid);
+    const running = this.status === "running";
+    const paused = this.folderPaused();
+    this.sendBtn.disabled = stopping || unavailable || (paused && !running);
+    this.queueBtn.disabled = stopping || unavailable || paused;
+    this.sendBtn.setAttribute("aria-label", running ? "Stop" :
+      paused ? `Send · ${FOLDER_PAUSED_TEXT}` : "Send");
+    this.queueBtn.setAttribute("aria-label", paused ? `Queue · ${FOLDER_PAUSED_TEXT}` :
+      "Queue for the next turn");
+  }
+
   updateHead() {
     const s = this.session;
     if (!s) return;
@@ -23345,7 +23490,7 @@ class SessionView {
     cwd.removeAttribute("data-tip");
     cwd.setAttribute("aria-label",
       `Project location · ${workspaceLocationTitle(s, this.tab.bid)}`);
-    cwd.classList.toggle("warn", !!s.workspace_missing);
+    this.syncFolderState();
     this.syncWorkspaceChip();
     this.syncScheduleChip();
     this.syncBrowserChips();
@@ -23381,8 +23526,8 @@ class SessionView {
     if (running) this.sendBtn.innerHTML =
       '<span class="stop-sq" aria-hidden="true"></span>';
     else this.sendBtn.innerHTML = '<span class="composer-action-label">Send</span>';
-    this.sendBtn.setAttribute("aria-label", running ? "Stop" : "Send");
     this.sendBtn.classList.toggle("stop", running);
+    this.syncFolderState();
     /* only while a turn is running: idle, the primary button already says Send.
        CSS drops it below the desktop breakpoint, where the row has no room. */
     this.queueBtn.classList.toggle("hidden", !running);
@@ -24515,6 +24660,10 @@ class SessionView {
     const wasRunning = this.status === "running";
     const draft = this.draftValue();
     if (this.composer.isEmpty()) return;
+    if (this.folderPaused()) {
+      toast("Could not send · the working folder is unavailable", "bad", TOAST_LONG);
+      return;
+    }
     if (!this.draftReady) {
       toast("Draft is still syncing · wait for the session to reconnect",
         "bad", TOAST_LONG);
@@ -24831,7 +24980,9 @@ class SessionView {
     if (!q.length && !held.length) { box.classList.add("hidden"); this.queueOpen = false; return; }
     box.classList.remove("hidden");
     box.classList.toggle("expanded", !!this.queueOpen);
-    box.appendChild(el("div", "q-head", `queued · ${q.length + held.length}`));
+    const folderPaused = this.folderPaused();
+    box.appendChild(el("div", "q-head", `queued · ${q.length + held.length}` +
+      (folderPaused && q.length ? " · waiting for the folder" : "")));
     /* Held rows first: this work was queued before anything below it, and it is
        the part that needs a decision. Never capped - each is waiting on the
        user, and hiding one behind "+N more" is how it gets forgotten. */
@@ -24841,7 +24992,11 @@ class SessionView {
       const resend = el("button", "q-resend");
       resend.type = "button";
       resend.appendChild(refreshIcon(12));
-      resend.setAttribute("aria-label",
+      /* a held prompt or tool would start work in the folder; a held change
+         to the settings needs none */
+      const startsWork = !cfg || item.kind === "tool";
+      resend.disabled = startsWork && folderPaused;
+      resend.setAttribute("aria-label", resend.disabled ? FOLDER_PAUSED_TEXT :
         cfg ? "Apply this held change" : "Send this held message again");
       resend.onclick = () => this.heldOp("requeue_held", i, ident);
       row.appendChild(resend);
@@ -24870,7 +25025,9 @@ class SessionView {
         const edit = el("button", "q-edit");
         edit.type = "button";
         edit.appendChild(queueEditIcon(12));
-        edit.setAttribute("aria-label", "Edit this queued message");
+        /* editing hands the prompt to the box, which a paused session's
+           box cannot take: the queue waits as it stands */
+        edit.setAttribute("aria-label", folderPaused ? FOLDER_PAUSED_TEXT : "Edit this queued message");
         edit.onclick = () => this.editQueued(i, ident);
         row.appendChild(edit);
       }
@@ -25089,8 +25246,9 @@ class SessionView {
     this.queueEl.classList.toggle("editing", busy);
     if (busy) this.queueEl.setAttribute("aria-busy", "true");
     else this.queueEl.removeAttribute("aria-busy");
+    const paused = this.folderPaused();
     this.queueEl.querySelectorAll(".q-live button").forEach(button => {
-      button.disabled = busy;
+      button.disabled = busy || (paused && button.classList.contains("q-edit"));
     });
     this.composer.setBusy(busy);
   }
@@ -25283,11 +25441,12 @@ class SessionView {
     if (!review || !review.isConnected) return;
     const task = this.session && this.session.task;
     review.disabled = !task || !workspaceViewFor(this.tab.bid, task.parent) ||
-      !taskReviewable(task);
+      !taskReviewable(task) || sessionFolderMissing(this.folderMeta());
     const refresh = this.taskRefreshMenuButton;
     if (refresh && refresh.isConnected)
       refresh.disabled = review.disabled || !backendSupportsTaskRefresh(this.tab.bid) ||
-        refreshingTasks.has(`${this.tab.bid}:${this.tab.sid}`);
+        refreshingTasks.has(`${this.tab.bid}:${this.tab.sid}`) ||
+        sessionFolderMissing(findSessionMeta(this.tab.bid, task.parent));
   }
 
   showMenu(anchor) {
@@ -25343,7 +25502,8 @@ class SessionView {
     if (canMoveScratch(this.tab.bid, this.session))
       add("Move to directory", () => modalMoveWorkspace(this.tab.bid, this.session));
     if (canMoveProject(this.tab.bid, this.session))
-      add("Move project", () => modalMoveWorkspace(this.tab.bid, this.session));
+      add("Move project", () => modalMoveWorkspace(this.tab.bid, this.session)).disabled =
+        sessionFolderMissing(this.folderMeta());
     if (isScratchWorkspace(this.session) && !this.session.task)
       add(this.session.workspace_missing ? "Recreate scratch workspace" :
         "Reset scratch workspace", () => this.resetWorkspace());
@@ -25484,11 +25644,12 @@ class SessionView {
     const eng = engineInfo(this.tab.bid, eff.engine || this.session.engine);
     const offered = new Map(((eng && eng.tool_options) || []).map(o => [o.value, o]));
     const engineLabel = (eng && eng.label) || "this engine";
+    const paused = this.folderPaused();
     const options = backendSupportsSessionTools(this.tab.bid) ? SESSION_TOOLS.map(tool => {
       const o = offered.get(tool.value);
       return {
-        value: tool.value, label: tool.label, disabled: !o,
-        hint: o ? (o.hint || tool.hint) : `Not available for ${engineLabel}`,
+        value: tool.value, label: tool.label, disabled: !o || paused,
+        hint: paused ? FOLDER_PAUSED_TEXT : o ? (o.hint || tool.hint) : `Not available for ${engineLabel}`,
       };
     }) : [];
     const modelOption = ((eng && eng.model_options) || []).find(
