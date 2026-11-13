@@ -8,7 +8,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
-const { FakeDocument, FakeEvent, fire } = require("./fake_dom.js");
+const { FakeDocument, FakeElement, FakeEvent, fire } = require("./fake_dom.js");
 const source = fs.readFileSync(path.join(__dirname, "../puppy/static/app.js"), "utf8");
 const between = (from, to) => {
   const start = source.indexOf(from), end = source.indexOf(to, start);
@@ -1883,6 +1883,161 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   console.log("PASS: marks on a waiting picture: a marked PNG takes its place at once and a send waits for it, the " +
               "picture under the marks is kept to mark again or to come back, failures leave the box as it was, " +
               "and removing or sending lets the kept picture go");
+
+  /* An AVIF - a picture no engine reads - is drawn by the box and goes to
+     the node as a PNG (a JPEG where the PNG would pass the upload limit),
+     a picture like any other from then on; one the browser cannot draw or
+     that fits neither way goes as the file it is, and says so. */
+  {
+    const decode = { fail: false, width: 48, height: 32 };
+    const sizes = { "image/png": 900, "image/jpeg": 300 };
+    const drawn = [];
+    class FakeImage {
+      set src(url) {
+        this._src = url;
+        setImmediate(() => {
+          if (decode.fail) { this.onerror(); return; }
+          this.naturalWidth = decode.width; this.naturalHeight = decode.height;
+          this.onload();
+        });
+      }
+      get src() { return this._src; }
+    }
+    context.Image = FakeImage;
+    const savedContext = FakeElement.prototype.getContext, savedBlob = FakeElement.prototype.toBlob;
+    FakeElement.prototype.getContext = function () {
+      const canvas = this;
+      const ctx = {
+        globalCompositeOperation: "source-over", fillStyle: "",
+        drawImage: (img, x, y) => drawn.push(["draw", img._src, x, y, canvas.width, canvas.height]),
+        fillRect: (x, y, w, h) => drawn.push(["fill", ctx.globalCompositeOperation, ctx.fillStyle, x, y, w, h]),
+      };
+      return ctx;
+    };
+    FakeElement.prototype.toBlob = function (done, type, quality) {
+      drawn.push(["encode", type, quality]);
+      setImmediate(() => done({ type, size: sizes[type], width: this.width, height: this.height }));
+    };
+    const limitBefore = state.uploadSettings;
+    const avif = (name = "41k4qfq-GIL._AC_SX679_.avif", type = "image/avif") => ({ name, size: 358, type });
+    const box = makeBox();
+
+    // drawn and sent as a PNG of the picture at its own size
+    let from = calls.fetch.length;
+    paste(box.ta, avif());
+    let chip = box.box.querySelector(".attach-chip");
+    assert.ok(chip.classList.contains("image") && chip.classList.contains("uploading"),
+      "a picture with its thumbnail at once, uploading");
+    assert.equal(calls.fetch.length, from, "nothing goes until the copy is drawn");
+    assert.equal(box.composer.sendBlocker(), "Wait for file uploads to finish");
+    await settle();
+    assert.equal(calls.fetch.length, from + 1);
+    let upload = calls.fetch.at(-1);
+    assert.equal(decodeURIComponent(upload.init.headers["X-Puppy-Filename"]), "41k4qfq-GIL._AC_SX679_.png");
+    assert.equal(upload.init.headers["Content-Type"], "image/png");
+    assert.equal(upload.init.headers["X-Puppy-Size"], "900");
+    assert.equal(upload.init.body.type, "image/png", "the copy is what goes, not the AVIF");
+    assert.deepEqual(drawn.map(step => step.slice(0, 2)),
+      [["draw", drawn[0][1]], ["encode", "image/png"]], "drawn once, encoded once");
+    assert.deepEqual(drawn[0].slice(2), [0, 0, 48, 32], "at the picture's own size");
+    const staged = box.composer.attachments[0];
+    assert.equal(staged.preview, true);
+    assert.equal(staged.name, "41k4qfq-GIL._AC_SX679_.png");
+    assert.equal(staged.contentType, "image/png");
+    assert.ok(staged.url.startsWith("blob:") && staged.url !== drawn[0][1], "the preview is the copy's own");
+    let id = completeUpload(upload);
+    await settle();
+    assert.equal(box.composer.message(),
+      `[image attached: /srv/data/uploads/10/${id}/41k4qfq-GIL._AC_SX679_.png — view it with your image/file tools]`);
+    chip = box.box.querySelector(".attach-chip");
+    assert.ok(chip.classList.contains("image") && !chip.classList.contains("uploading"));
+    assert.equal(box.composer.markable(staged), true, "it takes marks like any staged picture");
+    box.composer.take();
+
+    // a file with no type is known by its name; any other unknown type is a file
+    drawn.length = 0;
+    paste(box.ta, avif("render.AVIF", ""));
+    await settle();
+    assert.equal(decodeURIComponent(calls.fetch.at(-1).init.headers["X-Puppy-Filename"]), "render.png");
+    completeUpload(calls.fetch.at(-1));
+    await settle();
+    box.composer.take();
+    from = calls.fetch.length;
+    paste(box.ta, { name: "scan.tiff", size: 5, type: "image/tiff" });
+    assert.equal(calls.fetch.length, from + 1, "not a picture the box converts: it goes at once");
+    assert.equal(calls.fetch.at(-1).init.headers["Content-Type"], "image/tiff");
+    completeUpload(calls.fetch.at(-1));
+    await settle();
+    box.composer.take();
+
+    // a PNG past the upload limit: a JPEG, see-through parts on white
+    drawn.length = 0;
+    box.composer.uploadPolicy = { enabled: true, max_file_size_mb: 1, max_file_size_bytes: 600 };
+    paste(box.ta, avif("hero.avif"));
+    await settle();
+    upload = calls.fetch.at(-1);
+    assert.equal(decodeURIComponent(upload.init.headers["X-Puppy-Filename"]), "hero.jpg");
+    assert.equal(upload.init.headers["Content-Type"], "image/jpeg");
+    assert.deepEqual(drawn.slice(1).map(step => step.slice(0, 3)),
+      [["encode", "image/png", undefined], ["fill", "destination-over", "#fff"], ["encode", "image/jpeg", 0.92]]);
+    id = completeUpload(upload);
+    await settle();
+    assert.ok(box.composer.message().startsWith(`[image attached: /srv/data/uploads/10/${id}/hero.jpg`));
+    box.composer.take();
+
+    // fits neither way: the AVIF as it is, a file, with the reason
+    sizes["image/jpeg"] = 700;
+    let toasts = calls.toasts.length;
+    paste(box.ta, avif("huge.avif"));
+    await settle();
+    upload = calls.fetch.at(-1);
+    assert.equal(decodeURIComponent(upload.init.headers["X-Puppy-Filename"]), "huge.avif");
+    assert.equal(upload.init.headers["Content-Type"], "image/avif");
+    assert.equal(upload.init.body.name, "huge.avif", "the file itself");
+    assert.ok(box.box.querySelector(".attach-chip.file.uploading"), "a file card, still uploading");
+    assert.deepEqual(JSON.parse(JSON.stringify(calls.toasts.slice(toasts))), [{
+      text: "Could not convert huge.avif for the agent · too large for the upload limit as a PNG or a JPEG · " +
+        "it is attached as a file", level: "warn" }]);
+    id = completeUpload(upload);
+    await settle();
+    assert.equal(box.composer.message(), `[file attached: /srv/data/uploads/10/${id}/huge.avif (huge.avif, 5 B) — ` +
+      "inspect it with your file tools]");
+    box.composer.take();
+    box.composer.uploadPolicy = limitBefore;
+    sizes["image/jpeg"] = 300;
+
+    // a picture the browser cannot draw goes as the file it is
+    decode.fail = true;
+    toasts = calls.toasts.length;
+    paste(box.ta, avif("broken.avif"));
+    await settle();
+    assert.equal(decodeURIComponent(calls.fetch.at(-1).init.headers["X-Puppy-Filename"]), "broken.avif");
+    assert.equal(calls.toasts.slice(toasts)[0].text,
+      "Could not convert broken.avif for the agent · this browser cannot draw it · it is attached as a file");
+    completeUpload(calls.fetch.at(-1));
+    await settle();
+    box.composer.take();
+    decode.fail = false;
+
+    // let go while it is being drawn: nothing is sent or left behind
+    from = calls.fetch.length;
+    const apiFrom = calls.api.length;
+    paste(box.ta, avif("gone.avif"));
+    box.box.querySelector(".attach-x").onclick();
+    await settle();
+    assert.equal(calls.fetch.length, from, "no upload for a picture the box let go");
+    assert.deepEqual(deletes(apiFrom), []);
+    assert.equal(box.composer.attachments.length, 0);
+    assert.equal(box.composer.sendBlocker(), "");
+
+    box.composer.destroy();
+    delete context.Image;
+    FakeElement.prototype.getContext = savedContext;
+    FakeElement.prototype.toBlob = savedBlob;
+  }
+  console.log("PASS: an AVIF is drawn and sent as a PNG of the picture (a JPEG on white past the upload limit), " +
+              "previewed, marked and sent as an image; untyped .avif names count; one the browser cannot draw or " +
+              "that fits neither way goes as the file it is with the reason; one let go mid-draw sends nothing");
 
   console.log("PASS: folder paths: \"./\" and \"../\" open the box's folder list - folders only with the way up, " +
               "nothing lit until the arrows, Enter sends until then, picks move between folders, Tab completes, " +

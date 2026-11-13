@@ -1876,6 +1876,98 @@ def demo_png(width, height, colour):
             chunk(b"IDAT", zlib.compress(row * height)) + chunk(b"IEND", b""))
 
 
+# A 48 x 32 AVIF, blue on its left half and orange on its right, made once
+# with ffmpeg's libaom encoder and kept here as bytes: the lane needs no tool.
+AVIF_FIXTURE = base64.b64decode(
+    "AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUEAAAD5bWV0YQAAAAAAAAAvaGRscgAAAAAAAAAAcGljdAAAAAAAAAAA"
+    "AAAAAFBpY3R1cmVIYW5kbGVyAAAAAA5waXRtAAAAAAABAAAAHmlsb2MAAAAARAAAAQABAAAAAQAAASEAAABFAAAAKGlpbmYA"
+    "AAAAAAEAAAAaaW5mZQIAAAAAAQAAYXYwMUNvbG9yAAAAAGppcHJwAAAAS2lwY28AAAAUaXNwZQAAAAAAAAAwAAAAIAAAABBw"
+    "aXhpAAAAAAMICAgAAAAMYXYxQ4EgAAAAAAATY29scm5jbHgAAgACAAIAAAAAF2lwbWEAAAAAAAAAAQABBAECgwQAAABNbWRh"
+    "dAoGOBUv+2CAMjtEQAAAEAAAEOk+gKI8aGy6voCXR5Su5eJYXsfYD4lO1KZGykPWVSSQvlyDCGCoOwJ9Cn58I3/2WEwMgA==")
+
+
+async def avif_attachment_checks(instance):
+    """An AVIF is a picture the agent can view. Picked through the prompt
+    box's own file input - Chromium's picker path, with Chromium's own type
+    for the file - it is drawn by the box and the node stores a PNG of it at
+    its own size under the picture's name; the chip is a picture with its
+    thumbnail, the marker an image marker, the node's preview route serves
+    the PNG back with the picture's own colours, and a real click opens it in
+    the viewer under its new name, which saves it as that PNG."""
+    page = instance.page_session
+    source = ROOT / "avif-lane" / "shelf-photo.avif"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(AVIF_FIXTURE)
+    await instance.call("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=page)
+    await evaluate(instance, "if (typeof closeDrawer === 'function') closeDrawer();"
+                             " demoView.composer.replace(''); true")
+    # the type Chromium itself gives the picked file, read as the box reads it
+    await evaluate(instance, """(() => { const input = demoView.composer.fileInput;
+        window.avifPickedType = null;
+        input.addEventListener('change', () => { avifPickedType = input.files[0] && input.files[0].type; },
+                               {once: true, capture: true});
+        return true; })()""")
+    handle = await instance.call("Runtime.evaluate", {"expression": "demoView.composer.fileInput"}, session=page)
+    await instance.call("DOM.setFileInputFiles", {"files": [str(source)], "objectId": handle["result"]["objectId"]},
+                        session=page)
+    await until(instance, "demoView.composer.attachments.length === 1 && !!demoView.composer.attachments[0].path")
+    staged = await evaluate(instance, """(async () => {
+        const a = demoView.composer.attachments[0];
+        const chip = demoView.composer.attachStrip.querySelector('.attach-chip');
+        const img = chip.querySelector('img');
+        if (img && !img.complete) await new Promise(r => img.addEventListener('load', r, {once: true}));
+        return {picked: avifPickedType, name: a.name, path: a.path, type: a.contentType, preview: a.preview,
+            size: a.size, chip: chip.className, thumb: img ? [img.naturalWidth, img.naturalHeight] : null,
+            message: demoView.composer.message()}; })()""")
+    assert staged["picked"] in ("image/avif", ""), ("Chromium's own type for the file", staged)
+    assert staged["name"] == "shelf-photo.png" and staged["type"] == "image/png" and staged["preview"], staged
+    assert staged["chip"] == "attach-chip image" and staged["thumb"] == [48, 32], staged
+    assert staged["path"].endswith("/shelf-photo.png"), staged
+    assert staged["message"] == ("[image attached: " + staged["path"] +
+                                 " — view it with your image/file tools]"), staged
+    stored = Path(staged["path"]).read_bytes()
+    assert stored[:8] == b"\x89PNG\r\n\x1a\n" and stored[12:16] == b"IHDR", "the node holds a PNG"
+    assert (int.from_bytes(stored[16:20], "big"), int.from_bytes(stored[20:24], "big")) == (48, 32), \
+        "at the picture's own size"
+    assert staged["size"] == len(stored)
+    served = await evaluate(instance, """(async () => {
+        const a = demoView.composer.attachments[0];
+        const response = await fetch(uploadPreviewUrl(0, a.path), {cache: 'no-store'});
+        const bitmap = await createImageBitmap(await response.blob());
+        const canvas = document.createElement('canvas');
+        canvas.width = bitmap.width; canvas.height = bitmap.height;
+        const g = canvas.getContext('2d'); g.drawImage(bitmap, 0, 0);
+        const at = (x, y) => [...g.getImageData(x, y, 1, 1).data];
+        return {status: response.status, type: response.headers.get('content-type'),
+            size: [bitmap.width, bitmap.height], left: at(4, 4), right: at(43, 27)}; })()""")
+    assert served["status"] == 200 and served["type"] == "image/png" and served["size"] == [48, 32], served
+    for got, want in ((served["left"], (31, 95, 192, 255)), (served["right"], (224, 128, 33, 255))):
+        assert all(abs(a - b) <= 20 for a, b in zip(got, want)), ("the picture's own colours", served)
+    spot = await evaluate(instance, """(async () => {
+        const b = demoView.composer.attachStrip.querySelector('.attach-view');
+        b.scrollIntoView({block: 'center'});
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const r = b.getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()""")
+    for kind in ("mouseMoved", "mousePressed", "mouseReleased"):
+        await instance.call("Input.dispatchMouseEvent", {
+            "type": kind, "x": spot["x"], "y": spot["y"], "button": "none" if kind == "mouseMoved" else "left",
+            "buttons": 1 if kind == "mousePressed" else 0, "clickCount": 1}, session=page)
+    await until(instance, "!!imageViewerOpen && imageViewerOpen.ready")
+    viewer = await evaluate(instance, """({name: imageViewerOpen.name.textContent,
+        download: imageViewerOpen.downloadLink.download, size: [imageViewerOpen.width, imageViewerOpen.height]})""")
+    assert viewer == {"name": "shelf-photo.png", "download": "shelf-photo.png", "size": [48, 32]}, viewer
+    for kind in ("keyDown", "keyUp"):
+        await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Escape", "code": "Escape",
+                                                       "windowsVirtualKeyCode": 27}, session=page)
+    await until(instance, "!imageViewerOpen")
+    await evaluate(instance, "demoView.composer.removeAttachment(demoView.composer.attachments[0]); "
+                             "demoView.composer.replace(''); true")
+    await until(instance, "demoView.composer.attachments.length === 0")
+    shutil.rmtree(source.parent, ignore_errors=True)
+    print("avif attachment checks passed")
+
+
 async def image_mark_checks(instance):
     """A picture waiting in a prompt box takes red boxes for the agent, and
     the bar that offers them keeps one even ring of bar around its first and
@@ -10685,6 +10777,9 @@ async def main(args):
             if args.folder_pause_only:
                 await folder_pause_checks(instances[0], sid)
                 return
+            if args.avif_only:
+                await avif_attachment_checks(instances[0])
+                return
             if args.thinking_only:
                 await thinking_disclosure_checks(instances[0])
                 return
@@ -10746,6 +10841,7 @@ async def main(args):
             await image_viewer_checks(instances[0], args.screenshots)
             await image_mark_checks(instances[0])
             await tool_image_checks(instances[0])
+            await avif_attachment_checks(instances[0])
             await task_tools_checks(instances[0])
             await task_tab_spacing_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
@@ -10781,6 +10877,7 @@ if __name__ == "__main__":
     parser.add_argument("--queue-drag-only", action="store_true")
     parser.add_argument("--side-search-only", action="store_true")
     parser.add_argument("--folder-pause-only", action="store_true")
+    parser.add_argument("--avif-only", action="store_true")
     parser.add_argument("--popout-only", action="store_true")
     parser.add_argument("--running-only", action="store_true")
     parser.add_argument("--background-tasks-only", action="store_true")

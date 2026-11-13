@@ -16917,7 +16917,8 @@ class Composer {
     this.stopHistory();
     this.releaseHistoryAttachments();
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-    const preview = ATTACHMENT_PREVIEW_TYPES.has(String(file.type || "").toLowerCase());
+    const converts = attachmentConverts(file);
+    const preview = converts || ATTACHMENT_PREVIEW_TYPES.has(String(file.type || "").toLowerCase());
     const attachment = {
       name: file.name || "file", size: file.size, contentType: file.type || "application/octet-stream",
       path: "", uploadId: "", url: preview ? URL.createObjectURL(file) : "",
@@ -16926,13 +16927,44 @@ class Composer {
     };
     this.attachments.push(attachment);
     this.renderAttachments();
-    const failure = await this.sendUpload(attachment, file);
+    const body = converts ? await this.convertForEngines(attachment, file) : file;
+    if (attachment.removed) return;
+    const failure = await this.sendUpload(attachment, body);
     if (failure && !attachment.removed) {
       this.removeAttachment(attachment, true);
       if (!failure.aborted)
         toast(`Could not upload ${attachment.name || "the file"} · ${failure.error.message}`,
           "bad", TOAST_LONG);
     }
+  }
+
+  /* A picture no engine reads (ATTACHMENT_CONVERT_TYPES) made into one it
+     does: the chip shows the picture, uploading, while it is drawn, then
+     takes the copy's name, size and preview, and the copy is what goes to
+     the node. A picture the browser cannot draw, or that will not fit the
+     upload limit even as a JPEG, goes as the file it is, and says so. */
+  async convertForEngines(attachment, file) {
+    const policy = this.uploadPolicy || uploadSettingsFor(this.host.bid);
+    let blob;
+    try {
+      blob = await imageForEngines(attachment.url, policy ? Number(policy.max_file_size_bytes) || 0 : 0);
+    } catch (error) {
+      if (attachment.removed) return file;
+      if (attachment.ownsUrl && attachment.url) URL.revokeObjectURL(attachment.url);
+      Object.assign(attachment, { preview: false, url: "", ownsUrl: false });
+      this.renderAttachments();
+      toast(`Could not convert ${attachment.name} for the agent · ` +
+        `${(error && error.message) || "this browser cannot draw it"} · it is attached as a file`,
+        "warn", TOAST_LONG);
+      return file;
+    }
+    if (attachment.removed) return file;
+    const name = convertedImageName(attachment.name, blob.type);
+    if (attachment.ownsUrl && attachment.url) URL.revokeObjectURL(attachment.url);
+    Object.assign(attachment, { name, size: blob.size, contentType: blob.type || "image/png",
+      url: URL.createObjectURL(blob), ownsUrl: true });
+    this.renderAttachments();
+    return typeof File === "function" ? new File([blob], name, { type: attachment.contentType }) : blob;
   }
 
   /* One staged file onto the node, filling in its attachment: nothing once
@@ -17971,6 +18003,66 @@ function toolCardNode(data, completed = false) {
 const ATTACHMENT_PREVIEW_TYPES = new Set([
   "image/png", "image/jpeg", "image/webp", "image/gif",
 ]);
+
+/* Pictures a browser draws but no engine reads. The models behind every
+   engine take PNG, JPEG, GIF and WebP alone, and an AVIF reaches the agent
+   as a binary file it cannot open, so the prompt box draws it and sends the
+   node a copy in a type the agent can view (Composer.convertForEngines):
+   from then on it is a picture like any other - its thumbnail, the viewer,
+   marks and an image marker. A file with no type is known by its
+   extension, as the browser's own file picker would. */
+const ATTACHMENT_CONVERT_TYPES = new Set(["image/avif"]);
+
+function attachmentConverts(file) {
+  const type = String((file && file.type) || "").toLowerCase();
+  return ATTACHMENT_CONVERT_TYPES.has(type) ||
+    (!type && /\.avif$/i.test(String((file && file.name) || "")));
+}
+
+/* A converted picture's name: its own, with its new type's extension. */
+function convertedImageName(name, type) {
+  const stem = String(name || "image").replace(/\.[^./]*$/, "") || "image";
+  return stem + (type === "image/jpeg" ? ".jpg" : ".png");
+}
+
+/* The picture at `url` at its own size in a type every engine reads: a
+   lossless PNG, or a JPEG where the PNG would pass the node's upload limit
+   (`limit` bytes; none for no limit), what was see-through then standing on
+   white because JPEG has none. Rejects, saying why, when the browser cannot
+   draw the picture or neither copy fits. */
+function imageForEngines(url, limit) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const fits = blob => !(limit > 0) || blob.size <= limit;
+    img.onload = () => {
+      try {
+        const width = img.naturalWidth, height = img.naturalHeight;
+        if (!width || !height) throw new Error("this browser cannot draw it");
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        canvas.toBlob(png => {
+          if (!png) { reject(new Error("this browser cannot draw it")); return; }
+          if (fits(png)) { resolve(png); return; }
+          try {
+            ctx.globalCompositeOperation = "destination-over";
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(0, 0, width, height);
+          } catch (error) { reject(error); return; }
+          canvas.toBlob(jpeg => {
+            if (jpeg && fits(jpeg)) resolve(jpeg);
+            else reject(new Error(jpeg ? "too large for the upload limit as a PNG or a JPEG" :
+              "this browser cannot draw it"));
+          }, "image/jpeg", 0.92);
+        }, "image/png");
+      } catch (error) { reject(error); }
+    };
+    img.onerror = () => reject(new Error("this browser cannot draw it"));
+    img.src = url;
+  });
+}
 
 /* Attachments reach the engine as marker lines appended to the message text, so
    sent messages carry them in their transcript text. The composer parses its own

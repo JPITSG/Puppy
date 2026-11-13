@@ -521,8 +521,14 @@ list, its build script and the rules behind every correction are described in
 **Attachments** go in with the `+` button, a paste, or a drop from your file
 manager: images, documents, archives, source, anything. Files stream straight to
 the session's backend and stay private under `data/uploads/`. Images preview in
-the transcript. Images in Markdown replies shrink to fit the available width
-while keeping their proportions; smaller images keep their natural size.
+the transcript. An AVIF picture, which none of the engines can open, is
+converted by the browser as it is attached: the session receives a PNG of it at
+its own size and under its own name (a JPEG when the PNG would pass the
+backend's upload limit), so it previews, opens and takes marks like any other
+image and the agent can view it. One the browser cannot draw, or that fits the
+limit neither way, is attached as the file it is, with a notice saying why.
+Images in Markdown replies shrink to fit the available width while keeping
+their proportions; smaller images keep their natural size.
 
 Press an image's preview, in a sent message or in a prompt box before it is
 sent, to open it full screen. The picture grows out of its thumbnail and fits
