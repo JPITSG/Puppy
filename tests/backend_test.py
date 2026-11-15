@@ -55,6 +55,43 @@ def exercise_driver_normalization() -> None:
         "a": "steer_result", "request_id": "steer-1",
         "ok": True, "error": "",
     }]
+    # A steer the CLI queued while the model wrote its final answer runs as
+    # another round right after that result (claude 2.1.325, probed): the
+    # result is provisional, the round's init and the steers' one batched
+    # replay follow, and only the round's result ends the turn - with the
+    # usage of both rounds.
+    queued_ctx = claude.turn_context({}, True, "write the list", "queued-pin")
+    claude.parse_line(json.dumps({"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": "write the list"}]}}), queued_ctx)
+    claude.steer_payload({}, queued_ctx, "then say PINEAPPLE", "steer-a")
+    claude.steer_payload({}, queued_ctx, "and then MANGO", "steer-b")
+    provisional = claude.parse_line(json.dumps({
+        "type": "result", "subtype": "success", "is_error": False, "session_id": "queued",
+        "num_turns": 1, "usage": {"input_tokens": 3, "output_tokens": 973}}), queued_ctx)
+    assert [act["a"] for act in provisional] == ["turn_continue"], provisional
+    assert provisional[0]["data"]["usage"]["output_tokens"] == 973
+    init = claude.parse_line(json.dumps({
+        "type": "system", "subtype": "init", "session_id": "queued", "tools": []}), queued_ctx)
+    assert any(act.get("msg", {}).get("type") == "turn_init" for act in init), init
+    assert claude.parse_line(json.dumps({"type": "user", "isReplay": True, "message": {
+        "role": "user", "content": [{"type": "text", "text": "then say PINEAPPLE"},
+                                    {"type": "text", "text": "and then MANGO"}]}}), queued_ctx) == [
+        {"a": "steer_result", "request_id": "steer-a", "ok": True, "error": ""},
+        {"a": "steer_result", "request_id": "steer-b", "ok": True, "error": ""}]
+    final = claude.parse_line(json.dumps({
+        "type": "result", "subtype": "success", "is_error": False, "session_id": "queued",
+        "num_turns": 1, "usage": {"input_tokens": 2, "output_tokens": 10}}), queued_ctx)
+    assert [act["a"] for act in final] == ["result"], final
+    assert final[0]["data"]["usage"]["output_tokens"] == 983
+    assert final[0]["data"]["num_turns"] == 2
+    # a failed result never waits on a queued steer; a tool turn has none
+    failed_ctx = claude.turn_context({}, True, "fail", "failed-pin")
+    claude.parse_line(json.dumps({"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": "fail"}]}}), failed_ctx)
+    claude.steer_payload({}, failed_ctx, "too late", "steer-c")
+    assert [act["a"] for act in claude.parse_line(json.dumps({
+        "type": "result", "subtype": "error_during_execution", "is_error": True,
+        "session_id": "failed", "usage": {}}), failed_ctx)] == ["result"]
     assert "--replay-user-messages" in claude.build_cmd(
         {}, True, "original direction", "pin")
     usage_ctx = claude.turn_context({}, True, "usage", "usage-pin")

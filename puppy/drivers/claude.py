@@ -1323,6 +1323,17 @@ class ClaudeDriver(Driver):
                 data["model_usage"] = model_usage
             if ctx.get("wakeups"):
                 data["wakeups"] = int(ctx["wakeups"])
+            if data["ok"] and ctx.get("pending_steers") and not ctx.get("tool"):
+                # A steer that reached the CLI while the model was already
+                # writing its final answer waits in the CLI's queue, and the
+                # CLI takes it the moment this result is written: it runs it
+                # as another round in this same process, the steer's replay
+                # arriving once that round's reply starts streaming (probed
+                # on claude 2.1.325: system/init within milliseconds, then the
+                # replay; several queued steers become one message). This
+                # result is provisional - the round's own result ends the
+                # turn, carrying the usage of both.
+                return [{"a": "turn_continue", "data": data}]
             if data["ok"] and ctx.get("background_tasks") and not ctx.get("tool"):
                 # the model has answered, but its background work is still
                 # running and the CLI will wake it when that ends: keep the

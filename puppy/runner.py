@@ -45,6 +45,10 @@ MAX_STEERS_PER_TURN = 64
 # OpenCode 1.18.30 can acknowledge a concurrent session/prompt just AFTER
 # the original prompt's result. Keep reading those replies before stdin EOF.
 STEERING_ACK_GRACE = 2.0
+# How long a provisional result held for a queued steer (the driver's
+# `turn_continue`) waits for the engine to start the round that runs it. The
+# CLI starts it within milliseconds; past this the result settles as before.
+STEER_CONTINUE_GRACE = 15.0
 MAX_SIDE_QUESTION_CHARS = 16 * 1024
 MAX_SIDE_QUESTIONS_PER_TURN = 32
 # Probed on claude 2.1.258: a side question can resolve seconds AFTER the
@@ -3681,6 +3685,15 @@ class SessionHub:
             # the turn's result if the engine leaves before waking the model.
             pending_result = None
             wait_closed = ""       # why a wait was ended early, if it was
+            # The model's answer held because a steer it had not read yet is
+            # queued in the engine, which runs it as another round in this
+            # same process (the driver's `turn_continue`): that round's result
+            # ends the turn, and steering, side questions, approvals and Stop
+            # stay live meanwhile. `continue_until` bounds the wait for that
+            # round to begin; once it has, only the turn's own limit applies.
+            held_for_steer = False
+            continue_until = None
+            timed_out = False
             bg_idle_since = None   # when every task ended without a wake-up
             # Each pause on background work is numbered; the model is asked
             # about its tasks once the pause has lasted, and again after any
@@ -3914,8 +3927,19 @@ class SessionHub:
                 self._publish_steering_state(session)
 
             while True:
-                waiting_for_replies = sq_grace_until is not None or steer_grace_until is not None
                 now = time.monotonic()
+                if continue_until is not None and now >= continue_until:
+                    # the engine never started the round for the queued
+                    # steer: the held answer is the turn's result after all
+                    continue_until = None
+                    held_for_steer = False
+                    held, pending_result = pending_result, None
+                    if held is not None:
+                        log.info("session %s: no round began for a queued steer "
+                                 "within %gs; settling the held result",
+                                 self.id, STEER_CONTINUE_GRACE)
+                        settle_result(held)
+                waiting_for_replies = sq_grace_until is not None or steer_grace_until is not None
                 if steer_grace_until is not None:
                     if now >= steer_grace_until:
                         self._reject_unacknowledged_steers(
@@ -3943,7 +3967,8 @@ class SessionHub:
                     self._bg_wait_since is not None
                 remaining = deadline - time.time()
                 if remaining <= 0 and not paused:
-                    if pending_result is not None and not wait_closed:
+                    if pending_result is not None and not wait_closed and \
+                            not held_for_steer:
                         # the model woke for a finished task and worked on
                         # past the turn's limit: end it with the answer it has
                         end_wait("timeout",
@@ -3952,13 +3977,14 @@ class SessionHub:
                                  "tasks".format(int(timeout)))
                         continue
                     self._turn_stopping = True
+                    timed_out = True
                     self._publish_steering_state(session)
                     self._emit("error", {"text": f"Turn timeout after {int(timeout)}s - killed"})
                     self._signal_if_alive(self.proc, signal.SIGKILL)
                     break
                 # a quiet wait still looks at its clocks and the queue
                 read_cap = BACKGROUND_WAIT_POLL if paused else min(remaining, 60)
-                for grace_until in (sq_grace_until, steer_grace_until):
+                for grace_until in (sq_grace_until, steer_grace_until, continue_until):
                     if grace_until is not None:
                         read_cap = min(read_cap, max(0.001, grace_until - time.monotonic()))
                 try:
@@ -3982,6 +4008,12 @@ class SessionHub:
                         continue
                 for act in actions:
                     a = act.get("a")
+                    if continue_until is not None and (
+                            a in ("event", "steer_result") or
+                            (a == "transient" and isinstance(act.get("msg"), dict) and
+                             act["msg"].get("type") == "turn_init")):
+                        # the round for the queued steer has begun
+                        continue_until = None
                     if a == "event":
                         data = act["data"]
                         if act["kind"] == "tool_result" and data.get("images"):
@@ -4014,6 +4046,18 @@ class SessionHub:
                         self._set_background_tasks(act.get("tasks") or [])
                         if self._bg_wait_since is not None:
                             bg_idle_since = None if self._bg_tasks else time.time()
+                    elif a == "turn_continue":
+                        # The model answered, but a steer it had not read yet
+                        # is queued in the engine, which runs it as another
+                        # round in this process: the answer is provisional and
+                        # the turn carries on, steerable and stoppable.
+                        data = dict(act["data"])
+                        if self.interrupted:
+                            settle_result(data)
+                            continue
+                        pending_result = data
+                        held_for_steer = True
+                        continue_until = time.monotonic() + STEER_CONTINUE_GRACE
                     elif a == "turn_pause":
                         # The native turn still owns background work, and can
                         # acknowledge steering while paused. Only final
@@ -4025,6 +4069,10 @@ class SessionHub:
                             settle_result(data)
                             continue
                         pending_result = data
+                        # a round run for a queued steer that now waits on
+                        # background work is that wait, nothing else
+                        held_for_steer = False
+                        continue_until = None
                         tasks = [dict(row) for row in (act.get("tasks") or [])
                                  if isinstance(row, dict)] or list(self._bg_tasks)
                         await withdraw_check("a new pause began")
@@ -4134,6 +4182,8 @@ class SessionHub:
                             continue
                         self._bg_wait_since = None
                         pending_result = None
+                        held_for_steer = False
+                        continue_until = None
                         settle_result(act["data"])
 
                 self._publish_steering_state(session)
@@ -4163,6 +4213,14 @@ class SessionHub:
                                 "engine ended them"
                                 if self._bg_wait_since is not None else
                                 "Turn interrupted by user"})
+                elif held_for_steer:
+                    if not timed_out:
+                        tail = self.stderr_tail.strip()[-1500:]
+                        self._emit("error", {
+                            "text": "Engine exited before it finished acting on the "
+                                    "steering message"
+                                    + (f" (exit {self.proc.returncode})" if self.proc.returncode else "")
+                                    + (f"\n{tail}" if tail else "")})
                 elif not wait_closed:
                     tail = self.stderr_tail.strip()[-1500:]
                     self._emit("error", {

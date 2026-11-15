@@ -468,7 +468,12 @@ Text edits and attachment changes made while either send is awaiting
 acknowledgement remain in the composer for the next message.
 Steering already sent can be acknowledged after the answer finishes: Puppy
 waits up to two seconds for that reply. A missing acknowledgement is reported
-as unconfirmed; an explicit engine refusal is reported as rejected.
+as unconfirmed; an explicit engine refusal is reported as rejected. With Claude
+Code, a steer that arrives while the agent is already writing its final answer
+is read straight after it: Claude Code runs it as another round of the same
+turn, so the turn stays running - Steer, Ask, approvals and Stop keep working -
+and ends with one result, its token counts covering both rounds. If that round
+does not begin within 15 seconds, the answer stands as the turn's result.
 
 **Spell check** is Puppy's own, not the browser's. Every prompt box turns the
 browser's checker and its autocorrection off, so a phone, a desktop and a kiosk
