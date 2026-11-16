@@ -2035,6 +2035,84 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     FakeElement.prototype.getContext = savedContext;
     FakeElement.prototype.toBlob = savedBlob;
   }
+  /* A chat's box is drawn taller by its top edge: the grip is the chat
+     host's alone, follows a drag between one line and the room its host
+     leaves, and lets the size go on a double click and with every send. */
+  {
+    const plain = makeBox();
+    assert.equal(plain.box.querySelector(".composer-grip"), null, "no grip for a box whose host gives no room");
+    plain.composer.destroy();
+    let room = 400;
+    const box = makeBox({ sizeRoom: () => room });
+    const grip = box.box.querySelector(".composer-grip");
+    assert.ok(grip, "the chat host's box has the grip");
+    assert.equal(box.box.firstElementChild, grip, "first, so the '@' list paints over it");
+    assert.equal(grip.getAttribute("role"), "separator");
+    assert.equal(grip.getAttribute("aria-orientation"), "horizontal");
+    assert.equal(grip.getAttribute("aria-label"), "Resize message box");
+    const press = (y, init = {}) => fire(grip, "pointerdown", { button: 0, pointerId: 3, isPrimary: true, clientY: y, ...init });
+    const move = (y, id = 3) => fire(grip, "pointermove", { pointerId: id, clientY: y });
+    const lift = (y) => fire(grip, "pointerup", { pointerId: 3, clientY: y });
+    const sized = () => [box.composer.sizedHeight, box.box.classList.contains("sized"), box.box.style["--composer-h"]];
+    box.ta.offsetHeight = 40;
+    assert.equal(press(500).defaultPrevented, true, "a press on the grip selects no text");
+    assert.ok(grip.classList.contains("active"), "lit while held, as the sidebar's grip");
+    move(499.5);
+    assert.equal(box.composer.sizedHeight, null, "under a pixel moves nothing");
+    move(300, 9);
+    assert.equal(box.composer.sizedHeight, null, "another pointer moves nothing");
+    move(380);
+    assert.deepEqual(sized(), [160, true, "160px"], "the box follows the pointer up");
+    move(-1000);
+    assert.equal(box.composer.sizedHeight, 400, "never past the room the host leaves");
+    move(2000);
+    assert.equal(box.composer.sizedHeight, 20, "never under one line");
+    move(400);
+    lift(400);
+    assert.ok(!grip.classList.contains("active"));
+    assert.equal(box.composer.sizedHeight, 140, "the size stays where it was let go");
+    move(100);
+    assert.equal(box.composer.sizedHeight, 140, "a move after the release draws nothing");
+    fire(grip, "dblclick");
+    assert.deepEqual(sized(), [null, false, undefined], "a double click: the box's own size again");
+    assert.equal(press(500, { button: 2 }).defaultPrevented, false, "a right press is not a drag");
+    move(300);
+    assert.equal(box.composer.sizedHeight, null);
+
+    // every send hands back the condensed box: Enter or Queue (take), Steer
+    // and Ask (their handoffs take too) - and a failed handoff keeps it
+    const draw = () => {
+      box.ta.offsetHeight = 40;
+      press(500); move(300); lift(300);
+      assert.equal(box.composer.sizedHeight, 240);
+    };
+    draw();
+    type(box.ta, "A long message");
+    box.composer.take();
+    assert.deepEqual(sized(), [null, false, undefined], "sent: condensed again");
+    draw();
+    type(box.ta, "steer this");
+    assert.equal(box.composer.clearSentMessage("steer this"), true);
+    assert.equal(box.composer.sizedHeight, null, "a steer handed over");
+    draw();
+    type(box.ta, "ask this");
+    assert.equal(box.composer.clearSentText("ask this"), true);
+    assert.equal(box.composer.sizedHeight, null, "a side question handed over");
+    draw();
+    type(box.ta, "edited meanwhile");
+    assert.equal(box.composer.clearSentMessage("the old draft"), false);
+    assert.equal(box.composer.sizedHeight, 240, "a handoff that cleared nothing keeps the drawn box");
+    // a host not laid out yet gives no room: only the floor holds
+    room = null;
+    fire(grip, "dblclick");
+    box.ta.offsetHeight = 40;
+    press(500); move(-500); lift(-500);
+    assert.equal(box.composer.sizedHeight, 1040);
+    box.composer.destroy();
+  }
+  console.log("PASS: a chat's box is drawn taller or shorter by its top edge, between one line and the host's " +
+              "room, and a double click or any send (Enter, Queue, Steer, Ask) hands back its condensed size");
+
   console.log("PASS: an AVIF is drawn and sent as a PNG of the picture (a JPEG on white past the upload limit), " +
               "previewed, marked and sent as an image; untyped .avif names count; one the browser cannot draw or " +
               "that fits neither way goes as the file it is with the reason; one let go mid-draw sends nothing");

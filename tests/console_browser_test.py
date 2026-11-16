@@ -1968,6 +1968,133 @@ async def avif_attachment_checks(instance):
     print("avif attachment checks passed")
 
 
+async def composer_resize_checks(instance):
+    """A chat's box is drawn taller by its top edge, on the sidebar grip's own
+    terms, and goes back to its condensed size when its message is sent. In
+    real layout on a desktop in both themes: the grip's 1px line lands on the
+    box's top border pixel and stays off its rounded corners, its hover and
+    drag rules are the sidebar grip's own (one rule for both), a real drag
+    lights it and grows the box upward under the pointer with the transcript
+    kept at its foot, the box stops where the transcript would keep fewer
+    than a few lines, a real double click hands back the box's own size, and
+    so does a send. A phone has no grip."""
+    page = instance.page_session
+
+    async def mouse(kind, x, y, buttons=0, count=1):
+        await instance.call("Input.dispatchMouseEvent", {
+            "type": kind, "x": x, "y": y, "clickCount": count, "buttons": buttons,
+            "button": "none" if kind == "mouseMoved" and not buttons else "left"}, session=page)
+
+    read = """(() => {
+        const c = demoView.composer, box = c.box, grip = c.sizeGrip, ta = c.ta;
+        const b = box.getBoundingClientRect(), g = grip.getBoundingClientRect();
+        const line = getComputedStyle(grip, '::before');
+        const probe = document.createElement('span'); probe.style.color = 'var(--acc)';
+        document.body.appendChild(probe); const acc = getComputedStyle(probe).color; probe.remove();
+        return {first: box.firstElementChild === grip, boxTop: b.top, boxBottom: b.bottom, boxLeft: b.left,
+            boxRight: b.right, radius: parseFloat(getComputedStyle(box).borderTopLeftRadius),
+            gripTop: g.top, gripLeft: g.left, gripRight: g.right, gripHeight: g.height,
+            lineTop: line.top, lineHeight: line.height, lineColor: line.backgroundColor, acc,
+            cursor: getComputedStyle(grip).cursor, display: getComputedStyle(grip).display,
+            active: grip.classList.contains('active'), sized: box.classList.contains('sized'),
+            ta: ta.offsetHeight, scroll: demoView.scroll.clientHeight, atBottom: demoView.atBottom(),
+            x: g.left + g.width / 2, y: g.top + g.height / 2};
+    })()"""
+    shared = """(() => {
+        const found = {hover: false, active: false};
+        for (const sheet of document.styleSheets) {
+            let rules; try { rules = sheet.cssRules; } catch (error) { continue; }
+            const walk = (list, hovering) => {
+                for (const rule of list) {
+                    if (rule.cssRules) walk(rule.cssRules, hovering ||
+                        /hover\\s*:\\s*hover/.test(rule.conditionText || (rule.media && rule.media.mediaText) || ''));
+                    const sel = rule.selectorText || '';
+                    if (hovering && sel.includes('.side-resize:hover::before') &&
+                        sel.includes('.composer-grip:hover::before')) found.hover = true;
+                    if (sel.includes('.side-resize.active::before') &&
+                        sel.includes('.composer-grip.active::before')) found.active = true;
+                }
+            };
+            walk(rules, false);
+        }
+        return found;
+    })()"""
+    try:
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=page)
+        assert await evaluate(instance, shared) == {"hover": True, "active": True}, \
+            "the grip's hover and drag rules are the sidebar grip's own"
+        for theme in ("dark", "light"):
+            await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); "
+                           "if (typeof closeDrawer === 'function') closeDrawer(); "
+                           "demoView.composer.setSize(null); demoView.composer.replace(''); true")
+            await asyncio.sleep(.1)
+            empty = (await evaluate(instance, read))["ta"]
+            await evaluate(instance, "demoView.composer.replace(Array.from({length: 40}, (_, i) => 'line ' + (i + 1)).join('\\n')); "
+                           "demoView.scrollBottom(true); true")
+            await asyncio.sleep(.25)
+            g = await evaluate(instance, read)
+            where = (theme, g)
+            assert g["first"] and g["display"] == "block" and g["cursor"] == "row-resize", where
+            assert abs(g["gripTop"] + 3 - g["boxTop"]) < .01 and g["lineTop"] == "3px" and \
+                g["lineHeight"] == "1px", ("the line lands on the box's top border pixel", where)
+            assert g["gripLeft"] >= g["boxLeft"] + g["radius"] - .01 and \
+                g["gripRight"] <= g["boxRight"] - g["radius"] + .01, ("off the rounded corners", where)
+            assert g["lineColor"] == "rgba(0, 0, 0, 0)" and not g["sized"], where
+            assert g["ta"] == 224 and g["atBottom"], ("a long draft holds the box at its cap", where)
+            # a real drag: lit while held, the box grows upward under the pointer
+            start = g
+            await mouse("mouseMoved", start["x"], start["y"])
+            await mouse("mousePressed", start["x"], start["y"], 1)
+            for step in range(1, 5):
+                await mouse("mouseMoved", start["x"], start["y"] - 50 * step, 1)
+            await asyncio.sleep(.3)  # the line's own fade, --t-fast
+            held = await evaluate(instance, read)
+            assert held["active"] and held["lineColor"] == held["acc"], ("lit while held", theme, held)
+            assert held["sized"] and held["ta"] == start["ta"] + 200, ("follows the pointer", theme, held)
+            assert abs(held["boxBottom"] - start["boxBottom"]) < .01 and \
+                abs(held["boxTop"] - (start["boxTop"] - 200)) < .01, ("grows upward", theme, held)
+            assert held["atBottom"], ("the transcript keeps its foot", theme, held)
+            await mouse("mouseReleased", start["x"], start["y"] - 200, 0)
+            await asyncio.sleep(.3)
+            let_go = await evaluate(instance, read)
+            assert not let_go["active"] and let_go["lineColor"] == "rgba(0, 0, 0, 0)" and \
+                let_go["ta"] == held["ta"], ("let go, it stays", theme, let_go)
+            # pulled far past the room: a few lines of the conversation stay
+            await mouse("mouseMoved", let_go["x"], let_go["y"])
+            await mouse("mousePressed", let_go["x"], let_go["y"], 1)
+            await mouse("mouseMoved", let_go["x"], 5, 1)
+            await mouse("mouseReleased", let_go["x"], 5, 0)
+            tall = await evaluate(instance, read)
+            assert abs(tall["scroll"] - 120) <= 1 and tall["ta"] > held["ta"], ("the transcript keeps 120px", theme, tall)
+            # a real double click: the box's own size again
+            for count in (1, 2):
+                await mouse("mousePressed", tall["x"], tall["y"], 1, count)
+                await mouse("mouseReleased", tall["x"], tall["y"], 0, count)
+            back = await evaluate(instance, read)
+            assert not back["sized"] and back["ta"] == 224, ("a double click hands back its own size", theme, back)
+            # drawn again, then the message is sent: condensed to one line
+            await mouse("mouseMoved", back["x"], back["y"])
+            await mouse("mousePressed", back["x"], back["y"], 1)
+            await mouse("mouseMoved", back["x"], back["y"] - 150, 1)
+            await mouse("mouseReleased", back["x"], back["y"] - 150, 0)
+            assert (await evaluate(instance, read))["ta"] == 374
+            await evaluate(instance, "demoView.composer.take(); true")
+            await asyncio.sleep(.1)
+            sent = await evaluate(instance, read)
+            assert not sent["sized"] and sent["ta"] == empty < 30, ("sent: one line again", theme, sent, empty)
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 390, "height": 844, "deviceScaleFactor": 2, "mobile": True}, session=page)
+        await asyncio.sleep(.2)
+        assert (await evaluate(instance, read))["display"] == "none", "a phone has no grip"
+    finally:
+        await evaluate(instance, "demoView.composer.setSize(null); demoView.composer.replace(''); "
+                                 "applyTheme('dark'); true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=page)
+    print("composer resize checks passed")
+
+
 async def image_mark_checks(instance):
     """A picture waiting in a prompt box takes red boxes for the agent, and
     the bar that offers them keeps one even ring of bar around its first and
@@ -10780,6 +10907,9 @@ async def main(args):
             if args.avif_only:
                 await avif_attachment_checks(instances[0])
                 return
+            if args.composer_resize_only:
+                await composer_resize_checks(instances[0])
+                return
             if args.thinking_only:
                 await thinking_disclosure_checks(instances[0])
                 return
@@ -10842,6 +10972,7 @@ async def main(args):
             await image_mark_checks(instances[0])
             await tool_image_checks(instances[0])
             await avif_attachment_checks(instances[0])
+            await composer_resize_checks(instances[0])
             await task_tools_checks(instances[0])
             await task_tab_spacing_checks(instances[0])
             await checks(*instances, runner.hub(sid), args.screenshots)
@@ -10878,6 +11009,7 @@ if __name__ == "__main__":
     parser.add_argument("--side-search-only", action="store_true")
     parser.add_argument("--folder-pause-only", action="store_true")
     parser.add_argument("--avif-only", action="store_true")
+    parser.add_argument("--composer-resize-only", action="store_true")
     parser.add_argument("--popout-only", action="store_true")
     parser.add_argument("--running-only", action="store_true")
     parser.add_argument("--background-tasks-only", action="store_true")

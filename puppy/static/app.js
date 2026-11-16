@@ -14792,7 +14792,10 @@ function spellAutocorrection(word) {
                        session's agent works in, on the backend holding it)
      paused()          whether the session this box speaks for is paused (its
                        working folder is gone), so rows that would start its
-                       work stay out of the "@" list (optional) */
+                       work stay out of the "@" list (optional)
+     sizeRoom()        the tallest the textarea may be drawn, in px, or null
+                       while the host is not laid out; giving it puts the
+                       size grip on the box's top edge (chat hosts only) */
 function composerBoxHtml({ id = "", placeholder = "", rows = 1, className = "",
                            controls = "", actions = "" } = {}) {
   return `<div class="composer-box${className ? " " + esc(className) : ""}">
@@ -14867,6 +14870,8 @@ class Composer {
     this.typingTimer = null;
     this.typingAt = 0;
     this.ta = box.querySelector("textarea");
+    this.sizedHeight = null;   // a height drawn on the grip, kept until the next send
+    if (this.host.sizeRoom) this.wireSizeGrip();
     this.enterActions = Object.entries(this.host.enterActions || {}).map(([value, run]) => {
       const button = box.querySelector(`[data-enter-action="${value}"]`);
       const wrap = el("span", "composer-enter-action");
@@ -15528,6 +15533,8 @@ class Composer {
     this.renderAttachments(false);
     this.ta.value = "";
     this.hideMention();
+    /* a box drawn taller was for the message just sent */
+    if (this.sizedHeight != null) this.setSize(null);
     this.resize();
     this.spellFix = null;
     this.spellTypingAt = null;
@@ -15776,6 +15783,69 @@ class Composer {
       this._lastTaH = h;
       if (host.afterResize) host.afterResize(token);
     }
+  }
+
+  /* A chat's box is drawn taller or shorter by its top edge, on the
+     sidebar grip's own terms: an invisible strip whose 1px line lights up
+     in the accent under the pointer, a drag that follows the pointer, and a
+     double click for the size the box had. The height is the message's
+     being written: a send (take) hands back the condensed box. Desktop
+     only, like the sidebar's grip - a phone has no room to give. */
+  wireSizeGrip() {
+    const grip = this.sizeGrip = el("div", "composer-grip");
+    grip.setAttribute("role", "separator");
+    grip.setAttribute("aria-orientation", "horizontal");
+    grip.setAttribute("aria-label", "Resize message box");
+    /* first, so the "@" list and everything positioned after it paints over
+       the strip where they meet */
+    this.box.insertBefore(grip, this.box.firstElementChild);
+    let drag = null;
+    grip.addEventListener("pointerdown", event => {
+      if (event.button !== 0 || event.isPrimary === false || drag || this.closed) return;
+      event.preventDefault();
+      /* one line is the floor, read while the box still has its own bounds */
+      if (this.sizedHeight == null) this.sizeFloor = this.heightBounds()[0];
+      drag = { id: event.pointerId, y: event.clientY, height: this.ta.offsetHeight, moved: false };
+      grip.classList.add("active");
+      try { grip.setPointerCapture(event.pointerId); } catch (error) {}
+    });
+    grip.addEventListener("pointermove", event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const delta = drag.y - event.clientY;
+      if (!drag.moved && Math.abs(delta) < 1) return;
+      drag.moved = true;
+      event.preventDefault();
+      this.setSize(drag.height + delta);
+    });
+    const end = event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      drag = null;
+      grip.classList.remove("active");
+      try { grip.releasePointerCapture(event.pointerId); } catch (error) {}
+    };
+    grip.addEventListener("pointerup", end);
+    grip.addEventListener("pointercancel", end);
+    grip.addEventListener("dblclick", event => {
+      event.preventDefault();
+      this.setSize(null);
+    });
+  }
+
+  /* The textarea's height drawn by hand, between one line and the room its
+     host leaves, or null for the box's own size. */
+  setSize(height) {
+    let size = null;
+    if (height != null && Number.isFinite(height)) {
+      const floor = this.sizeFloor || 20;
+      const room = this.host.sizeRoom ? this.host.sizeRoom() : null;
+      size = Math.round(Math.max(floor, room != null ? Math.min(height, room) : height));
+    }
+    if (size === this.sizedHeight) return;
+    this.sizedHeight = size;
+    this.box.classList.toggle("sized", size != null);
+    if (size != null) this.box.style.setProperty("--composer-h", size + "px");
+    else this.box.style.removeProperty("--composer-h");
+    this.resize();
   }
 
   /* The textarea's own min/max-height, so a host that styles its box taller
@@ -17159,6 +17229,9 @@ class Composer {
   }
 }
 Composer.live = new Set();   // every box alive on this page
+/* The transcript a chat's box drawn taller still leaves, in px: a few lines
+   of the conversation stay in view however far the grip is pulled. */
+const CHAT_KEEP_HEIGHT = 120;
 
 /* ================= SessionView ================= */
 /* A small delegate mark for agent/task tools: a head with two eyes and an
@@ -22195,6 +22268,9 @@ class SessionView {
          reading of "following the tail" as everything else in the view */
       beforeResize: () => !this.detached && this.atBottom(),
       afterResize: (pinned) => { if (pinned) this.scrollBottom(true); },
+      /* the box may be drawn taller until the transcript keeps a few lines */
+      sizeRoom: () => this.scroll && this.scroll.clientHeight && this.composer ?
+        Math.max(0, this.scroll.clientHeight + this.composer.ta.offsetHeight - CHAT_KEEP_HEIGHT) : null,
       /* Another device's shared draft may still name these files. */
       privateUploads: () => false,
     });

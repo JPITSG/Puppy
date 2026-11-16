@@ -410,6 +410,11 @@ typing filters by name and `Tab` completes it, and `Escape` closes the list.
 Nothing is highlighted when the list opens, so `Enter` still sends.
 In session chats, `↑` at the start of the box recalls earlier prompts. The New task
 and New loop boxes keep normal Up/Down caret movement without prompt recall.
+On a desktop a session chat's box can be made taller or shorter by dragging its
+top edge, which lights up under the pointer like the sidebar's edge; the
+transcript always keeps a few lines in view. Double-click the edge for the
+box's normal size. The size is for the message being written: once it is sent
+(`Enter`, Steer, Queue or Ask) the box returns to its condensed size.
 Recall reads the session's stored prompts, loading older pages as
 needed with no history limit, all the way back to its first prompt, on any
 device. `↓` at the end walks forward again and restores your unsent draft and
