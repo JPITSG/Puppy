@@ -133,7 +133,10 @@ side questions, engine switches and a result line for every turn with elapsed
 time, tokens in and out, and, when the engine reports it, how full the model's
 context is. Click a thinking section's label or chevron to expand or collapse
 its text, including while it streams. A section without thinking text stays
-closed. Tool cards and folded-task headers share a vertically centered row
+closed. An opened tool card shows the call's input; when it is very long, the
+longest values (a long command, say) are cut short with an ellipsis so that
+every field - a command's description and timeout included - stays in view.
+Tool cards and folded-task headers share a vertically centered row
 for their carets, icons and status marks, with equal spacing from the chevron to
 the tool icon and from the icon to its label. Hover a running tool's status
 spinner to see a live elapsed clock for that individual call, including shell

@@ -17278,6 +17278,48 @@ function displayValue(value, limit = 12000) {
   }
   return text.length > limit ? text.slice(0, limit) + "…" : text;
 }
+/* A tool's input on its card. Every key always shows, so a long command
+   can never push the description or the timeout after it out of sight:
+   past the card's limit the long strings are cut short, each with "…"
+   inside its own quotes, to the one length (never under
+   TOOL_INPUT_STRING_FLOOR) that lets the whole fit. An input that will not
+   fit even so - a great many long strings - is cut as text, as before. */
+const TOOL_INPUT_STRING_FLOOR = 200;
+function displayInput(value, limit = 12000) {
+  if (value == null || typeof value !== "object") return displayValue(value, limit);
+  const whole = displayValue(value, Infinity);
+  if (whole.length <= limit) return whole;
+  let longest = 0;
+  const measure = item => {
+    if (typeof item === "string") longest = Math.max(longest, item.length);
+    else if (item && typeof item === "object") Object.values(item).forEach(measure);
+  };
+  measure(value);
+  const cut = (item, cap) => {
+    if (typeof item === "string") {
+      if (item.length <= cap) return item;
+      let end = cap;
+      const code = item.charCodeAt(end - 1);
+      if (code >= 0xd800 && code <= 0xdbff) end--;   // never half a character
+      return item.slice(0, end) + "…";
+    }
+    if (Array.isArray(item)) return item.map(entry => cut(entry, cap));
+    if (item && typeof item === "object") {
+      const out = {};
+      for (const [key, entry] of Object.entries(item)) out[key] = cut(entry, cap);
+      return out;
+    }
+    return item;
+  };
+  const render = cap => displayValue(cut(value, cap), Infinity);
+  let low = Math.min(TOOL_INPUT_STRING_FLOOR, longest), high = longest;
+  if (render(low).length > limit) return displayValue(value, limit);
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (render(mid).length <= limit) low = mid; else high = mid - 1;
+  }
+  return render(low);
+}
 function toolIconNode(tool) {
   if (TOOL_ICON_DRAWERS[tool]) return TOOL_ICON_DRAWERS[tool]();
   const name = String(tool || "").toLowerCase();
@@ -18064,7 +18106,7 @@ function toolCardNode(data, completed = false) {
     n._questions = { rows: asked.rows, list: body.appendChild(questionListNode(asked.rows, asked.title)) };
   } else if (d.input !== undefined) {
     body.appendChild(el("div", "tb-label", "input"));
-    body.appendChild(linkifyInto(el("pre"), displayValue(d.input)));
+    body.appendChild(linkifyInto(el("pre"), displayInput(d.input)));
   }
   n._toolInput = d.input;
   n._toolName = d.tool;

@@ -377,3 +377,44 @@ vm.runInContext(between("/* Links in plain text.", "/* A model id as a spawn"), 
   assert.equal(plain.textContent, "see https://x.example/a. done");
 }
 console.log("PASS: a tool card's head cuts its line for display only - each link in it opens its whole address, before or across the cut, and an address past it is not drawn");
+
+/* A card's INPUT keeps every key in sight: past its limit the long strings
+   are cut short inside their own quotes, never the keys after them - a long
+   command still shows its description and timeout. */
+{
+  const run = code => vm.runInContext(code, context);
+  const shown = value => run("displayInput(" + JSON.stringify(value) + ")");
+  const script = "python3 - <<'PY'\n" + "check(straight().get('use') == 2)  # one line of the probe\n".repeat(600);
+  const input = {command: script, description: "Run the auto straight probe", timeout: 600000};
+  const text = shown(input);
+  assert.ok(text.length <= 12000, "within the card's limit");
+  assert.ok(text.includes('"description": "Run the auto straight probe"'), "the description shows");
+  assert.ok(text.includes('"timeout": 600000'), "the timeout shows");
+  assert.ok(/…",\n  "description"/.test(text), "the command is cut inside its own quotes");
+  assert.ok(text.endsWith("}"), "the JSON is whole around the cut");
+  assert.ok(text.length > 11500, "the command keeps all the room the other keys leave it");
+  // nested strings are cut the same way; every key and item stays
+  const edits = {file_path: "/srv/demo/a.txt", edits: [
+    {old_string: "a".repeat(9000), new_string: "b".repeat(9000)}, {old_string: "c", new_string: "d"}]};
+  const nested = shown(edits);
+  assert.ok(nested.length <= 12000);
+  assert.ok(nested.includes('"old_string": "c"') && nested.includes('"new_string": "d"'));
+  assert.ok(nested.includes('"file_path": "/srv/demo/a.txt"'));
+  // an input within the limit is shown as it always was; text is text
+  assert.equal(shown({command: "ls -la", description: "List"}),
+    JSON.stringify({command: "ls -la", description: "List"}, null, 2));
+  assert.equal(shown("plain words"), "plain words");
+  // what no cut of the strings can fit is cut as text, as before
+  const many = {};
+  for (let i = 0; i < 200; i++) many["key" + i] = "x".repeat(300);
+  const crowded = shown(many);
+  assert.equal(crowded.length, 12001, "cut as text at the limit");
+  assert.ok(crowded.endsWith("…"));
+  // the card's own INPUT block uses it
+  context.longInput = input;
+  const card = run("toolCardNode({tool: 'Bash', input: longInput}, true)");
+  const pre = card.querySelector(".tool-body pre");
+  assert.ok(pre.textContent.includes('"description": "Run the auto straight probe"'));
+  assert.ok(pre.textContent.includes('"timeout": 600000'));
+}
+console.log("PASS: a tool card's input keeps every key in sight - a long command is cut inside its own quotes, its description and timeout always shown");
