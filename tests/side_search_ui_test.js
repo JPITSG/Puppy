@@ -173,18 +173,43 @@ for (const [stored, mask] of [["1", 1], ["5", 5], ["6", 6], ["0", 7], ["8", 7], 
     "harbor dashboard\n/home/mira/projects/harbor\nstudio");
 }
 
-/* the box's own buttons are as before: the sliders carry the words to the
-   Search tab, the cross clears and gives the caret back */
+/* the box's own buttons: the sliders carry the words to the Search tab, the
+   cross clears, gives the caret back and starts the ticks over at all three */
 {
-  const p = page(null);
+  const p = page("2");
   p.input.value = "garden";
   fire(p.input, "input");
   p.document.getElementById("side-search-adv").click();
   assert.deepEqual(p.calls.searchTab, [["g", "garden"]]);
+  assert.equal(p.context.peek().mask, 2, "the sliders leave the ticks as they are");
+  const renders = p.calls.renders;
   p.document.getElementById("side-search-go").click();
   assert.equal(p.input.value, "");
   assert.equal(p.context.state.sessionFilter, "");
   assert.equal(p.document.activeElement, p.input);
+  assert.equal(p.context.peek().mask, 7, "the cross puts all three back");
+  assert.equal(p.storage.has("puppy.sideSearchIn"), false);
+  assert.deepEqual(p.read().map(r => [r.checked, r.ticked, r.locked]),
+    [["true", true, false], ["true", true, false], ["true", true, false]]);
+  assert.equal(p.calls.renders, renders + 1, "one redraw for the whole clear");
+  // with nothing typed the cross is the search glyph: it only focuses
+  p.choices()[0].click();
+  assert.equal(p.context.peek().mask, 6);
+  p.document.getElementById("side-search-go").click();
+  assert.equal(p.context.peek().mask, 6, "no search to clear, nothing reset");
 }
 
-console.log("PASS: the quick search looks in the name, path and backend its ticks choose - all three by default, one exact digit kept by the browser and anything else read as all three, never nothing - sliding out on focus, staying while words are in the box or focus is inside it, going when left empty, and keeping the caret through a press");
+/* Escape over words is the same clear */
+{
+  const p = page("1");
+  fire(p.input, "focus", { bubbles: false });
+  p.document.activeElement = p.input;
+  p.input.value = "harbor";
+  fire(p.input, "input");
+  assert.ok(fire(p.input, "keydown", { key: "Escape" }).defaultPrevented);
+  assert.equal(p.input.value, "");
+  assert.equal(p.context.peek().mask, 7);
+  assert.equal(p.storage.has("puppy.sideSearchIn"), false);
+}
+
+console.log("PASS: the quick search looks in the name, path and backend its ticks choose - all three by default, one exact digit kept by the browser and anything else read as all three, never nothing - sliding out on focus, staying while words are in the box or focus is inside it, going when left empty, keeping the caret through a press, and starting over at all three when the search is cleared");

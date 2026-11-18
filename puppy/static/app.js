@@ -11491,9 +11491,12 @@ function applySideSearch() {
   renderSidebar();
 }
 
+// Clearing the search (the cross, or Escape over words) starts it over: the
+// words go and the box looks in all three places again.
 function clearSideSearch() {
   $("side-search-input").value = "";
   applySideSearch();
+  setSideSearchIn(SIDE_SEARCH_ALL);
 }
 
 {

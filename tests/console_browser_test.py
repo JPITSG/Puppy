@@ -5268,8 +5268,10 @@ async def side_search_checks(instance):
     width and the narrowest the sidebar takes, in both themes. A real click on
     a choice leaves the caret in the box and the list follows at once; the
     last one left cannot be taken away; the browser keeps the choice through a
-    reload. Left with words in it, the box keeps them out; Escape clears the
-    words and then lets the box go, and they slide away with it."""
+    reload. Left with words in it, the box keeps them out; a real click on the
+    cross, or Escape, clears the words and puts all three choices back with
+    the caret kept, and Escape on the empty box lets it go, the choices
+    sliding away with it."""
     box, panel, field = "$('side-search')", "$('side-search-in')", "$('side-search-input')"
     rows = "document.querySelectorAll('#sess-groups .sess-item').length"
 
@@ -5357,18 +5359,10 @@ async def side_search_checks(instance):
         assert await evaluate(instance, "sideSearchIn") == 4 and await evaluate(instance, "lsGet(SIDE_SEARCH_KEY)") == "4"
         assert await evaluate(instance, "document.activeElement === %s" % field)
 
-        # left with words in it, they stay; Escape clears and keeps them; the
-        # empty box let go takes them away
+        # left with words in it, they stay
         await mouse(800, 450)
         await asyncio.sleep(.4)
         assert await evaluate(instance, "document.activeElement !== %s && !%s.hidden" % (field, panel))
-        await click(field)
-        await escape()
-        assert await evaluate(instance, "%s.value === '' && document.activeElement === %s && !%s.hidden"
-                              % (field, field, panel))
-        await escape()
-        await until(instance, "%s.hidden && %s" % (panel, settled))
-        assert await evaluate(instance, "(%s).getBoundingClientRect().height" % box) == 30
 
         # the browser keeps the choice
         await instance.call("Page.reload", session=instance.page_session)
@@ -5376,13 +5370,40 @@ async def side_search_checks(instance):
         await evaluate(instance, "window.demoView = state.views['s:0:1'].activeView(); true")
         await until(instance, "demoView.draftReady")
         assert await evaluate(instance, "sideSearchIn") == 4
-        assert await evaluate(instance, "[...%s.querySelectorAll('.side-search-choice')].map(c => c.getAttribute('aria-checked')).join()"
-                              % panel) == "false,false,true"
+        ticks = "[...%s.querySelectorAll('.side-search-choice')].map(c => c.getAttribute('aria-checked')).join()" % panel
+        assert await evaluate(instance, ticks) == "false,false,true"
+
+        # the cross clears the words and starts the choices over at all three,
+        # the caret staying in the box and the choices with it
+        await click(field)
+        await until(instance, "!%s.hidden && %s" % (panel, settled))
+        await instance.call("Input.insertText", {"text": "mira"}, session=instance.page_session)
+        await until(instance, rows + " === 0 && !!document.querySelector('#sess-groups .sess-empty')")
+        await click("$('side-search-go')")
+        await until(instance, rows + " === 5")
+        assert await evaluate(instance, "%s.value === '' && document.activeElement === %s && !%s.hidden"
+                              % (field, field, panel))
+        assert await evaluate(instance, ticks) == "true,true,true"
+        assert await evaluate(instance, "sideSearchIn === SIDE_SEARCH_ALL && lsGet(SIDE_SEARCH_KEY) === null")
+
+        # Escape over words is the same clear; Escape on the empty box lets it
+        # go, and the choices slide away with it
+        await click(choice(1))
+        await instance.call("Input.insertText", {"text": "mira"}, session=instance.page_session)
+        await until(instance, rows + " === 0")
+        await escape()
+        assert await evaluate(instance, "%s.value === '' && document.activeElement === %s && !%s.hidden"
+                              % (field, field, panel))
+        assert await evaluate(instance, ticks) == "true,true,true"
+        await escape()
+        await until(instance, "%s.hidden && %s" % (panel, settled))
+        assert await evaluate(instance, "(%s).getBoundingClientRect().height" % box) == 30
     finally:
         await evaluate(instance, "lsDel(SIDE_SEARCH_KEY); true")
     print("PASS: the quick search's choices slide out inside its border on a real click, spread from the text's "
           "column to the same inset at either width in both themes, keep the caret and filter at once, never "
-          "leave nothing, stay while words are in the box, go with it when left empty, and are kept by the browser",
+          "leave nothing, stay while words are in the box, go with it when left empty, are kept by the browser and "
+          "start over at all three when the cross or Escape clears the search",
           flush=True)
 
 
