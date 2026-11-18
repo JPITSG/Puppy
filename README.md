@@ -255,6 +255,9 @@ reading anywhere further up is never pulled away from it.
   loaded successfully keeps unlisted saved choices visible by ID until it does.
 - **Engine defaults per backend.** Save the starting permission, model and
   effort for each engine; new sessions, tasks and engine switches start from them.
+  On a desktop, the composer's Permissions, Model and Effort lists star the
+  saved default; pressing another row's star (or Shift+Enter on it) makes that
+  the default without changing the session you are in.
 - **Switch engines any time.** A session can move between installed engines.
   The new engine starts a fresh native session seeded with a handoff of the
   conversation so far, in the same working directory.
@@ -1342,7 +1345,9 @@ backend name stays readable; long button labels wrap within the button.
 - **Security** – change your password.
 - **Backup & restore** – export and import the full-instance archive.
 
-Engine defaults are edited from the composer's dropdowns or the session menu.
+Engine defaults are edited from the composer's dropdowns - one field at a time
+by their stars, or all three in the Engine defaults dialog at their foot - or
+the session menu.
 
 Timeout persistence and manual preparation of existing installations are
 documented in [Timeout settings](docs/timeouts.md); the Git repository check,

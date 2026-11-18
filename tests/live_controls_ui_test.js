@@ -24,7 +24,7 @@ const state = { views: {}, sessions: [], remoteSessions: {}, engines: [], engMap
   sessionColors: [], defaultCwd: "/project", browser: { enabled: false }, version: "1.0.1" };
 const nodeStateListeners = new Set(), enginePayloadListeners = new Set();
 let dialog, requests = [], apiReply = {}, hold = null, failure = "", stream = true;
-let sidebarUpdates = 0, tabUpdates = 0;
+let sidebarUpdates = 0, tabUpdates = 0, defaultsOffered = false;
 const notices = [];
 function modal(html) {
   const m = el("div", "modal"); m.innerHTML = html; document.body.appendChild(m);
@@ -54,7 +54,7 @@ const context = vm.createContext({
   backendSupportsSessionTools: bid => capability(bid, "session-tools"),
   backendSupportsFastMode: bid => capability(bid, "fast-mode"),
   backendSupportsEngineUpgrade: bid => capability(bid, "engine-upgrade"),
-  backendSupportsEngineDefaults: () => false,
+  backendSupportsEngineDefaults: bid => defaultsOffered && capability(bid, "engine-defaults"),
   backendSupportsQueuedPermission: bid => capability(bid, "queued-permission-config"),
   backendSupportsScratch: bid => !bid || capability(bid, "temporary-workspaces"),
   backendSupportsWorkspaceMirror: bid => !bid || capability(bid, "workspace-mirror"),
@@ -103,6 +103,7 @@ vm.runInContext([
   between("class SearchView {", "/* ================= modals"),
   between("function workspaceBackendChoices(", "/* The same editor serves"),
   between("async function modalNewSession(", "/* open existing session */"),
+  between("/* An engine's answer from its defaults route", "function modalEngineDefaults("),
   "globalThis.classes = {SessionView, TermView, BrowserView, SearchView, SettingsView};",
   "globalThis.UploadComposer = class {",
   between("  syncUploadButton() {", "  /* Leave the box."),
@@ -501,5 +502,140 @@ function engineCatalog(fast = false) {
   approval.handle({ type: "approval_resolved", request_id: req.request_id });
   assert.equal(visible(), false);
   assert.equal(approval.approvalRequest, null);
+  await starChecks();
   console.log("PASS: live composer menus, search recovery, local engine readiness, browser toggles, session links and New session choices");
+  console.log("PASS: the composer pickers star what new sessions start with: a column at the rows' left edge, filled on the saved default (an alias spelling of its model too), offered only where the default may go, saved one field at a time beside the other two while the list stays open and the session keeps its choice, effort put back where the new model has no such level, Shift+Enter from the keys, a refusal leaving the old star, and no column on a node without the defaults route");
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+/* The star column of the composer's Permissions / Model / Effort lists: the
+   engine defaults set from the lists themselves (the user's pick, A). */
+async function starChecks() {
+  const plain = value => JSON.parse(JSON.stringify(value));
+  const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(resolve => setTimeout(resolve, 0)); };
+  const catalog = () => [{ key: "engine", label: "Engine", installed: true, auth: "ok", allow_custom_model: true,
+    tool_options: [],
+    permission_options: [{ value: "safe", label: "Safe" }, { value: "open", label: "Open" }],
+    session_defaults: { permission_mode: "safe", model: "deep[1m]", effort: "high" },
+    model_options: [
+      { value: "", label: "Default", effort_options: [{ value: "", label: "Default" }, { value: "high", label: "High" }] },
+      { value: "deep", label: "Deep", aliases: ["deep[1m]"],
+        effort_options: [{ value: "", label: "Default" }, { value: "high", label: "High" }] },
+      { value: "swift", label: "Swift", effort_options: [{ value: "", label: "Default" }, { value: "low", label: "Low" }] },
+      { value: "model", label: "Model",
+        effort_options: [{ value: "", label: "Default" }, { value: "low", label: "Low" }, { value: "high", label: "High" }] }] }];
+  state.engines = catalog();
+  const view = sessionView(0);
+  Object.assign(view.session, { engine: "engine", model: "model", effort: "low", permission_mode: "open" });
+  const anchor = mount(el("button"));
+  const rowOf = (menu, label) => menu.querySelectorAll(".choice-option").find(row =>
+    row.querySelector(".choice-option-label")?.textContent === label || row.textContent === label);
+  const starOf = (menu, label) => rowOf(menu, label).querySelector(".choice-star");
+
+  /* a node without the defaults route: the lists are as they were */
+  defaultsOffered = true;
+  const unstarred = view.showPermMenu(anchor);
+  assert.equal(unstarred.querySelector(".choice-star"), null, "no route, no star column");
+  unstarred.remove();
+  state.nodeCapabilities.push("engine-defaults");
+
+  /* permissions: the column first in every row, the saved default filled */
+  let perm = view.showPermMenu(anchor);
+  for (const row of perm.querySelectorAll(".choice-option").filter(row => row._choiceValue !== undefined))
+    assert.equal(row.children[0].classList.contains("choice-star"), true, "the star stands first in its row");
+  assert.equal(starOf(perm, "Safe").classList.contains("on"), true);
+  assert.equal(starOf(perm, "Safe").querySelector("svg") !== null, true);
+  assert.equal(starOf(perm, "Safe").title, "New Engine sessions start with this");
+  assert.equal(rowOf(perm, "Safe").getAttribute("aria-description"), "New Engine sessions start with this");
+  assert.equal(starOf(perm, "Open").classList.contains("offered"), true);
+  assert.equal(starOf(perm, "Open").title, "Start new Engine sessions with Open");
+  assert.equal(rowOf(perm, "Engine defaults").classList.contains("choice-indent"), true,
+    "the footer's text stands in the labels' column");
+
+  /* a press on a star saves that field beside the saved two, the list stays
+     open with the star moved at once, and the session's own choice is left */
+  let release;
+  hold = new Promise(resolve => { release = resolve; });
+  requests = [];
+  const saved = { ...catalog()[0], session_defaults: { permission_mode: "open", model: "deep[1m]", effort: "high" } };
+  apiReply = { engine: saved };
+  let picked = null;
+  view.applyPermissionChoice = value => { picked = value; };
+  starOf(perm, "Open").click();
+  assert.equal(perm.isConnected, true, "a star keeps the list open");
+  assert.equal(starOf(perm, "Open").classList.contains("on"), true, "the star moves at once");
+  assert.equal(starOf(perm, "Safe").classList.contains("on"), false);
+  await settle();
+  assert.deepEqual(plain(requests.map(r => [r.route, r.method, r.body])), [["engines/engine/defaults", "PUT",
+    { permission_mode: "open", model: "deep[1m]", effort: "high" }]]);
+  starOf(perm, "Safe").click();
+  await settle();
+  assert.equal(requests.length, 1, "one save at a time");
+  release(); hold = null;
+  await settle();
+  assert.equal(state.engines[0].session_defaults.permission_mode, "open");
+  assert.equal(starOf(perm, "Open").classList.contains("on"), true);
+  assert.equal(picked, null, "the session keeps its own choice");
+  assert.deepEqual(notices[notices.length - 1], ["Main: Engine defaults saved · new sessions start with Open permissions", "ok"]);
+  starOf(perm, "Open").click();
+  await settle();
+  assert.equal(requests.length, 1, "the starred row asks nothing");
+  rowOf(perm, "Safe").click();
+  assert.equal(picked, "safe", "the row itself is still this session's pick");
+  assert.equal(perm.isConnected, false);
+
+  /* the keys: Shift+Enter on a row stars it */
+  perm = view.showPermMenu(anchor);
+  apiReply = { engine: { ...saved, session_defaults: { ...saved.session_defaults, permission_mode: "safe" } } };
+  rowOf(perm, "Safe").focus();
+  const key = new FakeEvent("keydown", { key: "Enter", shiftKey: true });
+  perm.onkeydown(key);
+  assert.equal(key.defaultPrevented, true);
+  await settle();
+  assert.deepEqual(plain(requests[requests.length - 1].body), { permission_mode: "safe", model: "deep[1m]", effort: "high" });
+  assert.equal(perm.isConnected, true);
+  perm.remove();
+
+  /* a refusal: the old star comes back and the toast says why */
+  perm = view.showPermMenu(anchor);
+  failure = "That permission mode is not available";
+  starOf(perm, "Open").click();
+  await settle();
+  failure = "";
+  assert.equal(starOf(perm, "Safe").classList.contains("on"), true, "a refusal leaves the saved star");
+  assert.deepEqual(notices[notices.length - 1],
+    ["Main: Could not save Engine defaults · That permission mode is not available", "bad"]);
+  perm.remove();
+
+  /* models: an alias spelling of the default names its row; only catalogued
+     rows take a star; a model without the saved effort puts it back */
+  let models = view.showModelMenu(anchor);
+  assert.equal(starOf(models, "Deep").classList.contains("on"), true, "deep[1m] is Deep's row");
+  assert.equal(starOf(models, "Engine default").classList.contains("offered"), true);
+  const custom = rowOf(models, "Custom…");
+  assert.equal(custom.querySelector(".choice-star svg"), null, "Custom… takes no star");
+  assert.equal(custom.children[0].classList.contains("choice-star"), true, "but keeps the column");
+  apiReply = { engine: { ...saved, session_defaults: { permission_mode: "safe", model: "swift", effort: "" } } };
+  starOf(models, "Swift").click();
+  await settle();
+  assert.deepEqual(plain(requests[requests.length - 1].body), { permission_mode: "safe", model: "swift", effort: "" },
+    "Swift takes no High, so the effort goes back to the engine's own");
+  assert.deepEqual(notices[notices.length - 1],
+    ["Main: Engine defaults saved · new sessions start with Swift · effort back to the engine's own", "ok"]);
+  assert.equal(starOf(models, "Swift").classList.contains("on"), true);
+  models.remove();
+
+  /* effort: only the levels the default model takes; the session's model
+     lists Low and High, the default (Swift) takes Low alone */
+  const efforts = view.showEffortMenu(anchor);
+  assert.equal(starOf(efforts, "Engine default").classList.contains("on"), true);
+  assert.equal(starOf(efforts, "Low").classList.contains("offered"), true);
+  assert.equal(starOf(efforts, "High").querySelector("svg"), null, "Swift has no High to start with");
+  starOf(efforts, "High").click();
+  await settle();
+  assert.deepEqual(plain(requests[requests.length - 1].body), { permission_mode: "safe", model: "swift", effort: "" },
+    "a level the default model lacks asks nothing");
+  efforts.remove();
+  view.root.remove();
+  state.nodeCapabilities.splice(state.nodeCapabilities.indexOf("engine-defaults"), 1);
+  defaultsOffered = false;
+}

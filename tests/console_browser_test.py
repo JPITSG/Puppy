@@ -724,6 +724,163 @@ async def model_alias_checks(instance):
     print("PASS: saved Fable context alias is named in New task, New session and Engine defaults on desktop and phone; request and Max effort preserved", flush=True)
 
 
+async def engine_star_checks(instance, capture=False):
+    """The composer's Permissions / Model / Effort lists star what new sessions
+    start with (the engine defaults), in real layout over the node's own
+    defaults route. A real click opens each list: every row leads with its
+    star column, the starred row's glyph is filled in the accent, its ink
+    stands where the row's text would begin, every label starts in one column
+    and the Engine defaults footer in that column too, in both themes. A real
+    click on a star saves that field on the node (the other two as saved) with
+    the list kept open and the session's own choice untouched, Shift+Enter
+    stars the row the keys are on, a model without the saved effort puts the
+    effort back to the engine's own, and the effort list offers only levels
+    the default model takes. The CLI's catalog is stubbed: no engine runs."""
+    from puppy.drivers.claude import parse_model_catalog
+
+    driver = next(item for item in all_drivers() if item.key == "claude")
+    models = parse_model_catalog([
+        {"value": "default", "displayName": "Default", "supportedEffortLevels": ["low", "high"]},
+        {"value": "standard", "displayName": "Standard", "supportedEffortLevels": ["low", "medium", "high"]},
+        {"value": "extended", "displayName": "Extended", "supportedEffortLevels": ["high", "max"]},
+    ])
+    saved = dict(config.get("engines.defaults.claude"))
+
+    async def star_engines(*args, **kwargs):
+        payload = await engines()
+        for engine in payload:
+            if engine["key"] == "claude":
+                engine["model_options"] = models
+        return payload
+
+    async def press(expression):
+        point = await evaluate(instance, """(() => {const r=(%s).getBoundingClientRect();
+            return {x:r.left+r.width/2, y:r.top+r.height/2};})()""" % expression)
+        await instance.call("Input.dispatchMouseEvent", dict(point, type="mouseMoved"), session=instance.page_session)
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1),
+                                session=instance.page_session)
+
+    menu = "document.querySelector('.composer-choice-menu')"
+
+    async def open_list(chip):
+        await press("starView.root.querySelector('.mini.%s')" % chip)
+        await until(instance, "!!%s && getComputedStyle(%s).visibility==='visible'" % (menu, menu))
+        await evaluate(instance, "new Promise(resolve=>setTimeout(resolve,200))")
+    row = lambda label: ("[...%s.querySelectorAll('.choice-option')].find(r => "
+                         "r.querySelector('.choice-option-label')?.textContent === %s)" % (menu, json.dumps(label)))
+    star = lambda label: "(%s).querySelector('.choice-star')" % row(label)
+    measure = """(() => {
+        const m=%s, rows=[...m.querySelectorAll('.choice-option')];
+        const options=rows.filter(r=>r._choiceValue!==undefined), foot=rows.find(r=>r._choiceValue===undefined);
+        const text=node=>{const range=document.createRange(); range.selectNodeContents(node); return range.getBoundingClientRect();};
+        const probe=document.createElement('span'); probe.style.color='var(--acc2)'; m.append(probe);
+        const accent=getComputedStyle(probe).color; probe.remove();
+        const on=options.filter(r=>r.querySelector('.choice-star.on'));
+        const glyph=on[0] && on[0].querySelector('.choice-star svg');
+        return {
+            first: options.every(r=>r.firstElementChild.classList.contains('choice-star')),
+            on: on.map(r=>r.querySelector('.choice-option-label').textContent),
+            filled: !!glyph && getComputedStyle(glyph.querySelector('path')).fill===accent &&
+                getComputedStyle(on[0].querySelector('.choice-star')).color===accent &&
+                getComputedStyle(on[0].querySelector('.choice-star')).opacity==='1',
+            ink: glyph ? glyph.getBoundingClientRect().left + 1.3 - on[0].getBoundingClientRect().left : null,
+            labels: [...new Set(options.map(r=>Math.round(text(r.querySelector('.choice-option-label')).left*2)/2))],
+            foot: foot ? Math.round(text(foot).left*2)/2 : null,
+            fits: m.scrollWidth<=m.clientWidth,
+        };
+    })()""" % menu
+
+    try:
+        config.set_value("engines.defaults.claude", {"permission_mode": "auto", "model": "standard", "effort": "low"})
+        with patch.object(driver, "model_options", return_value=models), \
+                patch.object(driver, "model_catalog_loaded", return_value=True), \
+                patch.object(driver, "refresh_model_options", AsyncMock(return_value=None)), \
+                patch.object(webui, "_engines_payload", star_engines):
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False}, session=instance.page_session)
+            # this headless Chromium has no fine pointer, which gives the
+            # composer native selects; the lists are what a mouse gets
+            await evaluate(instance, """(async()=>{
+                window.savedNativeChoices=prefersNativeChoices; prefersNativeChoices=()=>false;
+                rememberEnginePayload(0, await api(0,'engines'));
+                await api(0,'sessions/1',{method:'PATCH',body:{permission_mode:'acceptEdits',model:'standard',effort:'medium'}});
+                closeTab('s:0:1'); openSessionTab(0,1,findSessionMeta(0,1));
+                window.starView=state.views['s:0:1'].activeView(); return true})()""")
+            await until(instance, "starView.root.querySelector('button.mini.perm') && starView.session && "
+                                  "starView.session.permission_mode==='acceptEdits'")
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                for chip, on in (("perm", "Auto"), ("model", "Standard"), ("effort", "Low")):
+                    await open_list(chip)
+                    m = await evaluate(instance, measure)
+                    where = (theme, chip, m)
+                    assert m["first"] and m["on"] == [on] and m["filled"] and m["fits"], where
+                    assert 10.5 <= m["ink"] <= 12, where
+                    assert len(m["labels"]) == 1 and m["foot"] == m["labels"][0], where
+                    if capture:
+                        shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=instance.page_session)
+                        Path("/tmp/engine-stars-%s-%s.png" % (chip, theme)).write_bytes(base64.b64decode(shot["data"]))
+                    await evaluate(instance, "closeAllMenus(); true")
+            await evaluate(instance, "applyTheme('dark'); true")
+
+            # a real click on a star: saved on the node, the list open, the
+            # session's own choice left as it was
+            await open_list("perm")
+            await press(star("Plan"))
+            await until(instance, "%s.classList.contains('on')" % star("Plan"))
+            await until(instance, "[...document.querySelectorAll('.toast')].some(t=>t.textContent.includes("
+                                  "'Claude Code defaults saved · new sessions start with Plan permissions'))")
+            assert config.get("engines.defaults.claude") == {
+                "permission_mode": "plan", "model": "standard", "effort": "low"}, config.get("engines.defaults.claude")
+            assert await evaluate(instance, "!!%s && !%s.classList.contains('on') && "
+                                  "starView.session.permission_mode==='acceptEdits' && "
+                                  "%s.classList.contains('selected')" % (menu, star("Auto"), row("Accept edits")))
+
+            # the keys: Shift+Enter on the row they are on
+            await evaluate(instance, "(%s).focus(); true" % row("Auto"))
+            for kind in ("keyDown", "keyUp"):
+                await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Enter", "code": "Enter",
+                                    "windowsVirtualKeyCode": 13, "modifiers": 8}, session=instance.page_session)
+            await until(instance, "%s.classList.contains('on')" % star("Auto"))
+            assert config.get("engines.defaults.claude")["permission_mode"] == "auto"
+            assert await evaluate(instance, "!!%s && starView.session.permission_mode==='acceptEdits'" % menu)
+            await evaluate(instance, "closeAllMenus(); true")
+
+            # a model without the saved effort puts it back to the engine's own
+            await open_list("model")
+            await press(star("Extended"))
+            await until(instance, "%s.classList.contains('on')" % star("Extended"))
+            await until(instance, "[...document.querySelectorAll('.toast')].some(t=>t.textContent.includes("
+                                  "'new sessions start with Extended · effort back to the engine'))")
+            assert config.get("engines.defaults.claude") == {
+                "permission_mode": "auto", "model": "extended", "effort": ""}, config.get("engines.defaults.claude")
+            assert await evaluate(instance, "starView.session.model==='standard'")
+            await evaluate(instance, "closeAllMenus(); true")
+
+            # the effort list offers only what the default model takes
+            await open_list("effort")
+            offered = await evaluate(instance, """[...%s.querySelectorAll('.choice-option')]
+                .filter(r=>r.querySelector('.choice-star svg')).map(r=>r.querySelector('.choice-option-label').textContent)""" % menu)
+            assert offered == ["Engine default", "High"], offered
+            await evaluate(instance, "closeAllMenus(); true")
+    finally:
+        config.set_value("engines.defaults.claude", saved)
+        await evaluate(instance, """(async()=>{
+            closeAllMenus(); applyTheme('dark');
+            if (window.savedNativeChoices) prefersNativeChoices=window.savedNativeChoices;
+            delete window.savedNativeChoices; delete window.starView;
+            rememberEnginePayload(0, await api(0,'engines'));
+            closeTab('s:0:1'); openSessionTab(0,1,findSessionMeta(0,1));
+            window.demoView=state.views['s:0:1'].activeView(); return true})()""")
+        await until(instance, "demoView.draftReady")
+    print("PASS: the composer's three lists star what new sessions start with on the node's own defaults route: "
+          "the column first in every row with the default filled in the accent where the text would start, labels "
+          "and the footer in one column in both themes, a real click and Shift+Enter saving one field with the list "
+          "open and the session's own choice kept, the effort put back for a model without it, and effort stars only "
+          "where the default model has the level", flush=True)
+
+
 async def model_substitute_checks(instance, capture=False):
     """Another model answering in place of the requested one, from the real
     runner's reports over the session's real socket: the head's model name
@@ -10928,6 +11085,9 @@ async def main(args):
             if args.model_substitute_only:
                 await model_substitute_checks(instances[0], args.screenshots)
                 return
+            if args.engine_stars_only:
+                await engine_star_checks(instances[0], bool(os.environ.get("STAR_SHOT")))
+                return
             if args.popout_only:
                 await popout_checks(instances[0], sid, args.screenshots)
                 return
@@ -11026,6 +11186,7 @@ async def main(args):
             await quota_checks(instances[0])
             await engine_activity_checks(instances[0])
             await model_alias_checks(instances[0])
+            await engine_star_checks(instances[0])
             await model_substitute_checks(instances[0], args.screenshots)
             await background_task_list_checks(instances[0])
             await chat_filter_checks(*instances, args.screenshots)
@@ -11066,6 +11227,7 @@ if __name__ == "__main__":
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--navigation-only", action="store_true")
     parser.add_argument("--model-substitute-only", action="store_true")
+    parser.add_argument("--engine-stars-only", action="store_true")
     parser.add_argument("--notices-only", action="store_true")
     parser.add_argument("--host-panel-only", action="store_true")
     parser.add_argument("--browser-drag-only", action="store_true")

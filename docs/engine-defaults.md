@@ -7,6 +7,19 @@ The editor uses saved values initially; **Use this conversation’s choices** co
 the choices shown for the next prompt, including queued changes. Reset fills the
 engine's original choices. Cancel discards edits; Save defaults persists them.
 
+The same three dropdowns also set one default at a time. Each row has a star
+at its left edge: the saved default's star is filled, and pressing another
+row's star (or Shift+Enter on that row) saves it as the default. The dropdown
+stays open, and the conversation keeps its own choice. The star belongs to the
+engine the dropdowns are showing, which is a queued switch's target engine
+while one is waiting. A model row is starred when it names the saved model
+under any of its spellings. Custom… and a model the catalog has not described
+yet take no star. A new default model that lacks the saved effort level resets
+the effort to the engine's own, as the dialog does, and the effort dropdown
+offers stars only on the levels the default model has. Each star sends the
+complete row through the same `PUT` as the dialog. Phones use the system's
+own pickers, so there they keep the dialog alone.
+
 New sessions and tasks prefill from these values. Switching or reseeding an engine
 captures the destination engine's defaults when the request is made, even if the switch
 must wait in the queue. Existing sessions, tasks and queued switches keep their

@@ -1968,7 +1968,9 @@ function choiceSvg(kind) {
   path.setAttribute("stroke-width", "1.4");
   path.setAttribute("stroke-linecap", "round");
   path.setAttribute("stroke-linejoin", "round");
+  if (kind === "star") path.setAttribute("stroke-width", "1.1");
   path.setAttribute("d", kind === "check" ? "M2.2 6.2 4.8 8.7 9.8 3.4" :
+    kind === "star" ? "M6 1.2l1.45 2.95 3.25.47-2.35 2.3.56 3.23L6 8.62 3.09 10.15l.56-3.23L1.3 4.62l3.25-.47z" :
     "M2.5 4.25 6 7.75 9.5 4.25");
   svg.appendChild(path);
   return svg;
@@ -13805,10 +13807,16 @@ function syncOpenChoiceMenus() {
    menu at a point (a right-click) instead of under its anchor, which still
    owns the menu's label, its toggle and where focus returns.
    Every host opens its menus through here: the composer's own tools list and
-   the session's choices are one implementation, not two that drift. */
+   the session's choices are one implementation, not two that drift.
+   `stars` ({value, offered, title(label, on), pick(value)}, or null) puts a
+   star column at the rows' left edge for a second choice the list can make
+   beside the current one - the composer's pickers star what new sessions
+   start with. The filled star is `value`; a press on an `offered` row's star
+   (or Shift+Enter on its row) is `pick(value)`, shown at once and kept open,
+   never the row's own pick. */
 function openChoiceMenu(anchor, { opts = [], current = "", onPick = () => {},
   actions = false, checks = [], footers = [], live = null,
-  ownerView = null, at = null, label = "" } = {}) {
+  ownerView = null, at = null, label = "", stars = null } = {}) {
   if (closeAllMenus(anchor)) return null;
   const menu = el("div", "choice-menu composer-choice-menu dyn");
   menu._ownerView = ownerView;
@@ -13841,13 +13849,27 @@ function openChoiceMenu(anchor, { opts = [], current = "", onPick = () => {},
     return selectedAt >= 0 ? selectedAt : 0;
   };
   let signature = "";
+  /* the star just pressed, filled at once while its pick is on its way */
+  let starPending = null;
+  const star = (value) => {
+    if (!stars || starPending !== null || value === stars.value ||
+        !stars.offered.includes(value)) return;
+    starPending = value;
+    menu.sync();
+    Promise.resolve().then(() => stars.pick(value)).catch(() => {}).finally(() => {
+      starPending = null;
+      if (menu.isConnected) menu.sync();
+    });
+  };
   menu.sync = () => {
     if (live) {
       const spec = live();
       opts = spec.opts; current = spec.current;
       checks = spec.checks || []; footers = spec.footers || [];
+      stars = spec.stars || null;
     }
-    const next = JSON.stringify([opts, current, checks, footers.map(item => item.label)]);
+    const next = JSON.stringify([opts, current, checks, footers.map(item => item.label),
+      stars && [stars.value, stars.offered, starPending]]);
     if (signature === next) return;
     signature = next;
     const focused = rows.indexOf(document.activeElement);
@@ -13866,6 +13888,20 @@ function openChoiceMenu(anchor, { opts = [], current = "", onPick = () => {},
       const selected = !actions && current === o.value;
       const row = choiceOptionNode(o.label, selected);
       row._choiceKey = "option:" + o.value;
+      row._choiceValue = o.value;
+      const starred = !!stars && (starPending !== null ? starPending : stars.value) === o.value;
+      const starrable = !!stars && !o.disabled && stars.offered.includes(o.value);
+      if (stars) {
+        const mark = el("span", "choice-star" + (starred ? " on" : ""));
+        mark.setAttribute("aria-hidden", "true");
+        if (starred || starrable) {
+          mark.appendChild(choiceSvg("star"));
+          mark.title = stars.title(o.label, starred);
+        }
+        if (starrable && !starred) mark.classList.add("offered");
+        if (starred) row.setAttribute("aria-description", stars.title(o.label, true));
+        row.insertBefore(mark, row.firstElementChild);
+      }
       if (actions) {
         row.setAttribute("role", "menuitem");
         row.removeAttribute("aria-selected");
@@ -13878,6 +13914,11 @@ function openChoiceMenu(anchor, { opts = [], current = "", onPick = () => {},
       row.onclick = (event) => {
         event.stopPropagation();
         if (o.disabled) return;
+        const target = event.target;
+        if (stars && target && typeof target.closest === "function" && target.closest(".choice-star")) {
+          star(o.value);
+          return;
+        }
         dismiss(true);
         onPick(o.value);
       };
@@ -13908,7 +13949,7 @@ function openChoiceMenu(anchor, { opts = [], current = "", onPick = () => {},
     if (footers.length && rows.length) menu.appendChild(el("div", "menu-sep"));
     footers.forEach(item => {
       const index = rows.length;
-      const row = el("button", "choice-option", item.label);
+      const row = el("button", "choice-option" + (stars ? " choice-indent" : ""), item.label);
       row._choiceKey = "footer:" + item.label;
       row.type = "button";
       row.tabIndex = -1;
@@ -13944,6 +13985,14 @@ function openChoiceMenu(anchor, { opts = [], current = "", onPick = () => {},
     if (event.key === "Tab") {
       dismiss();
       return;
+    }
+    if (event.key === "Enter" && event.shiftKey && stars) {
+      const row = rows.find(item => item === document.activeElement);
+      if (row && "_choiceValue" in row) {
+        event.preventDefault();
+        star(row._choiceValue);
+        return;
+      }
     }
     const enabled = rows.filter(row => !row.disabled);
     if (!enabled.length) return;
@@ -25915,7 +25964,8 @@ class SessionView {
     }
     return this.optionMenu(anchor, spec.options, spec.selected,
       (value) => this.applyPermissionChoice(value),
-      { footers: this.engineDefaultsActions(), live: () => this.choiceMenuSpec("perm") });
+      { footers: this.engineDefaultsActions(), stars: this.choiceStars("perm"),
+        live: () => this.choiceMenuSpec("perm") });
   }
 
   async applyPermissionChoice(value) {
@@ -25940,7 +25990,77 @@ class SessionView {
     const spec = this.composerChoiceSpec(kind);
     return { opts: spec.options.map(option => ({ ...option,
       disabled: spec.disabled || option.disabled })), current: spec.selected,
-      checks: [], footers: this.engineDefaultsActions() };
+      checks: [], footers: this.engineDefaultsActions(), stars: this.choiceStars(kind) };
+  }
+
+  /* The star column of the composer's three pickers: what new sessions on
+     this engine start with (the engine defaults, the user's pick 2026-11-18),
+     set from the list beside this session's own choice without changing it.
+     The engine is the one the pickers speak for, a queued switch's target
+     included. A model row is the default when it names the same catalog row
+     (an alias spelling counts); an effort row is offered only where the
+     default model takes that level, and only real rows - never Custom… or a
+     model the catalog has not described yet - take a star. */
+  choiceStars(kind) {
+    if (!backendSupportsEngineDefaults(this.tab.bid)) return null;
+    const key = this.effectiveConfig().engine || (this.session || {}).engine;
+    const engine = engineInfo(this.tab.bid, key);
+    const saved = engine && engine.session_defaults;
+    if (!saved) return null;
+    const spec = this.composerChoiceSpec(kind);
+    const rows = spec.disabled ? [] : spec.options.filter(option =>
+      !option.disabled && !String(option.value).startsWith("__"));
+    let value = null, offered = [];
+    if (kind === "perm") {
+      value = saved.permission_mode;
+      offered = rows.map(option => option.value);
+    } else if (kind === "model") {
+      const target = engineModelOption(engine, saved.model);
+      const row = spec.options.find(option => option.value === saved.model) ||
+        (target && spec.options.find(option => engineModelOption(engine, option.value) === target));
+      value = row ? row.value : null;
+      offered = rows.filter(option => engineOffersModel(engine, option.value))
+        .map(option => option.value);
+    } else {
+      value = saved.effort;
+      const levels = effortOptionsForModel(engine, saved.model).map(option => option.value);
+      offered = rows.filter(option => levels.includes(option.value)).map(option => option.value);
+    }
+    const name = engine.label || key;
+    return { value, offered, pick: (choice) => this.saveEngineDefault(kind, key, choice),
+      title: (label, on) => on ? `New ${name} sessions start with this` :
+        `Start new ${name} sessions with ${label}` };
+  }
+
+  /* One field of the engine's saved defaults, the other two as they are; a
+     default model that does not take the default effort puts the effort back
+     to the engine's own, as the Engine defaults dialog does. */
+  async saveEngineDefault(kind, key, value) {
+    const bid = this.tab.bid;
+    const engine = engineInfo(bid, key);
+    const saved = engine && engine.session_defaults;
+    if (!saved) return;
+    const field = { perm: "permission_mode", model: "model", effort: "effort" }[kind];
+    const body = { permission_mode: saved.permission_mode, model: saved.model,
+      effort: saved.effort, [field]: value };
+    const effortReset = kind === "model" && !!body.effort &&
+      !effortOptionsForModel(engine, value).some(option => option.value === body.effort);
+    if (effortReset) body.effort = "";
+    const name = engine.label || key;
+    const row = this.composerChoiceSpec(kind).options.find(option => option.value === value);
+    const label = row ? row.label : value;
+    const what = kind === "perm" ? `${label} permissions` :
+      kind === "effort" ? (value ? `${label} effort` : "the engine's own effort") :
+      (value ? label : "the engine's own model");
+    try {
+      const data = await api(bid, `engines/${encodeURIComponent(key)}/defaults`,
+        { method: "PUT", body });
+      rememberEngineDefaults(bid, key, data.engine);
+      toast(`${backendName(bid)}: ${name} defaults saved · new sessions start with ${what}` +
+        (effortReset ? " · effort back to the engine's own" : ""), "ok");
+    } catch (err) {
+      toast(`${backendName(bid)}: Could not save ${name} defaults · ${err.message || "no answer"}`, "bad");
+    }
   }
 
   /* This view's own menus: the shared implementation, told which view owns
@@ -25954,7 +26074,8 @@ class SessionView {
     if (!this.session) return null;
     const spec = this.composerChoiceSpec("model");
     return this.optionMenu(anchor, spec.options, spec.selected, (value) => this.applyModelChoice(value),
-      { footers: this.engineDefaultsActions(), live: () => this.choiceMenuSpec("model") });
+      { footers: this.engineDefaultsActions(), stars: this.choiceStars("model"),
+        live: () => this.choiceMenuSpec("model") });
   }
 
   editEngineDefaults() {
@@ -25982,7 +26103,8 @@ class SessionView {
     if (!spec.options.length) { toast("Engine has no effort levels", "info"); return null; }
     return this.optionMenu(anchor, spec.options, spec.selected,
       (value) => this.patchSession({ effort: value }),
-      { footers: this.engineDefaultsActions(), live: () => this.choiceMenuSpec("effort") });
+      { footers: this.engineDefaultsActions(), stars: this.choiceStars("effort"),
+        live: () => this.choiceMenuSpec("effort") });
   }
 
   async rename() {
@@ -33155,6 +33277,14 @@ function renderWorkspaceBackendOptions(select, execBid) {
 
 /* The same editor serves composer pickers and the session menu on touch
    devices, where native selects deliberately contain only actual choices. */
+/* An engine's answer from its defaults route, laid over the backend's engine
+   list as every picker reads it. */
+function rememberEngineDefaults(bid, key, engine) {
+  const engines = bid ? state.engCache[bid] || [] : state.engines;
+  rememberEnginePayload(bid, { engines: engines.map(item => item.key === key ?
+    { ...item, ...engine } : item) });
+}
+
 function modalEngineDefaults(bid, key, conversationChoices = null) {
   if (!backendSupportsEngineDefaults(bid)) return;
   let engine = engineInfo(bid, key);
@@ -33203,9 +33333,7 @@ function modalEngineDefaults(bid, key, conversationChoices = null) {
   };
   const remember = data => {
     engine = data.engine;
-    const engines = bid ? state.engCache[bid] || [] : state.engines;
-    rememberEnginePayload(bid, { engines: engines.map(item => item.key === key ?
-      { ...item, ...engine } : item) });
+    rememberEngineDefaults(bid, key, engine);
   };
   const render = choices => {
     setError("");

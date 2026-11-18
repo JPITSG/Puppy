@@ -976,6 +976,24 @@ select.choice-native{display:none!important}
 .choice-option:disabled{opacity:.38;cursor:not-allowed}
 .choice-option-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis}
 .choice-mark{width:14px;height:14px;display:flex;align-items:center;justify-content:center;flex:none;color:var(--acc2)}
+/* The star column a list's second choice takes (the composer pickers' engine
+   defaults): at the rows' left edge, the glyph's ink where the text would
+   start, filled on the starred row, an outline on the lit row and - with a
+   pointer over the list - faint on every row it may go to. A row's footer
+   rows keep their text in the labels' column. */
+.choice-star{
+  width:18px;height:18px;margin-left:-4px;display:flex;align-items:center;justify-content:center;flex:none;
+  border-radius:var(--r-xs);color:var(--txt3);opacity:0;
+  transition:opacity var(--t-fast) var(--ease),color var(--t-fast) var(--ease),background var(--t-fast) var(--ease);
+}
+@media (hover:hover){
+  .choice-menu:hover .choice-star.offered{opacity:.55}
+  .choice-star.offered:hover{color:var(--acc2);background:var(--hov)}
+}
+.choice-menu .choice-option.active .choice-star.offered,.choice-menu .choice-star.offered:hover{opacity:1}
+.choice-menu .choice-star.on{opacity:1;color:var(--acc2)}
+.choice-star.on path{fill:currentColor}
+.choice-option.choice-indent{padding-left:35px}
 .choice-menu .menu-sep{height:1px;background:var(--line);margin:4px 6px}
 .choice-empty{display:block;padding:8px 10px;color:var(--txt3);font-size:var(--fs-sm);white-space:nowrap}
 
