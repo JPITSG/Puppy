@@ -1994,7 +1994,8 @@ async def composer_resize_checks(instance):
         return {first: box.firstElementChild === grip, boxTop: b.top, boxBottom: b.bottom, boxLeft: b.left,
             boxRight: b.right, radius: parseFloat(getComputedStyle(box).borderTopLeftRadius),
             gripTop: g.top, gripLeft: g.left, gripRight: g.right, gripHeight: g.height,
-            lineTop: line.top, lineHeight: line.height, lineColor: line.backgroundColor, acc,
+            lineTop: line.top, lineHeight: line.height, lineOpacity: line.opacity,
+            lineImage: line.backgroundImage, lineFilter: line.filter, acc,
             cursor: getComputedStyle(grip).cursor, display: getComputedStyle(grip).display,
             active: grip.classList.contains('active'), sized: box.classList.contains('sized'),
             ta: ta.offsetHeight, scroll: demoView.scroll.clientHeight, atBottom: demoView.atBottom(),
@@ -2040,7 +2041,10 @@ async def composer_resize_checks(instance):
                 g["lineHeight"] == "1px", ("the line lands on the box's top border pixel", where)
             assert g["gripLeft"] >= g["boxLeft"] + g["radius"] - .01 and \
                 g["gripRight"] <= g["boxRight"] - g["radius"] + .01, ("off the rounded corners", where)
-            assert g["lineColor"] == "rgba(0, 0, 0, 0)" and not g["sized"], where
+            assert g["lineOpacity"] == "0" and not g["sized"], ("unseen at rest", where)
+            assert g["lineImage"].startswith("linear-gradient(90deg, rgba(0, 0, 0, 0), " + g["acc"]) and \
+                g["lineImage"].endswith(g["acc"] + " calc(100% - 30px), rgba(0, 0, 0, 0))") and \
+                "drop-shadow" in g["lineFilter"], ("a line that fades in from both ends, its glow with it", where)
             assert g["ta"] == 224 and g["atBottom"], ("a long draft holds the box at its cap", where)
             # a real drag: lit while held, the box grows upward under the pointer
             start = g
@@ -2050,7 +2054,12 @@ async def composer_resize_checks(instance):
                 await mouse("mouseMoved", start["x"], start["y"] - 50 * step, 1)
             await asyncio.sleep(.3)  # the line's own fade, --t-fast
             held = await evaluate(instance, read)
-            assert held["active"] and held["lineColor"] == held["acc"], ("lit while held", theme, held)
+            assert held["active"] and held["lineOpacity"] == "1", ("lit while held", theme, held)
+            # the lit edge as drawn: the border row and the glow two rows above it
+            clip = {"x": held["boxLeft"], "y": held["boxTop"] - 2, "scale": 1,
+                    "width": held["boxRight"] - held["boxLeft"], "height": 3}
+            lit = (await instance.call("Page.captureScreenshot", {"format": "png", "clip": clip},
+                                       session=page))["data"]
             assert held["sized"] and held["ta"] == start["ta"] + 200, ("follows the pointer", theme, held)
             assert abs(held["boxBottom"] - start["boxBottom"]) < .01 and \
                 abs(held["boxTop"] - (start["boxTop"] - 200)) < .01, ("grows upward", theme, held)
@@ -2058,8 +2067,42 @@ async def composer_resize_checks(instance):
             await mouse("mouseReleased", start["x"], start["y"] - 200, 0)
             await asyncio.sleep(.3)
             let_go = await evaluate(instance, read)
-            assert not let_go["active"] and let_go["lineColor"] == "rgba(0, 0, 0, 0)" and \
+            assert not let_go["active"] and let_go["lineOpacity"] == "0" and \
                 let_go["ta"] == held["ta"], ("let go, it stays", theme, let_go)
+            rest = (await instance.call("Page.captureScreenshot", {"format": "png", "clip": clip},
+                                        session=page))["data"]
+            # Along the lit border, how far each pixel has gone from the edge at
+            # rest toward the accent, and how much glow stands above it: both
+            # rise from nothing at the line's ends beside the corners to full
+            # strength two radii in, the same at both ends.
+            r, left, right = held["radius"], held["gripLeft"] - held["boxLeft"], held["gripRight"] - held["boxLeft"]
+            steps = [1, r / 2, r, 1.5 * r, 2 * r + 2]
+            xs = [left + d for d in steps] + [right - d for d in steps] + [clip["width"] / 2]
+            edge = await evaluate(instance, """(async (lit, rest, xs, acc) => {
+                const rows = async data => {
+                    const img = new Image(); img.src = 'data:image/png;base64,' + data; await img.decode();
+                    const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+                    const g = c.getContext('2d', {willReadFrequently: true}); g.drawImage(img, 0, 0);
+                    return (x, y) => [...g.getImageData(Math.floor(x), y, 1, 1).data].slice(0, 3);
+                };
+                const a = await rows(lit), b = await rows(rest);
+                const target = acc.match(/\d+/g).map(Number);
+                return xs.map(x => {
+                    const on = a(x, 2), off = b(x, 2), want = target.map((v, i) => v - off[i]);
+                    const span = want.reduce((t, v) => t + v * v, 0) || 1;
+                    const lift = on.map((v, i) => v - off[i]).reduce((t, v, i) => t + v * want[i], 0) / span;
+                    const glow = a(x, 0).reduce((t, v, i) => t + Math.abs(v - b(x, 0)[i]), 0);
+                    return [lift, glow];
+                });
+            })(%s, %s, %s, %s)""" % (json.dumps(lit), json.dumps(rest), json.dumps(xs), json.dumps(held["acc"])))
+            lifts, glows = [v[0] for v in edge], [v[1] for v in edge]
+            for side in (lifts[:5], lifts[5:10]):
+                assert side[0] < .3 and side[-1] > .8, ("from nothing beside the corner to full", theme, lifts)
+                assert all(b >= a - .05 for a, b in zip(side, side[1:])), ("rising evenly", theme, lifts)
+            assert all(abs(a - b) < .15 for a, b in zip(lifts[:5], lifts[5:10])), ("both ends alike", theme, lifts)
+            assert lifts[10] > .85, ("full strength between the ends", theme, lifts)
+            assert glows[10] > 6 and glows[0] < glows[10] / 2 and glows[5] < glows[10] / 2, \
+                ("the glow fades with the line", theme, glows)
             # pulled far past the room: a few lines of the conversation stay
             await mouse("mouseMoved", let_go["x"], let_go["y"])
             await mouse("mousePressed", let_go["x"], let_go["y"], 1)

@@ -223,22 +223,22 @@ html.popout body::after{--side-w:0px}
   position:absolute;top:0;right:-3px;width:7px;height:100%;cursor:col-resize;z-index:40;
 }
 /* The same gesture as a pane splitter, so it lights the same way: a 1px accent
-   line with a soft glow, not a wash across the whole grab area. Transparent at
+   line with a soft glow, not a wash across the whole grab area. Unseen at
    rest because .side::after already draws this edge - and the grip's own line
    lands on exactly that pixel, so the accent replaces it rather than doubling
    it up. */
 .side-resize::before{
-  content:"";position:absolute;top:0;bottom:0;left:3px;width:1px;background:transparent;
-  transition:background var(--t-fast) var(--ease),box-shadow var(--t-fast) var(--ease);
+  content:"";position:absolute;top:0;bottom:0;left:3px;width:1px;
+  background:var(--acc);box-shadow:0 0 8px rgba(90,162,245,.5);
+  opacity:0;transition:opacity var(--t-fast) var(--ease);
 }
+/* Each grip draws its own lit line (the composer's fades at its ends); these
+   two rules light every one of them the same way, with the pointer over it
+   and while it is held. */
 @media (hover:hover){
-  .side-resize:hover::before,.composer-grip:hover::before{
-    background:var(--acc);box-shadow:0 0 8px rgba(90,162,245,.5);
-  }
+  .side-resize:hover::before,.composer-grip:hover::before{opacity:1}
 }
-.side-resize.active::before,.side-resize:focus-visible::before,.composer-grip.active::before{
-  background:var(--acc);box-shadow:0 0 8px rgba(90,162,245,.55);
-}
+.side-resize.active::before,.side-resize:focus-visible::before,.composer-grip.active::before{opacity:1}
 .brand-mark{
   width:36px;height:36px;border-radius:var(--r-md);display:flex;align-items:center;justify-content:center;
   font-size:18px;flex-shrink:0;
@@ -2131,9 +2131,16 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   position:absolute;top:-4px;left:var(--r-lg);right:var(--r-lg);height:7px;
   cursor:row-resize;touch-action:none;
 }
+/* The lit line fades in from both ends over the stretch beside the box's
+   rounded corners, rather than stopping square where they begin, and its
+   glow is a drop-shadow of that line, so the glow fades with it - the
+   sidebar's 8px glow, a drop-shadow's blur being half a box-shadow's. */
 .composer-grip::before{
-  content:"";position:absolute;left:0;right:0;top:3px;height:1px;background:transparent;
-  transition:background var(--t-fast) var(--ease),box-shadow var(--t-fast) var(--ease);
+  content:"";position:absolute;left:0;right:0;top:3px;height:1px;
+  background:linear-gradient(90deg,transparent,var(--acc) calc(var(--r-lg) * 2),
+    var(--acc) calc(100% - var(--r-lg) * 2),transparent);
+  filter:drop-shadow(0 0 4px rgba(90,162,245,.5));
+  opacity:0;transition:opacity var(--t-fast) var(--ease);
 }
 @media (min-width:901px){
   .composer-box.sized textarea{
