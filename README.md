@@ -604,7 +604,10 @@ Updates remain visible with the card collapsed; those without a matching card
 stand on their own. A long update (more than 3 lines or 240 characters) folds to
 one line with its first line and size, and opens on a press or a search landing
 on it. Transient engine failures (such as an OAuth refresh lock)
-retry on their own with a back-off note in the transcript.
+retry on their own with a back-off note in the transcript. When an engine no
+longer has a session's conversation (Claude Code deletes saved conversations
+after 30 days by default), the prompt starts again at once in a fresh
+conversation seeded with the transcript, with a note saying so.
 
 A task the model left behind does not hold the session forever. Every Claude
 turn is told up front that tasks still running at its final answer hold the

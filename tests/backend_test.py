@@ -28,6 +28,51 @@ from puppy.drivers.codex import CodexDriver, parse_model_catalog as parse_codex_
 
 def exercise_driver_normalization() -> None:
     claude = ClaudeDriver()
+    # a conversation the CLI no longer has (claude 2.1.328, probed): one
+    # result before any init naming the id resumed - only then is it gone
+    gone_frame = {"type": "result", "subtype": "error_during_execution",
+                  "is_error": True, "num_turns": 0, "duration_ms": 0,
+                  "duration_api_ms": 0, "stop_reason": None,
+                  "session_id": "dead-1", "usage": {},
+                  "errors": ["No conversation found with session ID: dead-1"]}
+    resumed = {"native_session_id": "dead-1"}
+    gone_ctx = claude.turn_context(resumed, False, "again", "pin-gone")
+    gone = claude.parse_line(json.dumps(gone_frame), gone_ctx)[-1]
+    assert gone["a"] == "result" and gone["data"]["ok"] is False
+    assert gone["data"]["native_missing"] == "dead-1"
+    assert gone["data"]["error"] == "No conversation found with session ID: dead-1"
+    for variant, ctx_session, first in (
+            (dict(gone_frame, errors=["No conversation found with session ID: dead-2"]), resumed, False),
+            (dict(gone_frame, errors=["Something else entirely"]), resumed, False),
+            (dict(gone_frame, num_turns=1), resumed, False),
+            (gone_frame, {"native_session_id": "dead-1"}, True)):
+        ctx = claude.turn_context(ctx_session, first, "again", "pin-gone")
+        data = claude.parse_line(json.dumps(variant), ctx)[-1]["data"]
+        assert "native_missing" not in data, (variant, first)
+    inited = claude.turn_context(resumed, False, "again", "pin-gone")
+    claude.parse_line(json.dumps({"type": "system", "subtype": "init",
+                                  "session_id": "dead-1", "model": "m"}), inited)
+    assert "native_missing" not in claude.parse_line(json.dumps(gone_frame), inited)[-1]["data"], \
+        "a CLI that loaded the conversation has it"
+    compact_ctx = claude.turn_context(resumed, False, "", "pin-gone", tool={"tool": "compact"})
+    assert claude.parse_line(json.dumps(gone_frame), compact_ctx)[-1]["data"]["native_missing"] == "dead-1"
+
+    # codex: thread/resume of a thread with no rollout (codex-cli 0.170.0)
+    codex_gone = CodexDriver()
+    gone_session = {"cwd": "/tmp", "native_session_id": "thread-dead", "model": "",
+                    "effort": "", "permission_mode": "workspace-write"}
+    gctx = codex_gone.turn_context(gone_session, False, "again", "client-gone")
+    gctx["phase"] = "thread"
+    missing = codex_gone.parse_line(json.dumps({"id": "puppy-thread", "error": {
+        "code": -32600, "message": "no rollout found for thread id thread-dead"}}), gctx)
+    assert missing == [{"a": "result", "data": {
+        "ok": False, "stop_reason": "error",
+        "error": "no rollout found for thread id thread-dead",
+        "native_missing": "thread-dead"}}], missing
+    other = codex_gone.parse_line(json.dumps({"id": "puppy-thread", "error": {
+        "code": -32600, "message": "no rollout found for thread id thread-other"}}),
+        codex_gone.turn_context(gone_session, False, "again", "client-gone"))
+    assert "native_missing" not in other[-1]["data"] and other[0]["kind"] == "error"
     assert claude.supports_steering is True
     assert claude.steering_acknowledged is True
     claude_ctx = claude.turn_context({}, True, "original direction", "pin")
@@ -1382,6 +1427,16 @@ init = read()
 if init.get("type") != "control_request" or \
         init.get("request", {}).get("subtype") != "initialize":
     raise SystemExit("missing initialize: {!r}".format(init))
+if "--resume" in argv and sid.startswith("gone-"):
+    # a conversation this CLI no longer has (its cleanup deleted it): the one
+    # result claude 2.1.328 answers with, before any init, then exit 1
+    state["prompt"] = read()["message"]["content"][0]["text"]
+    send({"type": "result", "subtype": "error_during_execution", "duration_ms": 0,
+          "duration_api_ms": 0, "is_error": True, "num_turns": 0, "stop_reason": None,
+          "session_id": sid, "total_cost_usd": 0, "usage": usage(0, 0),
+          "permission_denials": [], "uuid": "r-gone", "result_index": 0,
+          "errors": ["No conversation found with session ID: " + sid]})
+    finish(1)
 send({"type": "control_response", "response": {
     "subtype": "success", "request_id": init["request_id"], "response": {}}})
 user = read()
@@ -1849,6 +1904,37 @@ finish()
         retried = invocations_for("transient auth fake turn")
         assert len(retried) == 2, retried
         assert "--resume" in retried[1]["argv"]
+
+        # a conversation the CLI no longer has: the prompt starts again at
+        # once in a fresh native conversation seeded with the transcript - no
+        # failed result, no error row, one result at the end
+        gone = "gone-" + "0" * 8
+        db.touch_session(sid, native_session_id=gone)
+        capture.messages.clear()
+        assert hub.send_message("missing conversation plain fake turn") == {"queued": False}
+        await finish_turn("missing conversation plain fake turn")
+        events = turn_events("missing conversation plain fake turn")
+        kinds = shape(events)
+        assert kinds[:2] == [("user", ""), ("info", "context_reset")], kinds
+        assert kinds[-1] == ("result", "") and events[-1]["data"]["ok"] is True, kinds
+        assert [kind for kind in kinds if kind[0] in ("result", "error")] == [("result", "")], kinds
+        assert events[1]["data"]["text"] == ("Claude Code no longer has this conversation; "
+                                             "starting a fresh one from Puppy's transcript")
+        restarted = invocations_for("missing conversation plain fake turn")
+        assert len(restarted) == 1 and restarted[0]["argv"][
+            restarted[0]["argv"].index("--resume") + 1] == gone, restarted
+        fresh = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()][-1]
+        assert "--session-id" in fresh["argv"] and "--resume" not in fresh["argv"], fresh["argv"]
+        assert fresh["prompt"].endswith("missing conversation plain fake turn")
+        assert fresh["prompt"] != "missing conversation plain fake turn", \
+            "the fresh conversation is seeded with the transcript"
+        native = db.get_session(sid)["native_session_id"]
+        assert native and native != gone, native
+        assert native == fresh["argv"][fresh["argv"].index("--session-id") + 1]
+        assert hub.last_completion_status == "ok"
+        assert any(message.get("type") == "status" and
+                   message.get("text") == "Starting a fresh conversation..."
+                   for message in capture.messages)
 
         # every attempt failing ends with the honest error, still not as lost login
         assert hub.send_message("always transient fake turn") == {"queued": False}
@@ -2422,6 +2508,50 @@ second/model-b
         "jsonrpc": "2.0", "id": "puppy:session",
         "error": {"code": -32601, "message": "Method not found"}}), resume_ctx)
     assert actions[0]["data"]["method"] == "session/load"
+    # load refused too (opencode 1.19.6 says only "OpenCode service failure"):
+    # gone exactly when OpenCode's own store answers that it lacks the session
+    from puppy.drivers import opencode as opencode_module
+    service_failure = json.dumps({"jsonrpc": "2.0", "id": "puppy:load", "error": {
+        "code": -32603, "message": "Internal error: OpenCode service failure",
+        "data": {"service": "session"}}})
+    real_known = opencode_module._session_known
+    try:
+        for known, missing in ((False, True), (True, False), (None, False)):
+            opencode_module._session_known = lambda session_id, known=known: known
+            ctx = driver.turn_context(resumed, False, "again", "pin")
+            driver.parse_line(json.dumps({"jsonrpc": "2.0", "id": "puppy:initialize",
+                                          "result": {}}), ctx)
+            driver.parse_line(json.dumps({"jsonrpc": "2.0", "id": "puppy:session",
+                                          "error": {"code": -32603, "message": "x"}}), ctx)
+            actions = driver.parse_line(service_failure, ctx)
+            if missing:
+                assert actions == [{"a": "result", "data": {
+                    "ok": False, "stop_reason": "error",
+                    "error": "OpenCode no longer has this session (ses_existing)",
+                    "native_missing": "ses_existing"}}], actions
+            else:
+                assert "native_missing" not in actions[-1]["data"], (known, actions)
+    finally:
+        opencode_module._session_known = real_known
+    # the store itself: a session it holds, one it lacks, no store at all
+    store_home = Path(tempfile.mkdtemp(prefix="oc-store-"))
+    real_xdg = os.environ.get("XDG_DATA_HOME")
+    try:
+        os.environ["XDG_DATA_HOME"] = str(store_home)
+        assert opencode_module._session_known("ses_x") is None
+        (store_home / "opencode").mkdir()
+        connection = sqlite3.connect(str(store_home / "opencode" / "opencode.db"))
+        connection.execute("CREATE TABLE session (id TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO session VALUES ('ses_kept')")
+        connection.commit(); connection.close()
+        assert opencode_module._session_known("ses_kept") is True
+        assert opencode_module._session_known("ses_gone") is False
+    finally:
+        if real_xdg is None:
+            os.environ.pop("XDG_DATA_HOME", None)
+        else:
+            os.environ["XDG_DATA_HOME"] = real_xdg
+        shutil.rmtree(store_home, ignore_errors=True)
 
 
 async def exercise_opencode_binary_fallback(root) -> None:

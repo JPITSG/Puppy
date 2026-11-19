@@ -24679,7 +24679,8 @@ class SessionView {
         if (d.subtype === "workspace_move")
           return taskUpdateNode("Project moved", "ok",
             String(d.text || "").replace(/^Project moved from /, "From "), "workspace-move-update");
-        const warned = d.subtype === "workspace_reset" || d.subtype === "engine_retry";
+        const warned = d.subtype === "workspace_reset" || d.subtype === "engine_retry" ||
+          d.subtype === "context_reset";
         const n = el("div", "info-line" + (warned ? " warn" : ""));
         n.textContent = d.text || d.subtype || "";
         return n;

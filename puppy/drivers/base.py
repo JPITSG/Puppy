@@ -69,6 +69,14 @@ Normalized transcript event kinds (persisted):
                  context at the END of the turn - the last model request's
                  input plus output against the model's window - and the
                  transcript line shows their ratio when both are known.
+                 native_missing (a failed result only) names the native
+                 conversation this turn tried to resume when the engine
+                 itself says it no longer has it - Claude Code deletes its
+                 saved conversations after cleanupPeriodDays (30 by default),
+                 and any engine's store can lose one. A driver sets it only on
+                 the engine's own unambiguous evidence for that exact id; the
+                 runner then drops the id and runs the prompt again in a fresh
+                 native conversation seeded with Puppy's transcript.
     error        {text}
                  subtype="engine_api_error" (with the vendor's error code)
                  is a synthetic API error message the CLI emitted in the

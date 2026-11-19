@@ -3425,10 +3425,13 @@ class SessionHub:
         short: a stop drops the prompt like any interrupted turn, a shutdown
         parks it as held, and a deleted session simply ends."""
         delay = max(0.0, float(fields.get("delay") or 0))
-        self.broadcast({"type": "status", "text":
-                        "Retrying in {}s after the engine's transient failure "
-                        "(attempt {} of {})...".format(
-                            int(round(delay)), attempt, ENGINE_MAX_ATTEMPTS)})
+        if fields.get("fresh"):
+            self.broadcast({"type": "status", "text": "Starting a fresh conversation..."})
+        else:
+            self.broadcast({"type": "status", "text":
+                            "Retrying in {}s after the engine's transient failure "
+                            "(attempt {} of {})...".format(
+                                int(round(delay)), attempt, ENGINE_MAX_ATTEMPTS)})
         until = time.monotonic() + delay
         while True:
             if _hubs.get(self.id) is not self:
@@ -3462,6 +3465,7 @@ class SessionHub:
         user_event_persisted = bool(tool) or retry_fields is not None
         user_seq = int(retry_fields.get("user_seq") or 0) if retry_fields else 0
         retry_delay = None   # set when this attempt ended in a transient failure
+        fresh_retry = False  # ...or when the engine no longer had its conversation
         engine_ran = False
         descriptor = None
         transport = None
@@ -3714,7 +3718,7 @@ class SessionHub:
 
             def settle_result(data) -> None:
                 nonlocal got_result, retry_delay, sq_grace_until, context_checkpoint
-                nonlocal steer_grace_until
+                nonlocal steer_grace_until, fresh_retry
                 if context_checkpoint and data.get("ok"):
                     if data.get("context_verified") is not True or \
                             data.get("native_session_id") != context_checkpoint:
@@ -3727,6 +3731,34 @@ class SessionHub:
                         db.touch_session(self.id, native_session_id=context_checkpoint)
                         context_checkpoint = ""
                 got_result = True
+                missing = str(data.get("native_missing") or "")
+                if not data.get("ok") and missing and not context_checkpoint and \
+                        missing == str(session.get("native_session_id") or ""):
+                    # The engine no longer has the conversation this session
+                    # resumes (Claude Code deletes saved conversations after
+                    # 30 days by default). It can never be resumed, so the id
+                    # goes and the next attempt is a fresh native conversation
+                    # seeded with Puppy's transcript - for a prompt at once,
+                    # in place of this failure.
+                    session["native_session_id"] = ""
+                    db.touch_session(self.id, native_session_id="")
+                    driver_base.undo_state_clear(self.id)
+                    name = getattr(driver, "label", "") or session.get("engine") or "The engine"
+                    if not tool and not self.interrupted and not _draining:
+                        fresh_retry = True
+                        retry_delay = 0.0
+                        self._block_status = "error"
+                        self._emit("info", {
+                            "subtype": "context_reset",
+                            "text": "{} no longer has this conversation; starting a "
+                                    "fresh one from Puppy's transcript".format(name)})
+                        if driver.uses_stdin_stream:
+                            self._close_stdin()
+                        return
+                    self._emit("info", {
+                        "subtype": "context_reset",
+                        "text": "{} no longer has this conversation; the next prompt "
+                                "starts a fresh one from Puppy's transcript".format(name)})
                 if not data.get("ok") and not tool and \
                         driver_base.looks_transient_auth(data.get("error")) and \
                         attempt < ENGINE_MAX_ATTEMPTS and \
@@ -4375,9 +4407,12 @@ class SessionHub:
             queue_waiting = self._queue_reorder is not None and bool(self.queue)
             retry_item = None
             if retry_delay is not None and not self.interrupted and not _draining:
+                # a fresh start is not one of the transient attempts: it keeps
+                # the prompt's count and starts without a back-off
                 retry_item = {"kind": "retry", "fields": {
-                    "text": text, "attempt": attempt + 1,
-                    "delay": retry_delay, "user_seq": user_seq}}
+                    "text": text, "attempt": attempt if fresh_retry else attempt + 1,
+                    "delay": retry_delay, "user_seq": user_seq,
+                    **({"fresh": True} if fresh_retry else {})}}
             if retry_item is None and not tool:
                 from puppy import session_actions
                 session_actions.turn_finished(self.id, text,

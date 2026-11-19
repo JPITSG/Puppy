@@ -87,6 +87,34 @@ def _session_totals(session_id: str):
             connection.close()
 
 
+def _session_known(session_id: str):
+    """Whether OpenCode's own store still holds this session: True, False, or
+    None when the store cannot say (no database, another schema, a lock).
+
+    The ACP's refusal to resume or load a session it lacks is the generic
+    "Internal error: OpenCode service failure" (probed on opencode 1.19.6),
+    which names nothing, so absence is read from the store itself, read-only,
+    and only a store that answers can call a session gone.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    path = _usage_database_path()
+    if not os.path.isfile(path):
+        return None
+    uri = "file:{}?mode=ro".format(quote(path, safe="/"))
+    connection = None
+    try:
+        connection = sqlite3.connect(uri, uri=True, timeout=0.25)
+        row = connection.execute(
+            "SELECT 1 FROM session WHERE id=?", (session_id,)).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def _usage_delta(before, after):
     if not isinstance(before, dict) or not isinstance(after, dict) or \
             set(before) != set(after):
@@ -749,6 +777,15 @@ class OpenCodeDriver(Driver):
                     "sessionId": ctx["native_session_id"], "cwd": ctx["cwd"],
                     "mcpServers": ctx["mcp_servers"],
                 })}]
+            native = ctx.get("native_session_id") or ""
+            if ctx.get("load_fallback") and native and _session_known(native) is False:
+                # neither resume nor load took it and OpenCode's own store no
+                # longer has it: a failed result naming it (no error row), so
+                # the runner can start the prompt afresh
+                return [{"a": "result", "data": {
+                    "ok": False, "stop_reason": "error",
+                    "error": "OpenCode no longer has this session ({})".format(native),
+                    "native_missing": native}}]
             return self._protocol_failure(_json_error(ev.get("error")))
         result = ev.get("result") if isinstance(ev.get("result"), dict) else {}
         session_id = str(result.get("sessionId") or ctx.get("native_session_id") or "")

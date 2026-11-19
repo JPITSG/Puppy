@@ -95,6 +95,17 @@ START_GRACE_SECONDS = 10.0
 _STARTING_STATUS = "Starting…"
 
 
+# What app-server answers thread/resume for a thread it has no rollout for
+# (probed on codex-cli 0.170.0: code -32600, "no rollout found for thread id
+# <id>"). Only that message for the exact thread resumed counts.
+MISSING_ROLLOUT = "no rollout found for thread id "
+
+
+def _rollout_missing(error, native) -> bool:
+    return bool(native) and isinstance(error, dict) and \
+        error.get("message") == MISSING_ROLLOUT + str(native)
+
+
 def _rpc(request_id, method: str, params=None) -> dict:
     value = {"id": request_id, "method": method}
     if params is not None:
@@ -1174,6 +1185,14 @@ class CodexDriver(Driver):
             # armed if no completion follows.
             if request_id == _ID_INTERRUPT:
                 return []
+            if request_id == _ID_THREAD and not ctx.get("first_turn") and \
+                    _rollout_missing(ev.get("error"), ctx.get("native_session_id")):
+                # Codex no longer has this thread: a failed result naming it
+                # (no error row), so the runner can start the prompt afresh
+                return [{"a": "result", "data": {
+                    "ok": False, "stop_reason": "error",
+                    "error": _error_text(ev.get("error"), "Codex thread not found")[:4000],
+                    "native_missing": ctx["native_session_id"]}}]
             return self._protocol_failure(_error_text(
                 ev.get("error"), "Codex app-server request failed"))
 

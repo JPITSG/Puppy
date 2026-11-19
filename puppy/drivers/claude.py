@@ -167,6 +167,22 @@ def _retry_status(ev):
     return " · ".join(parts)
 
 
+# What Claude Code answers when asked to resume a conversation it no longer
+# has (probed on claude 2.1.328: its cleanup deletes saved conversations after
+# cleanupPeriodDays, 30 by default): one result, before any system/init, with
+# no turn run and the requested id named in its error. Only that exact shape
+# for the exact id resumed counts; any other failure stays a failure.
+MISSING_CONVERSATION = "No conversation found with session ID: "
+
+
+def _conversation_missing(ev, native) -> bool:
+    errors = ev.get("errors")
+    return bool(native) and ev.get("is_error") is True and \
+        ev.get("subtype") == "error_during_execution" and \
+        ev.get("num_turns") == 0 and isinstance(errors, list) and \
+        MISSING_CONVERSATION + native in errors
+
+
 def _result_error(ev):
     errors = ev.get("errors")
     detail = "\n".join(filter(None, map(messages.text, errors))) if isinstance(errors, list) else ""
@@ -811,6 +827,11 @@ class ClaudeDriver(Driver):
             "initial_user_replayed": False,
             "pending_steers": [],
             "tool": driver_base.tool_name(tool),
+            # the native conversation build_cmd resumes ("" for a fresh one),
+            # and whether the CLI got as far as loading it (its system/init)
+            "resuming": (session.get("native_session_id") or "") if
+                        (driver_base.tool_name(tool) or not first_turn) else "",
+            "init_seen": False,
             # transcript identities a later undo needs: this turn's prompt and
             # its last chain entry (user/assistant/compaction messages carry
             # the uuid the CLI persists; results do not)
@@ -993,6 +1014,7 @@ class ClaudeDriver(Driver):
                          "max_retries": ev.get("max_retries"),
                          "retry_delay_ms": ev.get("retry_delay_ms")}]
             if sub == "init":
+                ctx["init_seen"] = True
                 ctx["native_session_id"] = str(ev.get("session_id") or "")
                 acts = [{"a": "native_id", "id": ev.get("session_id", "")},
                         {"a": "transient", "msg": {"type": "turn_init",
@@ -1318,6 +1340,8 @@ class ClaudeDriver(Driver):
                 "usage": dict(folded),
                 "error": _result_error(ev)[:2000] if ev.get("is_error") else "",
             }
+            if not ctx.get("init_seen") and _conversation_missing(ev, ctx.get("resuming")):
+                data["native_missing"] = ctx["resuming"]
             model_usage = _model_usage(ev.get("modelUsage"))
             if model_usage:
                 data["model_usage"] = model_usage
