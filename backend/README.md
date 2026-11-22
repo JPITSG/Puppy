@@ -817,6 +817,11 @@ These bounded, short-lived request records stay in memory. Disconnect discards
 queued and cached frames before notifying viewers, so a stopped server cannot
 appear connected again because of stale pixels. See the
 [lifecycle contract](../docs/vnc.md#lifecycle).
+The same routes dial Windows Remote Desktop behind the additive `rdp`
+capability: a create request with `protocol: "rdp"`, an optional `username`
+and a desktop `width` and `height` signs in with Network Level Authentication
+(CredSSP with NTLMv2 over TLS) or TLS alone, and every catalog entry names its
+`protocol`. See [Remote Desktop connections](../docs/rdp.md).
 
 Every engine turn on such a node also receives a private stdio MCP server,
 backed by a mode-0600, same-uid Unix socket, that offers the screens the node

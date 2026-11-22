@@ -3393,7 +3393,7 @@ const MENTION_MODEL = (() => {
    separator. Common prose connectors are not model ids; punctuation and
    newlines end settings.
    Surrounding prose keeps its ordinary rendering and linkification. */
-const MENTION_TOKEN_RE = new RegExp(String.raw`(^|[\s([{'"])(@(?:Session-[\w\p{L}\p{N}-]+-[A-Z0-9]{4}|Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|New task(?: using (?!(?:to|and|at)\b)[\w-]+(?: ${MENTION_MODEL})?(?: at [\w-]+ effort)?)?|All tasks|Apply when done|Task-[\w\p{L}\p{N}-]+-[1-9][0-9]{0,9}|VNC (?:[A-Z0-9]{4}|[\w.\[\]:-]{1,255}(?: (?:"[^"\n]{1,255}"|(?!(?:to|and|then|so|for|with|please|at|but|or)\b)\S{1,255}))?)|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using (?!(?:to|and|at)\b)[\w-]+(?: ${MENTION_MODEL})?(?: at [\w-]+ effort)?))(?=$|[\s.,;:!?)\]}'"])`, "gu");
+const MENTION_TOKEN_RE = new RegExp(String.raw`(^|[\s([{'"])(@(?:Session-[\w\p{L}\p{N}-]+-[A-Z0-9]{4}|Session (?:[a-f0-9]{32}:)?(?:all|[a-f0-9]{32}\/[1-9][0-9]*)|Browser [A-Z0-9]{4}|Terminal [A-Z0-9]{4}|New browser|New terminal|New task(?: using (?!(?:to|and|at)\b)[\w-]+(?: ${MENTION_MODEL})?(?: at [\w-]+ effort)?)?|All tasks|Apply when done|Task-[\w\p{L}\p{N}-]+-[1-9][0-9]{0,9}|VNC (?:[A-Z0-9]{4}|[\w.\[\]:-]{1,255}(?: (?:"[^"\n]{1,255}"|(?!(?:to|and|then|so|for|with|please|at|but|or)\b)\S{1,255}))?)|RDP (?:[A-Z0-9]{4}|[\w.\[\]:-]{1,255}(?: (?:"[^"\n]{1,255}"|(?!(?:to|and|then|so|for|with|please|at|but|or)\b)\S{1,255})(?: (?:"[^"\n]{1,255}"|(?!(?:to|and|then|so|for|with|please|at|but|or)\b)\S{1,255}))?)?)|Spawn (?:an agent|[0-9]{1,2} agents)(?: on (?:"[^"\n]{1,80}"|\S+))? using (?!(?:to|and|at)\b)[\w-]+(?: ${MENTION_MODEL})?(?: at [\w-]+ effort)?))(?=$|[\s.,;:!?)\]}'"])`, "gu");
 function decorateMentionsInto(node, text) {
   text = String(text == null ? "" : text);
   MENTION_TOKEN_RE.lastIndex = 0;
@@ -5261,13 +5261,39 @@ function browserTabTitle(tabOrBid, browserId = "") {
   return id ? `Browser ${id} @ ${backendName(bid)}` : `Browser @ ${backendName(bid)}`;
 }
 
+/* VNC and Windows Remote Desktop are one remote-screen system: one catalog,
+   one ID space, one pane and one set of agent tools. Only the protocol's
+   name, its default port and the fields of its dialogs differ. */
+const SCREEN_PROTOCOLS = Object.freeze({
+  vnc: Object.freeze({ kind: "VNC", port: 5900 }),
+  rdp: Object.freeze({ kind: "RDP", port: 3389 }),
+});
+function screenProtocol(value) { return value === "rdp" ? "rdp" : "vnc"; }
+function screenKind(protocol) { return SCREEN_PROTOCOLS[screenProtocol(protocol)].kind; }
+function screenTarget(host, port, protocol) {
+  if (!host) return "";
+  port = Number(port) || 0;
+  return port && port !== SCREEN_PROTOCOLS[screenProtocol(protocol)].port ?
+    `${host}:${port}` : String(host);
+}
+/* A tab learns its protocol from the node's catalog and from its viewer's
+   status, never from storage: a restored tab reads it from the node again. */
+function vncProtocolOf(tab) {
+  if (!tab) return "vnc";
+  const id = String(tab.vncId || "").toUpperCase();
+  const known = id && (vncInstancesFor(tab.bid || 0) || []).find(item =>
+    String(item.id || "").toUpperCase() === id);
+  return screenProtocol(known && known.protocol || tab.vncProtocol);
+}
+
 function vncTabTitle(tabOrBid, vncId = "") {
   const tab = tabOrBid && typeof tabOrBid === "object" ? tabOrBid : null;
   const bid = tab ? (tab.bid || 0) : (Number(tabOrBid) || 0);
   const id = String(tab ? (tab.vncId || "") : vncId).toUpperCase();
   const target = tab ? vncTargetLabel(tab) : "";
   if (target) return `${target} @ ${backendName(bid)}`;
-  return id ? `VNC ${id} @ ${backendName(bid)}` : `VNC @ ${backendName(bid)}`;
+  const kind = screenKind(tab ? vncProtocolOf(tab) : "vnc");
+  return id ? `${kind} ${id} @ ${backendName(bid)}` : `${kind} @ ${backendName(bid)}`;
 }
 
 /* What the user typed, not what the node resolved: a tab has to stay
@@ -5275,10 +5301,7 @@ function vncTabTitle(tabOrBid, vncId = "") {
 function vncTargetLabel(tab) {
   if (!tab) return "";
   if (tab.vncLabel) return String(tab.vncLabel);
-  if (!tab.vncHost) return "";
-  const host = String(tab.vncHost);
-  const port = Number(tab.vncPort) || 0;
-  return port && port !== 5900 ? `${host}:${port}` : host;
+  return screenTarget(tab.vncHost, tab.vncPort, vncProtocolOf(tab));
 }
 
 function vncInstancesFor(bid) {
@@ -5295,18 +5318,33 @@ function vncEnabledFor(bid) {
   return !!backend && backendHasCapability(backend, "vnc-instances");
 }
 
+/* Remote Desktop rides the same routes on a node new enough to dial it. */
+function rdpEnabledFor(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && backendHasCapability(backend, "rdp");
+}
+
+function screenEnabledFor(bid, protocol) {
+  return screenProtocol(protocol) === "rdp" ? rdpEnabledFor(bid) : vncEnabledFor(bid);
+}
+
 /* A connection the node no longer lists is gone: mark its tab so the view
    stops trying to reconnect into a 404 and offers Close instead. */
 function syncVncTabs(bid) {
   const instances = vncInstancesFor(bid);
   if (!instances) return;
-  const live = new Set(instances.map(item => String(item.id || "").toUpperCase()));
+  const live = new Map(instances.map(item => [String(item.id || "").toUpperCase(), item]));
   let changed = false;
   for (const tab of state.tabs) {
     if (tab.type !== "vnc" || (tab.bid || 0) !== (Number(bid) || 0) || !tab.vncId) continue;
-    const gone = !live.has(String(tab.vncId).toUpperCase());
-    if (tab.vncGone === gone) continue;
+    const known = live.get(String(tab.vncId).toUpperCase());
+    const gone = !known;
+    const protocol = known ? screenProtocol(known.protocol) : tab.vncProtocol;
+    if (tab.vncGone === gone && (!known || tab.vncProtocol === protocol)) continue;
     tab.vncGone = gone;
+    if (known) tab.vncProtocol = protocol;
+    tab.title = vncTabTitle(tab);
     changed = true;
     const view = state.views[tab.id];
     if (view && typeof view.applyCatalog === "function") view.applyCatalog();
@@ -8034,8 +8072,8 @@ const TIMEOUT_FIELDS = [
     description: "Time without connected viewers before a terminal stops. Agent interaction restarts this timer." },
   { key: "browser_idle_seconds", label: "Browser unattended timeout",
     description: "Time without connected viewers before a browser stops. Agent interaction restarts this timer." },
-  { key: "vnc_idle_seconds", label: "VNC unattended timeout",
-    description: "Time without connected viewers before a VNC connection is dropped. Reopening its tab dials again." },
+  { key: "vnc_idle_seconds", label: "Remote screen unattended timeout",
+    description: "Time without connected viewers before a VNC or RDP connection is dropped. Reopening its tab dials again." },
 ];
 
 /* A timeout a node may not have: a backend from before the background task
@@ -11722,6 +11760,7 @@ function openVncTab(bid, vncId, groupId = null, options = {}) {
   let tab = state.tabs.find(item => item.id === id);
   if (!tab) {
     tab = { id, type: "vnc", bid, vncId };
+    if (options.protocol) tab.vncProtocol = screenProtocol(options.protocol);
     if (options.host) tab.vncHost = String(options.host).slice(0, 255);
     if (options.port) tab.vncPort = Number(options.port) || 0;
     if (options.label) tab.vncLabel = String(options.label).slice(0, 120);
@@ -11845,7 +11884,7 @@ function handleVncActivity(bid, sid, turnId, vncId = "") {
   const known = (vncInstancesFor(bid) || []).find(item =>
     String(item.id || "").toUpperCase() === vncId) || {};
   openVncTab(bid, vncId, sessionPane ? sessionPane.id : null,
-    { activate: false, afterTabId: sessionTabId, sid,
+    { activate: false, afterTabId: sessionTabId, sid, protocol: known.protocol,
       host: known.host, port: known.port, label: known.label });
 }
 
@@ -13062,6 +13101,7 @@ $("tab-add-menu").addEventListener("click", (e) => {
   else if (act === "new-terminal") modalNewTerminal(groupId);
   else if (act === "new-browser") openBrowserFromMenu(groupId);
   else if (act === "new-vnc") modalNewVnc(groupId);
+  else if (act === "new-rdp") modalNewVnc(groupId, "rdp");
   else if (act === "search") openSearchTab(groupId);
 });
 $("btn-new-session").onclick = () => { modalNewSession(state.activeGroup); closeDrawer(); };
@@ -16413,6 +16453,7 @@ class Composer {
       return;
     }
     if (item.kind === "new-vnc") { this.vncMentionBegin(); return; }
+    if (item.kind === "new-rdp") { this.vncMentionBegin("rdp"); return; }
     if (item.kind === "new-spawn") { this.spawnMentionBegin(); return; }
     if (item.kind === "new-task") { this.taskMentionBegin(); return; }
     if (item.kind === "new-loop") { this.loopMentionBegin(); return; }
@@ -16445,22 +16486,25 @@ class Composer {
     this.revealCaret();
   }
 
-  /* The "New VNC connection" row: a remote screen needs a host, a port and
-     sometimes a password, which is a form rather than a list of choices. The
-     dialog builds the exact directive and hands it back here. */
-  vncMentionBegin() {
+  /* The "New VNC connection" and "New RDP connection" rows: a remote screen
+     needs a host, a port and sometimes a user name and password, which is a
+     form rather than a list of choices. The dialog builds the exact directive
+     and hands it back here. */
+  vncMentionBegin(protocol = "vnc") {
     const m = this.mention;
     if (!m) return;
+    protocol = screenProtocol(protocol);
     const token = { start: m.start, end: this.ta.selectionStart };
     const draft = this.ta.value;
     const current = () => !this.closed && this.ta.value === draft;
     this.mentionDismissedAt = -1;
     this.hideMention();
-    modalVncShortcut(this.host.bid || 0, this.knownVncScreens(true),
+    modalVncShortcut(this.host.bid || 0,
+      this.knownVncScreens(true).filter(row => row.protocol === protocol),
       insert => {
         if (current()) this.insertMentionText(token, insert);
         else toast("Could not insert shortcut · the prompt changed · open a new shortcut", "bad", TOAST_LONG);
-      }, current);
+      }, current, protocol);
   }
 
   loopMentionBegin() {
@@ -16488,6 +16532,7 @@ class Composer {
     const withBrowser = browserEnabledFor(bid);
     const withTerminal = !bid || backendHasCapability(backend, "terminal");
     const withVnc = vncEnabledFor(bid);
+    const withRdp = rdpEnabledFor(bid);
     const items = [];
     const push = (kind, label, hint, insert) =>
       items.push({ kind, label, hint, insert, search: label.toLowerCase() });
@@ -16502,8 +16547,10 @@ class Composer {
       push("browser", `Browser ${inst.id}`, hintFor(inst.session_id), `@Browser ${inst.id}`);
     for (const inst of this.knownMentionInstances("terminal", withTerminal))
       push("terminal", `Terminal ${inst.id}`, hintFor(inst.session_id), `@Terminal ${inst.id}`);
-    for (const inst of this.knownVncScreens(withVnc))
-      push("vnc", `VNC ${inst.id}`, inst.hint, `@VNC ${inst.id}`);
+    for (const inst of this.knownVncScreens(withVnc)) {
+      const kind = screenKind(inst.protocol);
+      push("vnc", `${kind} ${inst.id}`, inst.hint, `@${kind} ${inst.id}`);
+    }
     /* a Main chat names its tasks for the task tools, and asks for new ones;
        a task's chat asks to be applied to Main when its work is done */
     const taskRole = this.host.tasks ? composerTaskRole(bid, this.host.sid) : "";
@@ -16522,6 +16569,8 @@ class Composer {
     if (withTerminal) push("new-terminal", "New terminal", "another shared terminal", "@New terminal");
     if (withVnc)
       push("new-vnc", "New VNC connection", "a remote screen by host", "");
+    if (withRdp)
+      push("new-rdp", "New RDP connection", "a Windows desktop by host", "");
     if (spawnExecFor(bid))
       push("new-spawn", "New spawn", "delegate to a separate agent", "");
     if (taskRole === "main")
@@ -16874,9 +16923,9 @@ class Composer {
     for (const inst of vncInstancesFor(bid) || []) {
       const id = String(inst && inst.id || "").toUpperCase();
       if (!/^[A-Z0-9]{4}$/.test(id)) continue;
-      const port = Number(inst.port) || 0;
-      known.set(id, { id, hint: [
-        port && port !== 5900 ? `${inst.host}:${port}` : String(inst.host || ""),
+      const protocol = screenProtocol(inst.protocol);
+      known.set(id, { id, protocol, hint: [
+        screenTarget(String(inst.host || ""), inst.port, protocol),
         String(inst.label || ""),
       ].filter(Boolean).join(" · ") });
     }
@@ -16884,7 +16933,7 @@ class Composer {
       if (tab.type !== "vnc" || (tab.bid || 0) !== bid || tab.vncGone === true) continue;
       const id = String(tab.vncId || "").toUpperCase();
       if (!/^[A-Z0-9]{4}$/.test(id) || known.has(id)) continue;
-      known.set(id, { id, hint: vncTargetLabel(tab) });
+      known.set(id, { id, protocol: vncProtocolOf(tab), hint: vncTargetLabel(tab) });
     }
     return [...known.values()];
   }
@@ -23575,24 +23624,26 @@ class SessionView {
       (t.bid || 0) === (this.tab.bid || 0) && t.sid === this.tab.sid &&
       t.vncGone !== true);
     const untabbed = this.untabbedRunning("vnc");
-    const key = live.map(t => t.id).concat(untabbed.map(item => `c:${item.id}`)).join("\u0000");
+    const key = live.map(t => `${t.id}:${vncProtocolOf(t)}`).concat(untabbed.map(item =>
+      `c:${item.id}:${screenProtocol(item.protocol)}`)).join("\u0000");
     if (key === this.vncChipKey) return;
     this.vncChipKey = key;
     const scroll = this.root.querySelector(".chat-meta-scroll");
     for (const stale of scroll.querySelectorAll(".chip.vnc")) stale.remove();
     const anchor = scroll.querySelector(".chip.background-tasks") || scroll.querySelector(".chat-status");
-    const add = (id, open) => {
+    const add = (id, kind, open) => {
       const chip = el("button", "chip vnc");
       chip.type = "button";
       chip.appendChild(vncIcon(11));
-      chip.appendChild(el("span", "chip-text", `VNC ${id}`));
-      chip.setAttribute("aria-label", `Show VNC ${id}`);
+      chip.appendChild(el("span", "chip-text", `${kind} ${id}`));
+      chip.setAttribute("aria-label", `Show ${kind} ${id}`);
       chip.onclick = open;
       scroll.insertBefore(chip, anchor);
     };
-    for (const t of live) add(t.vncId, () => activateTab(t.id));
+    for (const t of live) add(t.vncId, screenKind(vncProtocolOf(t)), () => activateTab(t.id));
     for (const item of untabbed)
-      add(String(item.id).toUpperCase(), () => this.showRunning("vnc", item));
+      add(String(item.id).toUpperCase(), screenKind(item.protocol),
+        () => this.showRunning("vnc", item));
   }
 
   syncWorkspaceChip() {
@@ -27833,7 +27884,7 @@ class VncView {
       <div class="br-bar">
         <button class="icon-btn vnc-refresh" type="button"
           aria-label="Redraw the whole screen"></button>
-        <span class="vnc-target" aria-label="VNC server"></span>
+        <span class="vnc-target" aria-label="Remote server"></span>
         <button class="btn btn-sm vnc-cad" type="button">Ctrl+Alt+Del</button>
         <button class="icon-btn br-kbd vnc-kbd" type="button"
           aria-label="Type into the remote screen"
@@ -27846,11 +27897,11 @@ class VncView {
         </button>
       </div>
       <div class="br-meta edge-scroll-viewport"><div class="br-meta-scroll">
-        <div class="br-ident" aria-label="VNC identity">
-          <span class="br-ident-label">VNC</span>
+        <div class="br-ident" aria-label="Screen identity">
+          <span class="br-ident-label vnc-kind">VNC</span>
           <span class="br-id vnc-id"></span>
           <button class="icon-btn br-copy-id vnc-copy-id" type="button"
-            aria-label="Copy VNC ID"></button>
+            aria-label="Copy screen ID"></button>
         </div>
         <span class="br-stats vnc-state">
           <span class="sess-dot vnc-dot busy"></span>
@@ -27859,8 +27910,8 @@ class VncView {
         <span class="br-stats br-frame-stats hidden" title="Screen width × height in pixels · screen updates presented per second, updated once a second">
           <span class="vnc-size"></span><span aria-hidden="true">·</span><span class="vnc-fps"></span>
         </span>
-        <span class="br-stats vnc-throughput hidden" aria-label="Incoming VNC throughput"
-          title="VNC traffic received by the backend before decoding, updated once a second · excludes TCP/IP overhead and the stream from backend to console"></span>
+        <span class="br-stats vnc-throughput hidden" aria-label="Incoming throughput"
+          title="Traffic the backend receives from the remote server before decoding, updated once a second · excludes TCP/IP overhead and the stream from backend to console"></span>
       </div></div>
       <div class="br-type hidden">
         <input class="br-ime" type="text" autocomplete="off" autocapitalize="none"
@@ -27886,8 +27937,9 @@ class VncView {
     this.meta = this.root.querySelector(".br-meta");
     this.stopMetadataScrolling = wireMetadataScrolling(this.meta);
     this.idText = this.root.querySelector(".vnc-id");
+    this.kindText = this.root.querySelector(".vnc-kind");
     this.copyIdBtn = wireCopyButton(this.root.querySelector(".vnc-copy-id"),
-      () => String(this.tab.vncId || "").toUpperCase(), "Copy VNC ID");
+      () => String(this.tab.vncId || "").toUpperCase(), "Copy screen ID");
     this.stateDot = this.root.querySelector(".vnc-dot");
     this.stateText = this.root.querySelector(".vnc-state-text");
     this.sizeText = this.root.querySelector(".vnc-size");
@@ -27934,22 +27986,33 @@ class VncView {
   }
   isDead() { return !!this.root.querySelector(".vnc-dead"); }
 
+  /* "VNC" or "RDP": everything else about the pane is the same. */
+  kind() { return screenKind(vncProtocolOf(this.tab)); }
+
   applyCatalog() {
     this.vncGone = this.tab.vncGone === true;
     this.renderIdentity();
-    if (this.vncGone) this.showDead("VNC connection closed", true);
+    if (this.vncGone) this.showDead(`${this.kind()} connection closed`, true);
   }
 
   renderIdentity() {
     const id = String(this.tab.vncId || "").toUpperCase();
     this.idText.textContent = id || "—";
+    const kind = this.kind();
+    this.kindText.textContent = kind;
     const status = this.status || {};
     const target = vncTargetLabel(this.tab) ||
-      (status.host ? (status.port && status.port !== 5900 ?
-        `${status.host}:${status.port}` : status.host) : "");
+      screenTarget(status.host || "", status.port, vncProtocolOf(this.tab));
     this.targetText.textContent = status.name && status.name !== target ?
       `${target} · ${status.name}` : target;
-    this.targetText.title = this.targetText.textContent;
+    /* A Remote Desktop certificate is self-signed almost everywhere, so its
+       fingerprint is what someone can check against the server's own. */
+    this.targetText.title = [this.targetText.textContent,
+      status.username ? `Signed in as ${status.username}` : "",
+      status.security === "NLA" ? "Network Level Authentication over TLS" :
+        status.security === "TLS" ? "TLS without Network Level Authentication" : "",
+      status.certificate ? `Certificate SHA-256 ${status.certificate}` : ""]
+      .filter(Boolean).join("\n");
     const viewOnly = this.viewOnly;
     this.cadBtn.classList.toggle("hidden", viewOnly);
     this.kbdBtn.classList.toggle("hidden", viewOnly);
@@ -28231,7 +28294,7 @@ class VncView {
       return;
     }
     this.waitingForBackend = false;
-    if (!this.tab.vncId) { this.showDead("VNC ID is missing", true); return; }
+    if (!this.tab.vncId) { this.showDead("Screen ID is missing", true); return; }
     const sequence = ++this.connectionSequence;
     this.resetContinuousInput();
     const path = `ws/vnc/${encodeURIComponent(this.tab.vncId)}`;
@@ -28291,9 +28354,14 @@ class VncView {
       this.connected = message.connected === true;
       this.vncGone = false;
       if (this.connected) this.resetReconnect();
-      if (!this.tab.vncHost && message.host) {
-        this.tab.vncHost = message.host;
-        this.tab.vncPort = message.port;
+      const protocol = screenProtocol(message.protocol);
+      const learnedHost = !this.tab.vncHost && !!message.host;
+      if (learnedHost || (this.tab.vncProtocol || "vnc") !== protocol) {
+        this.tab.vncProtocol = protocol;
+        if (learnedHost) {
+          this.tab.vncHost = message.host;
+          this.tab.vncPort = message.port;
+        }
         this.tab.title = vncTabTitle(this.tab);
         renderTabs();
         saveTabs();
@@ -28302,7 +28370,7 @@ class VncView {
       if (this.connected) {
         this.clearDead();
         this.renderIdentity();
-      } else this.showDead(message.error || "VNC connection closed", false);
+      } else this.showDead(message.error || `${this.kind()} connection closed`, false);
     } else if (message.type === "size") {
       this.setSize(message.width, message.height);
     } else if (message.type === "gone") {
@@ -28315,13 +28383,13 @@ class VncView {
          so the next automatic attempt waits longer than a dropped socket. */
       if (message.dial === true && this.reconnectDelay < 4000)
         this.reconnectDelay = 4000;
-      this.showDead(message.reason || "VNC connection closed", false);
+      this.showDead(message.reason || `${this.kind()} connection closed`, false);
       // End this viewer socket too; reconnect must obtain a fresh status.
       if (this.ws) { try { this.ws.close(); } catch (error) {} }
     } else if (message.type === "error") {
       if (message.terminal === true) {
         this.vncGone = true;
-        this.showDead(message.text || "VNC unavailable", true);
+        this.showDead(message.text || `${this.kind()} unavailable`, true);
       } else {
         /* A refused action (view only, an unknown key) is worth saying once.
            Saying the same refusal again is not: the notice surface would fold
@@ -30830,7 +30898,7 @@ class SettingsView {
     vncCopy.appendChild(el("h3", "", "Remote screen guidance"));
     const vncNote = el("p", "",
       "Sent to every model turn on this backend; it governs how the agent works " +
-      "the screens Puppy is connected to over VNC.");
+      "the screens Puppy is connected to over VNC or Remote Desktop.");
     vncCopy.appendChild(vncNote);
     const vncReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
       "Reset to default");
@@ -34049,7 +34117,8 @@ const RUNNING_KINDS = {
     tabFor: (bid, id) => state.tabs.find(t => t.id === `v:${bid}:${id}`),
     open: (bid, item, groupId, extra = {}) => openVncTab(bid, item.id, groupId,
       { ...(Number(item.session_id) > 0 ? { sid: Number(item.session_id) } : {}),
-        host: item.host, port: item.port, label: item.label, ...extra }),
+        protocol: item.protocol, host: item.host, port: item.port, label: item.label,
+        ...extra }),
   },
 };
 
@@ -34076,11 +34145,12 @@ function runningEntry(kind, bid, item) {
     parts.push({ text: owner && owner.name }, { text: item.cwd, mono: true }, { text: who });
     word = shown ? "In a tab here" : !item.running ? "Ended" : elsewhere ? "Open elsewhere" : "Running";
   } else {
-    const port = Number(item.port) || 0;
-    const target = item.host ? (port && port !== 5900 ? `${item.host}:${port}` : String(item.host)) : "";
-    name = item.label || target || `VNC ${id}`;
-    parts.push({ text: `VNC ${id}`, mono: true });
+    const kind = screenKind(item.protocol);
+    const target = screenTarget(item.host ? String(item.host) : "", item.port, item.protocol);
+    name = item.label || target || `${kind} ${id}`;
+    parts.push({ text: `${kind} ${id}`, mono: true });
     if (item.label && target) parts.push({ text: target, mono: true });
+    if (item.username) parts.push({ text: String(item.username), mono: true });
     if (item.view_only) parts.push({ text: "View only" });
     parts.push({ text: owner && owner.name }, { text: who });
     word = shown ? "In a tab here" : elsewhere ? "Open elsewhere" : item.connected ? "Connected" :
@@ -34134,7 +34204,7 @@ function runningHidden(kind, bid) {
 /* The New dialogs' list, set into a form ahead of its error line and its
    buttons: `show(bid)` points it at a backend, a press closes the dialog and
    shows the instance. It stays out of sight while the backend holds none. */
-function runningList(kind, form, { groupId = null, close, onClose }) {
+function runningList(kind, form, { groupId = null, close, onClose, only = null }) {
   const spec = RUNNING_KINDS[kind];
   const box = el("section", "running-box hidden");
   const head = box.appendChild(el("div", "field-lbl running-head"));
@@ -34146,7 +34216,9 @@ function runningList(kind, form, { groupId = null, close, onClose }) {
     const known = spec.known(bid);
     /* a live stream's catalog is as new as anything; else the fresh read wins */
     const items = fresh && !(nodeStateStreamActive(bid) && known) ? fresh : known;
-    const rows = runningEntries(kind, bid, items);
+    /* the New RDP and New VNC dialogs each list their own protocol's screens */
+    const rows = runningEntries(kind, bid, only && Array.isArray(items) ?
+      items.filter(only) : items);
     /* rows that say what they said stay the nodes they were: a repaint
        between a press and its release would swallow the click */
     const signature = JSON.stringify([bid, rows.map(({ entry }) => entry)]);
@@ -34258,43 +34330,63 @@ async function openBrowserFromMenu(groupId = null, choose = false) {
   m.querySelector("#nb-go").focus();
 }
 
-/* new VNC connection */
+/* new VNC or RDP connection */
 /* Unlike Browser and Terminal, opening this needs a round trip: the node has
    to reach the server and get through its handshake before there is anything
    to show. So the dialog stays up, busy, until the connection exists, and a
-   refusal lands inline beside the field that caused it. */
-function modalNewVnc(groupId = null) {
+   refusal lands inline beside the field that caused it. Remote Desktop is the
+   same dialog with a user name and a desktop size, posted to the same route. */
+const RDP_SIZES = Object.freeze([[1280, 800], [1024, 768], [1366, 768], [1440, 900],
+  [1600, 900], [1920, 1080], [2560, 1440]]);
+
+function modalNewVnc(groupId = null, protocol = "vnc") {
+  protocol = screenProtocol(protocol);
+  const rdp = protocol === "rdp";
+  const kind = screenKind(protocol);
   const nodes = [{ id: 0, name: backendName(0) }]
-    .concat(state.backends.filter(node => vncEnabledFor(node.id)));
-  const { m, close, onClose } = modal(`<h2>New VNC connection</h2>
-    <p class="modal-copy">Puppy connects from the chosen backend to a VNC server over TCP and
+    .concat(state.backends.filter(node => screenEnabledFor(node.id, protocol)));
+  const { m, close, onClose } = modal(`<h2>New ${kind} connection</h2>
+    <p class="modal-copy">${rdp ?
+      `Puppy connects from the chosen backend to a Windows Remote Desktop server over TLS and
+      decodes its screen here. The password is used only to sign in to this connection and is
+      never written to disk.` :
+      `Puppy connects from the chosen backend to a VNC server over TCP and
       decodes its screen here. The password is used only for this connection's challenge and is
-      never written to disk.</p>
+      never written to disk.`}</p>
     <form id="nv-form">
       <label>Backend<select id="nv-be">${nodes.map(node =>
         `<option value="${node.id}">${esc(node.name)}</option>`).join("")}</select></label>
       <div class="vnc-target-fields">
         <label>Host<input type="text" id="nv-host" placeholder="192.168.1.10 or host.example"
           autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
-        <label>Port<input type="text" id="nv-port" inputmode="numeric" value="5900"
-          autocomplete="off" spellcheck="false"></label>
+        <label>Port<input type="text" id="nv-port" inputmode="numeric"
+          value="${SCREEN_PROTOCOLS[protocol].port}" autocomplete="off" spellcheck="false"></label>
       </div>
-      <p class="hint">A display number works too: <code>1</code> means port 5901. Enclose an IPv6
-        address in brackets.</p>
+      <p class="hint">${rdp ? `Enclose an IPv6 address in brackets.` :
+        `A display number works too: <code>1</code> means port 5901. Enclose an IPv6
+        address in brackets.`}</p>
+      ${rdp ? `<label>User name <span class="field-optional">(optional)</span><input type="text"
+        id="nv-user" placeholder="user, DOMAIN\\user or user@domain" autocomplete="off"
+        autocapitalize="off" spellcheck="false"></label>` : ""}
       <label>Password <span class="field-optional">(optional)</span><input type="password"
         id="nv-pass" autocomplete="off"></label>
+      ${rdp ? `<p class="hint">Without them the server has to offer its own sign-in screen,
+        which Network Level Authentication turns off.</p>
+      <label>Screen size<select id="nv-size">${RDP_SIZES.map(([w, h]) =>
+        `<option value="${w}x${h}">${w} × ${h}</option>`).join("")}</select></label>` : ""}
       <label>Name <span class="field-optional">(optional)</span><input type="text" id="nv-label"
         placeholder="What this screen is" autocomplete="off"></label>
       <label class="check"><input type="checkbox" id="nv-view"> View only, send no input</label>
       <p class="form-error hidden" role="alert"></p>
       <div class="m-btns"><button type="button" class="btn" id="nv-cancel">Cancel</button>
       <button type="submit" class="btn btn-pri" id="nv-go">Connect</button></div>
-    </form>`, "", () => modalNewVnc(groupId));
+    </form>`, "", () => modalNewVnc(groupId, protocol));
   const form = m.querySelector("#nv-form");
   const host = m.querySelector("#nv-host"), port = m.querySelector("#nv-port");
   const error = m.querySelector(".form-error"), go = m.querySelector("#nv-go");
   form.noValidate = true;
-  const running = runningList("vnc", form, { groupId, close, onClose });
+  const running = runningList("vnc", form, { groupId, close, onClose,
+    only: item => screenProtocol(item.protocol) === protocol });
   const picker = m.querySelector("#nv-be");
   picker.addEventListener("change", () => running.show(picker.value));
   running.show(picker.value);
@@ -34317,7 +34409,7 @@ function modalNewVnc(groupId = null) {
   onClose(() => {
     dismissed = true;
     cancelAttempt(attempt).catch(failure => {
-      toast(`${backendName(attempt.bid)}: Could not cancel VNC connection · ${failure.message} · check the open connections`,
+      toast(`${backendName(attempt.bid)}: Could not cancel ${kind} connection · ${failure.message} · check the open connections`,
         "bad", TOAST_LONG);
     });
   });
@@ -34326,9 +34418,16 @@ function modalNewVnc(groupId = null) {
     event.preventDefault();
     if (busy || dismissed) return;
     if (!host.value.trim()) {
-      error.textContent = "Enter the VNC server's host name or address";
+      error.textContent = `Enter the ${kind} server's host name or address`;
       error.classList.remove("hidden");
       host.focus();
+      return;
+    }
+    const user = rdp ? m.querySelector("#nv-user").value.trim() : "";
+    if (rdp && !user && m.querySelector("#nv-pass").value) {
+      error.textContent = "Enter the user name the password belongs to";
+      error.classList.remove("hidden");
+      m.querySelector("#nv-user").focus();
       return;
     }
     const bid = parseInt(m.querySelector("#nv-be").value, 10) || 0;
@@ -34349,6 +34448,9 @@ function modalNewVnc(groupId = null) {
         method: "POST", timeoutMs: 45000,
         body: {
           ...(current.requestId ? { request_id: current.requestId } : {}),
+          ...(rdp ? { protocol: "rdp", username: user,
+            width: parseInt(m.querySelector("#nv-size").value, 10),
+            height: parseInt(m.querySelector("#nv-size").value.split("x")[1], 10) } : {}),
           host: host.value.trim(),
           port: port.value.trim(),
           password: m.querySelector("#nv-pass").value,
@@ -34365,12 +34467,12 @@ function modalNewVnc(groupId = null) {
       current.accepted = true;
       close();
       openVncTab(bid, result.vnc.id, groupId, {
-        host: result.vnc.host, port: result.vnc.port, label: result.vnc.label,
+        protocol, host: result.vnc.host, port: result.vnc.port, label: result.vnc.label,
       });
       toast(`${backendName(bid)}: Connected to ${result.vnc.host}`, "ok");
     } catch (failure) {
       if (dismissed) {
-        if (current.vncId) toast(`${backendName(bid)}: Could not close cancelled VNC connection · ${failure.message} · check the open connections`,
+        if (current.vncId) toast(`${backendName(bid)}: Could not close cancelled ${kind} connection · ${failure.message} · check the open connections`,
           "bad", TOAST_LONG);
         return;
       }
@@ -34391,86 +34493,116 @@ function modalNewVnc(groupId = null) {
   host.focus();
 }
 
-/* the "@VNC" shortcut wizard */
-/* The composer's own VNC row. Unlike Browser and Terminal, a remote screen
-   cannot be named by an ID alone until one exists, so this builds the exact
-   directive the agent's VNC guidance defines: an open connection by ID, or a
-   host, port and password it should dial. Nothing is connected here - the
-   agent does that with the tool, so its tab appears beside the chat. */
+/* the "@VNC" and "@RDP" shortcut wizard */
+/* The composer's own remote-screen rows. Unlike Browser and Terminal, a
+   remote screen cannot be named by an ID alone until one exists, so this
+   builds the exact directive the agent's remote screen guidance defines: an
+   open connection by ID, or a host, port (and for RDP a user name) and
+   password it should dial. Nothing is connected here - the agent does that
+   with the tool, so its tab appears beside the chat. */
+function shortcutWord(value) {
+  value = String(value == null ? "" : value);
+  return /\s/.test(value) ? `"${value}"` : value;
+}
+
 function vncShortcutText(target, password) {
   const value = String(password == null ? "" : password);
   if (!value) return `@VNC ${target}`;
-  return `@VNC ${target} ${/\s/.test(value) ? `"${value}"` : value}`;
+  return `@VNC ${target} ${shortcutWord(value)}`;
 }
 
-function modalVncShortcut(bid, screens, onInsert, current = () => true) {
+function rdpShortcutText(target, user, password) {
+  const words = [`@RDP ${target}`];
+  if (user) words.push(shortcutWord(user));
+  if (user && password) words.push(shortcutWord(password));
+  return words.join(" ");
+}
+
+function modalVncShortcut(bid, screens, onInsert, current = () => true, protocol = "vnc") {
+  protocol = screenProtocol(protocol);
+  const rdp = protocol === "rdp";
+  const kind = screenKind(protocol);
   const rows = Array.isArray(screens) ? screens : [];
-  const { m, close } = modal(`<h2>VNC shortcut</h2>
-    <p class="modal-copy">Point the agent at a remote screen. The shortcut goes into your
-      message; the agent connects from ${esc(backendName(bid))}, works the screen with its
-      mouse and keyboard, and its tab opens beside this chat.</p>
+  const { m, close } = modal(`<h2>${kind} shortcut</h2>
+    <p class="modal-copy">Point the agent at a ${rdp ? "Windows desktop" : "remote screen"}. The
+      shortcut goes into your message; the agent connects from ${esc(backendName(bid))}, works the
+      screen with its mouse and keyboard, and its tab opens beside this chat.</p>
     <form id="vs-form">
       ${rows.length ? `<label>Screen<select id="vs-pick">
         <option value="">New connection…</option>
-        ${rows.map(row => `<option value="${esc(row.id)}">VNC ${esc(row.id)}${
+        ${rows.map(row => `<option value="${esc(row.id)}">${kind} ${esc(row.id)}${
           row.hint ? " · " + esc(row.hint) : ""}</option>`).join("")}
       </select></label>` : ""}
       <div id="vs-target">
         <div class="vnc-target-fields">
           <label>Host<input type="text" id="vs-host" placeholder="192.168.1.10 or host.example"
             autocomplete="off" autocapitalize="off" spellcheck="false"></label>
-          <label>Port<input type="text" id="vs-port" inputmode="numeric" value="5900"
-            autocomplete="off" spellcheck="false"></label>
+          <label>Port<input type="text" id="vs-port" inputmode="numeric"
+            value="${SCREEN_PROTOCOLS[protocol].port}" autocomplete="off" spellcheck="false"></label>
         </div>
-        <p class="hint">A display number works too: <code>1</code> means port 5901. Enclose an IPv6
-          address in brackets.</p>
+        <p class="hint">${rdp ? `Enclose an IPv6 address in brackets.` :
+          `A display number works too: <code>1</code> means port 5901. Enclose an IPv6
+          address in brackets.`}</p>
+        ${rdp ? `<label>User name <span class="field-optional">(optional)</span><input
+          type="text" id="vs-user" placeholder="user, DOMAIN\\user or user@domain"
+          autocomplete="off" autocapitalize="off" spellcheck="false"></label>` : ""}
         <label>Password <span class="field-optional">(optional)</span><input type="password"
           id="vs-pass" autocomplete="off"></label>
         <p class="hint">The shortcut is part of your message, so a password typed here is stored
           in this conversation. Leave it out and open the connection yourself if that matters.</p>
       </div>
-      <p class="hint">Inserts <code id="vs-preview">@VNC</code></p>
+      <p class="hint">Inserts <code id="vs-preview">@${kind}</code></p>
       <p class="form-error hidden" role="alert"></p>
       <div class="m-btns"><button type="button" class="btn" id="vs-cancel">Cancel</button>
       <button type="submit" class="btn btn-pri" id="vs-go">Insert</button></div>
     </form>`, "", () => {
-      if (current()) modalVncShortcut(bid, screens, onInsert, current);
+      if (current()) modalVncShortcut(bid, screens, onInsert, current, protocol);
       else toast("This shortcut's prompt changed · open a new shortcut", "warn", TOAST_LONG);
     });
   const form = m.querySelector("#vs-form");
   const pick = m.querySelector("#vs-pick");
   const fields = m.querySelector("#vs-target");
   const host = m.querySelector("#vs-host"), port = m.querySelector("#vs-port");
+  const user = m.querySelector("#vs-user");
   const pass = m.querySelector("#vs-pass"), preview = m.querySelector("#vs-preview");
   const error = m.querySelector(".form-error");
   form.noValidate = true;
   /* One reading of the fields, so the preview and the insert can never
      disagree about what the message will say. */
   const build = () => {
-    if (pick && pick.value) return { text: `@VNC ${pick.value}` };
+    if (pick && pick.value) return { text: `@${kind} ${pick.value}` };
     const name = host.value.trim();
-    if (!name) return { error: "Enter the VNC server's host name or address", at: host };
+    if (!name) return { error: `Enter the ${kind} server's host name or address`, at: host };
     if (/\s/.test(name)) return { error: "A host name cannot contain a space", at: host };
     const number = port.value.trim();
     if (number && !/^\d{1,5}$/.test(number))
-      return { error: "Port must be a whole number, or a display number below 100", at: port };
+      return { error: rdp ? "Port must be a whole number" :
+        "Port must be a whole number, or a display number below 100", at: port };
+    const login = user ? user.value.trim() : "";
+    if (/["\n]/.test(login))
+      return { error: "A user name with a quotation mark cannot go in a shortcut · " +
+        "use New RDP connection instead", at: user };
     const secret = pass.value;
     if (/["\n]/.test(secret))
       return { error: "A password with a quotation mark cannot go in a shortcut · " +
-        "use New VNC connection instead", at: pass };
-    const target = !number || number === "5900" ? name : `${name}:${number}`;
-    return { text: vncShortcutText(target, secret) };
+        `use New ${kind} connection instead`, at: pass };
+    if (rdp && secret && !login)
+      return { error: "Enter the user name the password belongs to", at: user };
+    const target = !number || number === String(SCREEN_PROTOCOLS[protocol].port) ? name :
+      `${name}:${number}`;
+    return { text: rdp ? rdpShortcutText(target, login, secret) :
+      vncShortcutText(target, secret) };
   };
   const paint = () => {
     if (pick) fields.classList.toggle("hidden", !!pick.value);
     const built = build();
-    preview.textContent = built.text || "@VNC …";
+    preview.textContent = built.text || `@${kind} …`;
     error.classList.add("hidden");
   };
   /* Choosing "New connection…" moves on to the field that now matters;
      picking a screen leaves the focus on the control that made the choice. */
   if (pick) pick.onchange = () => { paint(); if (!pick.value) host.focus(); };
-  for (const field of [host, port, pass]) field.oninput = paint;
+  for (const field of [host, port, user, pass]) if (field) field.oninput = paint;
   m.querySelector("#vs-cancel").onclick = close;
   form.onsubmit = event => {
     event.preventDefault();

@@ -455,56 +455,60 @@ def normalize_host(value) -> str:
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1].strip()
     if not host or len(host) > MAX_HOST:
-        raise VncError("supply the VNC server's host name or address")
+        raise VncError("supply the server's host name or address")
     if any(char.isspace() for char in host) or "\x00" in host or "/" in host:
-        raise VncError("invalid VNC host")
+        raise VncError("invalid host")
     return host
 
 
-def normalize_port(value, display: bool = True) -> int:
+def normalize_port(value, display: bool = True, default: int = DEFAULT_PORT) -> int:
     """Validate a port, optionally reading 0-99 as a VNC display number."""
     if value is None or (isinstance(value, str) and not value.strip()):
-        return DEFAULT_PORT
+        return default
     if isinstance(value, bool):
-        raise VncError("VNC port must be a whole number")
+        raise VncError("port must be a whole number")
     if isinstance(value, str):
         text = value.strip()
         if not text.isdigit():
-            raise VncError("VNC port must be a whole number")
+            raise VncError("port must be a whole number")
         port = int(text)
     elif isinstance(value, int) or (isinstance(value, float) and
                                     value == int(value)):
         port = int(value)
     else:
-        raise VncError("VNC port must be a whole number")
+        raise VncError("port must be a whole number")
     # Bare display numbers are how VNC is written down everywhere: :1 is 5901.
     if display and 0 <= port <= 99:
         port += DEFAULT_PORT
     if not 1 <= port <= 65535:
-        raise VncError("VNC port must be between 1 and 65535")
+        raise VncError("port must be between 1 and 65535")
     return port
 
 
-def parse_target(value) -> tuple:
-    """Split ``host``, ``host:port``, ``host::port`` or ``[v6]:port``."""
+def parse_target(value, default: int = DEFAULT_PORT, display: bool = True) -> tuple:
+    """Split ``host``, ``host:port``, ``host::port`` or ``[v6]:port``.
+
+    ``display`` reads a port below 100 as a VNC display number; Remote Desktop
+    has no such shorthand, so its targets pass False and their own default.
+    """
     text = str(value or "").strip()
     if not text:
-        raise VncError("supply the VNC server's host name or address")
+        raise VncError("supply the server's host name or address")
     if text.startswith("["):
         end = text.find("]")
         if end < 0:
-            raise VncError("invalid VNC host")
+            raise VncError("invalid host")
         return normalize_host(text[1:end]), normalize_port(
-            text[end + 1:].lstrip(":") or None)
+            text[end + 1:].lstrip(":") or None, display, default)
     if "::" in text:
         # host::5901 is the traditional "this is a real port, not a display"
         # spelling, so the display-number shorthand does not apply.
         host, _, port = text.partition("::")
-        return normalize_host(host), normalize_port(port, display=False)
+        return normalize_host(host), normalize_port(port, False, default)
     if text.count(":") == 1:
         host, _, port = text.partition(":")
-        return normalize_host(host), normalize_port(port)
-    return normalize_host(text), DEFAULT_PORT
+        return normalize_host(host), normalize_port(port, display, default)
+    return normalize_host(text), default
 
 
 def _bounded_text(value, limit: int, label: str) -> str:
@@ -735,7 +739,16 @@ class _Viewer:
 
 
 class VncInstance:
-    """One identified connection to one remote VNC server."""
+    """One identified connection to one remote VNC server.
+
+    ``kind`` and ``protocol`` name the wire for the catalog and for messages;
+    the Remote Desktop client in ``puppy.rdp`` subclasses this and replaces
+    only the wire, so everything above it is shared.
+    """
+
+    kind = "VNC"
+    protocol = "vnc"
+    handshake_timeout = HANDSHAKE_TIMEOUT
 
     def __init__(self, vnc_id: str, host: str, port: int, password: str = "",
                  view_only: bool = False, label: str = "",
@@ -790,6 +803,7 @@ class VncInstance:
     def payload(self) -> dict:
         return {
             "id": self.vnc_id,
+            "protocol": self.protocol,
             "host": self.host,
             "port": self.port,
             "label": self.label,
@@ -835,10 +849,10 @@ class VncInstance:
     async def ensure_started(self) -> None:
         """Dial the server, or return at once when the session is already up."""
         if self.closed:
-            raise VncError("VNC {} is closed".format(self.vnc_id))
+            raise VncError("{} {} is closed".format(self.kind, self.vnc_id))
         async with self.start_lock:
             if self.closed:
-                raise VncError("VNC {} is closed".format(self.vnc_id))
+                raise VncError("{} {} is closed".format(self.kind, self.vnc_id))
             if self.connected:
                 return
             self.start_task = asyncio.current_task()
@@ -866,23 +880,27 @@ class VncInstance:
             self.error = "Could not reach {}:{}: {}".format(
                 self.host, self.port, exc.strerror or exc)
             raise VncError(self.error)
-        self.stream = _Stream(self.reader)
+        self.stream = self._open_stream()
         try:
-            await asyncio.wait_for(self._handshake(), HANDSHAKE_TIMEOUT)
+            await asyncio.wait_for(self._handshake(), self.handshake_timeout)
         except asyncio.TimeoutError:
-            self.error = "The VNC server did not complete its handshake"
+            self.error = "The {} server did not complete its handshake".format(
+                self.kind)
             raise VncError(self.error)
         except VncError as exc:
             self.error = str(exc)
             raise
         except (OSError, asyncio.IncompleteReadError) as exc:
-            self.error = "VNC handshake failed: {}".format(exc)
+            self.error = "{} handshake failed: {}".format(self.kind, exc)
             raise VncError(self.error)
         self.connected = True
         self.task = asyncio.ensure_future(self._run())
-        log.info("VNC %s connected to %s:%s (%sx%s, %s)", self.vnc_id,
+        log.info("%s %s connected to %s:%s (%sx%s, %s)", self.kind, self.vnc_id,
                  self.host, self.port, self.width, self.height,
                  self.name or "unnamed")
+
+    def _open_stream(self):
+        return _Stream(self.reader)
 
     async def _handshake(self) -> None:
         stream = self.stream
@@ -1046,7 +1064,7 @@ class VncInstance:
             viewer.invalidate()
             viewer.texts.clear()  # the disconnect must not lose a full notice queue
             viewer.send_json({"type": "gone", "reason": reason})
-        log.info("VNC %s disconnected: %s", self.vnc_id, reason)
+        log.info("%s %s disconnected: %s", self.kind, self.vnc_id, reason)
         _state_changed()
 
     async def close(self, reason: str = "Closed") -> None:
@@ -1670,7 +1688,7 @@ class VncInstance:
         screen, so a timeout here is success, not a failure.
         """
         if not self.connected or self.writer is None:
-            raise VncError("VNC {} is not connected".format(self.vnc_id))
+            raise VncError("{} {} is not connected".format(self.kind, self.vnc_id))
         seq = self.frame_seq
         self._request_update(full=full or not seq, force=True)
         await self._drain()
@@ -1747,10 +1765,10 @@ class VncInstance:
 
     def _agent_writable(self) -> None:
         if not self.connected or self.writer is None:
-            raise VncError("VNC {} is not connected".format(self.vnc_id))
+            raise VncError("{} {} is not connected".format(self.kind, self.vnc_id))
         if self.view_only:
-            raise VncError(
-                "VNC {} is view only, so it accepts no input".format(self.vnc_id))
+            raise VncError("{} {} is view only, so it accepts no input".format(
+                self.kind, self.vnc_id))
 
     def _agent_point(self, x, y) -> tuple:
         if not self.width or not self.height:
@@ -1897,7 +1915,9 @@ class VncRegistry:
     async def create(self, host: str, port: int = DEFAULT_PORT,
                      password: str = "", view_only: bool = False,
                      label: str = "", origin: str = "user",
-                     request_id: str = "") -> VncInstance:
+                     request_id: str = "", protocol: str = "vnc",
+                     username: str = "", width: int = 0,
+                     height: int = 0) -> VncInstance:
         attempt = None
         if request_id:
             self._prune_connect_requests()
@@ -1910,8 +1930,16 @@ class VncRegistry:
         instance = None
         try:
             async with self.lock:
-                instance = VncInstance(self._new_id(), host, port, password,
-                                       view_only, label, origin)
+                if protocol == "rdp":
+                    from puppy import rdp
+                    instance = rdp.RdpInstance(
+                        self._new_id(), host, port, password, view_only, label,
+                        origin, username=username,
+                        width=width or rdp.DEFAULT_WIDTH,
+                        height=height or rdp.DEFAULT_HEIGHT)
+                else:
+                    instance = VncInstance(self._new_id(), host, port, password,
+                                           view_only, label, origin)
                 self.instances[instance.vnc_id] = instance
                 if attempt is not None:
                     attempt["id"] = instance.vnc_id
@@ -1936,7 +1964,7 @@ class VncRegistry:
             if attempt["task"] is None and attempt["expires"] <= now:
                 del self.connect_requests[key]
         if len(self.connect_requests) >= MAX_CONNECT_REQUESTS:
-            raise VncError("Too many recent VNC connection requests; try again shortly")
+            raise VncError("Too many recent connection requests; try again shortly")
 
     async def cancel_create(self, request_id: str) -> None:
         attempt = self.connect_requests.get(request_id)
@@ -1960,7 +1988,7 @@ class VncRegistry:
         vnc_id = normalize_vnc_id(vnc_id)
         instance = self.instances.get(vnc_id)
         if instance is None or instance.closed:
-            raise VncError("VNC {} is closed or unknown".format(vnc_id))
+            raise VncError("Remote screen {} is closed or unknown".format(vnc_id))
         return instance
 
     async def close(self, vnc_id, reason: str = "Closed by user") -> bool:
@@ -2026,7 +2054,7 @@ class VncRegistry:
         if not live:
             return ""
         return "Open connections on this backend: {}.".format(", ".join(
-            "{} ({}:{})".format(item.vnc_id, item.host, item.port)
+            "{} ({} {}:{})".format(item.vnc_id, item.kind, item.host, item.port)
             for item in live))
 
     async def stop(self, reason: str) -> None:
@@ -2052,28 +2080,68 @@ def manager() -> VncRegistry:
     return _manager
 
 
+def _desktop_size(value, label: str) -> int:
+    from puppy import rdp
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise VncError("{} must be a whole number of pixels".format(label))
+    if not rdp.MIN_DIMENSION <= value <= rdp.MAX_DESKTOP:
+        raise VncError("{} must be between {} and {} pixels".format(
+            label, rdp.MIN_DIMENSION, rdp.MAX_DESKTOP))
+    return value
+
+
 def _request_spec(source) -> dict:
+    """One connection request, VNC or RDP, validated the same way for both.
+
+    Remote Desktop adds a user name and the desktop size to ask for, and has
+    no display-number shorthand: its port is 3389 unless one is written.
+    """
     if not isinstance(source, dict):
-        raise VncError("invalid VNC request")
+        raise VncError("invalid connection request")
+    protocol = source.get("protocol", "vnc")
+    if protocol in (None, ""):
+        protocol = "vnc"
+    if protocol not in ("vnc", "rdp"):
+        raise VncError("protocol must be vnc or rdp")
+    rdp_target = protocol == "rdp"
+    default = 3389 if rdp_target else DEFAULT_PORT
     host = source.get("host")
     port = source.get("port")
     # A supplied port is authoritative, so a bare IPv6 address stays intact.
     # Only a lone target string is split, and then IPv6 needs its brackets.
     if port in (None, "") and isinstance(host, str):
-        host, port = parse_target(host)
+        host, port = parse_target(host, default, display=not rdp_target)
     else:
         host = normalize_host(host)
-        port = normalize_port(port)
+        port = normalize_port(port, display=not rdp_target, default=default)
     view_only = source.get("view_only", False)
     if type(view_only) is not bool:
         raise VncError("view_only must be true or false")
-    return {
+    spec = {
+        "protocol": protocol,
         "host": host,
         "port": port,
         "password": _bounded_text(source.get("password"), MAX_PASSWORD, "password"),
         "view_only": view_only,
         "label": _bounded_text(source.get("label"), MAX_LABEL, "label").strip(),
+        "username": "",
+        "width": 0,
+        "height": 0,
     }
+    if rdp_target:
+        from puppy import rdp
+        spec["username"] = _bounded_text(source.get("username"), rdp.MAX_USERNAME,
+                                         "user name").strip()
+        if spec["password"] and not spec["username"]:
+            raise VncError("a Remote Desktop password needs the user name it belongs to")
+        spec["width"] = _desktop_size(source.get("width"), "width")
+        spec["height"] = _desktop_size(source.get("height"), "height")
+    elif any(source.get(key) not in (None, "", 0) for key in
+             ("username", "width", "height")):
+        raise VncError("a user name and a desktop size are Remote Desktop settings")
+    return spec
 
 
 async def h_instances(request: web.Request):
@@ -2093,7 +2161,7 @@ async def h_create(request: web.Request):
     try:
         body = await request.json()
     except Exception:
-        return web.json_response({"error": "invalid VNC request"}, status=400)
+        return web.json_response({"error": "invalid connection request"}, status=400)
     try:
         spec = _request_spec(body)
         request_id = (_connect_request_id(body["request_id"])
@@ -2107,7 +2175,7 @@ async def h_create(request: web.Request):
         attempt = manager().connect_requests.get(request_id)
         if attempt is None or not attempt["cancelled"]:
             raise
-        return web.json_response({"error": "VNC connection cancelled"}, status=409)
+        return web.json_response({"error": "Connection cancelled"}, status=409)
     except VncError as exc:
         return web.json_response({"error": str(exc)}, status=502)
     _state_changed()
@@ -2131,7 +2199,8 @@ async def h_close(request: web.Request):
         return web.json_response({"error": str(exc)}, status=400)
     if not closed:
         return web.json_response(
-            {"error": "VNC {} is closed or unknown".format(vnc_id)}, status=404)
+            {"error": "Remote screen {} is closed or unknown".format(vnc_id)},
+            status=404)
     return web.json_response({"ok": True, "id": vnc_id})
 
 

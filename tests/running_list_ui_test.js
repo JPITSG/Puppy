@@ -47,6 +47,7 @@ const context = vm.createContext({
   backendHasCapability: (backend, cap) => !!backend && backend.capabilities.includes(cap),
   browserEnabledFor: bid => bid === 0 || context.state.browserBackends === "both",
   vncEnabledFor: () => true,
+  screenEnabledFor: () => true,
   findSessionMeta: (bid, sid) => (sid === 4 ? { id: 4, name: "Harbor dashboard" } :
     sid === 9 ? { id: 9, name: "Garden planner" } : null),
   fmtStamp: ts => `stamp ${ts}`,
@@ -94,7 +95,8 @@ const context = vm.createContext({
   },
 });
 vm.runInContext([
-  between("/* ---- what a backend already runs ---- */", '/* the "@VNC" shortcut wizard */'),
+  between("const SCREEN_PROTOCOLS", "function vncTabTitle("),
+  between("/* ---- what a backend already runs ---- */", '/* the "@VNC" and "@RDP" shortcut wizard */'),
   "globalThis.running = { RUNNING_KINDS, runningEntry, runningEntries, runningHidden, runningList, " +
     "refreshRunningCatalogs, " +
     "modalNewTerminal, openBrowserFromMenu, modalNewVnc };",

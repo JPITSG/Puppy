@@ -3736,6 +3736,148 @@ async def vnc_throughput_checks(instance, capture=False):
     print("PASS: VNC throughput pill beside dimensions/FPS on desktop and phone in both themes", flush=True)
 
 
+async def rdp_checks(instance):
+    """Remote Desktop in real layout. A real click on the + menu's New RDP
+    connection opens the remote screen dialog with the RDP fields - port 3389,
+    a user name, the password and a desktop size - on a desktop and a phone in
+    both themes, nothing reaching past the dialog and Connect in view; a real
+    click on Connect posts protocol rdp with the user and the size it shows,
+    and the tab opens knowing its protocol. The pane of an RDP connection
+    names itself RDP, and its address names the user, the security and the
+    certificate's fingerprint. The composer's "@" list offers New RDP
+    connection, whose wizard builds the directive the agent's guidance reads,
+    inserted by a real click."""
+    async def press(expression):
+        point = await evaluate(instance, """(() => {const n=(%s); n.scrollIntoView({block:'nearest'});
+            const r=n.getBoundingClientRect(); return {x:r.left+r.width/2, y:r.top+r.height/2};})()""" % expression)
+        await instance.call("Input.dispatchMouseEvent", dict(point, type="mouseMoved"), session=instance.page_session)
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", dict(point, type=kind, button="left", clickCount=1),
+                                session=instance.page_session)
+
+    shots = os.environ.get("RDP_SHOT")
+    await evaluate(instance, """(() => {
+        window.rdpApi = api; window.rdpPosts = [];
+        api = (bid, path, opts = {}) => {
+            if (path === 'vnc/instances' && opts.method === 'POST') {
+                rdpPosts.push(JSON.parse(JSON.stringify(opts.body)));
+                return Promise.resolve({ok: true, vnc: {id: 'RD01', protocol: 'rdp',
+                    host: opts.body.host, port: 3389, label: ''}});
+            }
+            return rdpApi(bid, path, opts);
+        };
+        window.rdpOpen = openVncTab; window.rdpOpened = [];
+        openVncTab = (...args) => { rdpOpened.push(JSON.parse(JSON.stringify(args))); return null; };
+        return true;
+    })()""")
+    try:
+        posts = 0
+        for width, height, scale, name in [(1440, 900, 1, "desktop"), (390, 844, 2, "mobile")]:
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": scale,
+                "mobile": name == "mobile"}, session=instance.page_session)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                await press("document.querySelector('.workspace-pane.focused .tab-add-wrap .icon-btn')")
+                await until(instance, "!$('tab-add-menu').classList.contains('hidden')")
+                await press("document.querySelector('#tab-add-menu button[data-act=new-rdp]')")
+                await until(instance, "!!document.querySelector('#nv-user')")
+                facts = await evaluate(instance, """(() => {
+                    const m = $('nv-form').closest('.modal'), box = m.getBoundingClientRect();
+                    const shown = [...m.querySelectorAll('input,select,button,.choice-control')]
+                        .filter(n => n.getClientRects().length && getComputedStyle(n).display !== 'none');
+                    const go = $('nv-go').getBoundingClientRect();
+                    return {title: m.querySelector('h2').textContent, port: $('nv-port').value,
+                        size: $('nv-size').value, hint: !!m.querySelector('.hint'),
+                        inside: shown.every(n => { const r = n.getBoundingClientRect();
+                            return r.left >= box.left - 0.5 && r.right <= box.right + 0.5; }),
+                        sideways: m.scrollWidth > m.clientWidth + 1,
+                        connect: go.width > 0 && go.bottom <= innerHeight + 0.5};
+                })()""")
+                assert facts == {"title": "New RDP connection", "port": "3389", "size": "1280x800",
+                                 "hint": True, "inside": True, "sideways": False, "connect": True}, \
+                    (name, theme, facts)
+                if shots:
+                    data = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                               session=instance.page_session)
+                    (BASE / "data" / ("rdp-dialog-%s-%s.png" % (name, theme))).write_bytes(
+                        base64.b64decode(data["data"]))
+                await evaluate(instance, """$('nv-host').value = 'desk.example';
+                    $('nv-user').value = 'CORP\\\\alice'; $('nv-pass').value = 'pw';
+                    $('nv-size').value = '1920x1080';
+                    $('nv-size').dispatchEvent(new Event('change', {bubbles: true})); true""")
+                await press("$('nv-go')")
+                posts += 1
+                await until(instance, "rdpPosts.length === %d && !document.querySelector('#nv-form')" % posts)
+                sent = await evaluate(instance, "rdpPosts[rdpPosts.length - 1]")
+                assert {key: sent[key] for key in ("protocol", "host", "port", "username", "width",
+                                                   "height", "password")} == {
+                    "protocol": "rdp", "host": "desk.example", "port": "3389",
+                    "username": "CORP\\alice", "width": 1920, "height": 1080, "password": "pw"}, sent
+                opened = await evaluate(instance, "rdpOpened[rdpOpened.length - 1]")
+                assert opened[1] == "RD01" and opened[3]["protocol"] == "rdp", opened
+
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+            session=instance.page_session)
+        pane = await evaluate(instance, """(() => {
+            window.rdpPreview = modal('<h2>Remote screen · demo</h2>');
+            rdpPreview.m.style.setProperty('--modal-w', 'var(--modal-w-wide)');
+            window.rdpView = new VncView({bid: 0, vncId: 'RD01', vncHost: 'desk.example',
+                vncPort: 3389, vncProtocol: 'rdp'});
+            rdpView.root.classList.add('on');
+            rdpView.root.style.position = 'relative'; rdpView.root.style.height = '280px';
+            rdpPreview.m.appendChild(rdpView.root);
+            rdpView.handleMessage({type: 'status', id: 'RD01', protocol: 'rdp', host: 'desk.example',
+                port: 3389, connected: true, view_only: false, width: 1280, height: 800,
+                name: 'DESK-01', username: 'CORP\\\\alice', security: 'NLA',
+                certificate: 'AB:CD:EF', viewers: 1});
+            return {kind: rdpView.root.querySelector('.vnc-kind').textContent,
+                    target: rdpView.targetText.textContent, title: rdpView.targetText.title,
+                    state: rdpView.stateText.textContent,
+                    cad: getComputedStyle(rdpView.cadBtn).display !== 'none'};
+        })()""")
+        assert pane == {"kind": "RDP", "target": "desk.example · DESK-01",
+                        "title": "desk.example · DESK-01\nSigned in as CORP\\alice\n"
+                                 "Network Level Authentication over TLS\n"
+                                 "Certificate SHA-256 AB:CD:EF",
+                        "state": "Connected", "cad": True}, pane
+        if shots:
+            data = await instance.call("Page.captureScreenshot", {"format": "png"},
+                                       session=instance.page_session)
+            (BASE / "data" / "rdp-pane.png").write_bytes(base64.b64decode(data["data"]))
+        await evaluate(instance, "rdpView.destroy(); rdpPreview.close(); true")
+
+        # The composer's "@" list and its RDP wizard, by real clicks.
+        await evaluate(instance, """(() => { const c = demoView.composer;
+            c.ta.focus(); c.set('look at @rdp'); c.ta.setSelectionRange(12, 12);
+            c.ta.dispatchEvent(new Event('input', {bubbles: true})); return true; })()""")
+        await until(instance, "demoView.composer.mention && demoView.composer.mention.items.some(i => i.label === 'New RDP connection')")
+        await press("[...demoView.root.querySelectorAll('.mention-pop .mention-item')]"
+                    ".find(n => n.textContent.includes('New RDP connection'))")
+        await until(instance, "!!document.querySelector('#vs-user')")
+        await evaluate(instance, """(() => { for (const [id, value] of [['vs-host', 'desk.example'],
+                ['vs-user', 'CORP\\\\alice'], ['vs-pass', 'two words']]) {
+                $(id).value = value; $(id).dispatchEvent(new Event('input', {bubbles: true})); }
+            return true; })()""")
+        assert await evaluate(instance, "$('vs-preview').textContent") == \
+            '@RDP desk.example CORP\\alice "two words"'
+        await press("$('vs-go')")
+        await until(instance, "!document.querySelector('#vs-form')")
+        assert await evaluate(instance, "demoView.composer.ta.value") == \
+            'look at @RDP desk.example CORP\\alice "two words" '
+        await evaluate(instance, "demoView.composer.set(''); true")
+    finally:
+        await evaluate(instance, "api = rdpApi; openVncTab = rdpOpen; applyTheme('dark'); true")
+        await instance.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+            session=instance.page_session)
+    print("PASS: New RDP connection from the + menu with its fields in view on a desktop and a phone in "
+          "both themes, Connect posting protocol rdp with the user and size shown, the pane naming RDP, "
+          "its user, security and fingerprint, and the composer's RDP wizard inserting the directive",
+          flush=True)
+
+
 async def vnc_connection_checks(instance):
     await evaluate(instance, """(() => {
         window.vncOriginalApi=api;
@@ -7505,6 +7647,7 @@ async def checks(a, b, hub, capture=False):
     await prompt_gutter_checks(a)
     await vnc_throughput_checks(a, capture)
     await vnc_connection_checks(a)
+    await rdp_checks(a)
     await operation_cancellation_checks(a)
     await timer_error_checks(a, capture)
     await usage_error_checks(a, capture)
@@ -11125,6 +11268,9 @@ async def main(args):
             if args.side_search_only:
                 await side_search_checks(instances[0])
                 return
+            if args.rdp_only:
+                await rdp_checks(instances[0])
+                return
             if args.folder_pause_only:
                 await folder_pause_checks(instances[0], sid)
                 return
@@ -11233,6 +11379,7 @@ if __name__ == "__main__":
     parser.add_argument("--browser-drag-only", action="store_true")
     parser.add_argument("--queue-drag-only", action="store_true")
     parser.add_argument("--side-search-only", action="store_true")
+    parser.add_argument("--rdp-only", action="store_true")
     parser.add_argument("--folder-pause-only", action="store_true")
     parser.add_argument("--avif-only", action="store_true")
     parser.add_argument("--composer-resize-only", action="store_true")

@@ -81,7 +81,9 @@ function historyPage(route) {
 const state = {
   backends: [], tabs: [], engCache: {}, engines: [], views: {}, active: "",
   remoteBrowserStatus: {}, remoteUploadSettings: {}, terminalInstances: { 0: [{ id: "T1T1", session_id: 10 }] },
-  vncInstances: { 0: [{ id: "V9V9", host: "192.168.1.10", port: 5901, label: "Kiosk" }] },
+  vncInstances: { 0: [{ id: "V9V9", host: "192.168.1.10", port: 5901, label: "Kiosk" },
+                      { id: "R1R1", protocol: "rdp", host: "desk.example", port: 3389,
+                        label: "" }] },
   browserStatus: { enabled: true, instances: [
     { id: "AB12", session_id: 10, running: true }, { id: "CD34", session_id: 11, running: true }] },
   uploadSettings: { enabled: true, max_file_size_mb: 32, max_file_size_bytes: 32 * 1024 * 1024 },
@@ -140,12 +142,14 @@ const context = vm.createContext({
   refreshChoiceSelect() {}, enhanceChoiceSelect() {},
   browserEnabledFor: () => true,
   vncEnabledFor: () => true,
+  rdpEnabledFor: () => true,
   vncInstancesFor: bid => state.vncInstances[bid] || null,
   vncTargetLabel: tab => tab.vncLabel || tab.vncHost || "",
   vncIcon: icon,
-  modalVncShortcut: (bid, screens, onInsert, current) => {
-    calls.vncWizard.push({ bid, screens, onInsert, current });
-    onInsert("@VNC 192.168.1.20:5900 secret");
+  modalVncShortcut: (bid, screens, onInsert, current, protocol) => {
+    calls.vncWizard.push({ bid, screens, onInsert, current, protocol });
+    onInsert(protocol === "rdp" ? "@RDP desk.example CORP\\alice secret" :
+      "@VNC 192.168.1.20:5900 secret");
   },
   backendHasCapability: (backend, capability) => !!backend && backend.capabilities.includes(capability),
   spawnExecFor: () => false,
@@ -173,7 +177,8 @@ vm.runInContext([
   between("const DRAFT_JOURNAL_VERSION", "function snapshotBrowserState"),
   between("class SharedDraft {", "class SessionView {"),
   between("class SessionView {", "/* ================= TermView"),
-  between("function vncShortcutText(", "function modalVncShortcut("),
+  between("const SCREEN_PROTOCOLS", "function vncTabTitle("),
+  between("function shortcutWord(", "function modalVncShortcut("),
   between("const LOOP_MAX_ITERATIONS", "/* The review sheet:"),
   between("function engineStatusText(", "const headWord ="),
   between("function effectiveQueuedConfig(", "/* One workspace tab"),
@@ -671,8 +676,8 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.equal(b.events.submit, 1, "completing a mention is not a send");
   type(b.ta, "@");
   assert.deepEqual(Array.from(b.composer.mention.items.map(item => item.label)),
-    ["Browser AB12", "Browser CD34", "Terminal T1T1", "VNC V9V9", "Session",
-     "New browser", "New terminal", "New VNC connection"]);
+    ["Browser AB12", "Browser CD34", "Terminal T1T1", "VNC V9V9", "RDP R1R1", "Session",
+     "New browser", "New terminal", "New VNC connection", "New RDP connection"]);
   assert.equal(b.composer.mention.items[3].hint, "192.168.1.10:5901 · Kiosk",
     "a live screen names the server it is watching");
   assert.equal(b.composer.mention.items[1].hint, "Session 11");
@@ -718,6 +723,7 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     "the wizard is offered the screens that already exist");
   assert.equal(b.ta.value, "look at @VNC 192.168.1.20:5900 secret ",
     "the finished directive replaces the token the row was chosen from");
+  assert.equal(calls.vncWizard[0].protocol, "vnc");
   assert.equal(calls.vncWizard[0].current(), false, "history cannot reopen a shortcut over a changed prompt");
   const inserted = b.ta.value;
   calls.vncWizard[0].onInsert("@VNC stale.example");
@@ -748,6 +754,39 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.equal(vm.runInContext(
     "MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)[2]",
     context), "@VNC host.lan", "prose after a target is not a password");
+
+  /* A Windows desktop is the same system: its own rows, its own wizard row
+     handing the wizard its own screens, and a directive with a user name. */
+  type(b.ta, "open @rdp");
+  assert.deepEqual(Array.from(b.composer.mention.items.map(item => item.label)),
+    ["RDP R1R1", "New RDP connection"]);
+  assert.equal(b.composer.mention.items[0].hint, "desk.example", "the default port goes unsaid");
+  b.composer.applyMention(b.composer.mention.items[0]);
+  assert.equal(b.ta.value, "open @RDP R1R1 ");
+  type(b.ta, "open @rdp");
+  calls.vncWizard.length = 0;
+  b.composer.applyMention(b.composer.mention.items[1]);
+  assert.equal(calls.vncWizard[0].protocol, "rdp");
+  assert.deepEqual(Array.from(calls.vncWizard[0].screens, row => row.id), ["R1R1"],
+    "the RDP wizard is offered the RDP screens alone");
+  assert.equal(b.ta.value, "open @RDP desk.example CORP\\alice secret ");
+  const rdpShortcut = vm.runInContext("rdpShortcutText", context);
+  assert.equal(rdpShortcut("desk.example", "", ""), "@RDP desk.example");
+  assert.equal(rdpShortcut("desk.example:3390", "alice", ""), "@RDP desk.example:3390 alice");
+  assert.equal(rdpShortcut("10.0.0.5", "First Last", "two words"),
+    '@RDP 10.0.0.5 "First Last" "two words"');
+  for (const built of ["@RDP R1R1", rdpShortcut("desk.example", "CORP\\alice", "pw"),
+                       rdpShortcut("[fe80::1]:3390", "First Last", "two words"),
+                       rdpShortcut("desk", "alice@corp.example", "")]) {
+    context.mentionSample = built;
+    assert.equal(vm.runInContext(
+      "MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)[2]",
+      context), built, built);
+  }
+  context.mentionSample = "@RDP desk.example and then sign in";
+  assert.equal(vm.runInContext(
+    "MENTION_TOKEN_RE.lastIndex=0; MENTION_TOKEN_RE.exec(mentionSample)[2]",
+    context), "@RDP desk.example", "prose after a target is not a user name");
   type(b.ta, "");
 
   for (const text of ["@Session-Project-plan-A7K2", "@Session-Żółć-東京-A7K2"]) {

@@ -1,10 +1,11 @@
 """Turn-scoped MCP tools for the remote screens Puppy is connected to.
 
-Puppy remains the only VNC client: the stdio MCP child receives a session/turn
-identity and a private Unix socket, and every tool is one high-level action on
-a connection the node already owns.  Nothing here speaks RFB, and no second
-path to the remote server exists - the agent turns exactly the update loop the
-console's viewers turn.
+Puppy remains the only VNC and Remote Desktop client: the stdio MCP child
+receives a session/turn identity and a private Unix socket, and every tool is
+one high-level action on a connection the node already owns.  Nothing here
+speaks RFB or RDP, and no second path to the remote server exists - the agent
+turns exactly the update loop the console's viewers turn.  Both protocols
+share one ID space, one selection per session and one toolset.
 
 The screen is the whole interface, so the toolset is what a person sitting in
 front of that machine has: look, move, click, drag or swipe, scroll, type,
@@ -33,17 +34,23 @@ MAX_RESPONSE = 20 * 1024 * 1024
 REQUEST_TIMEOUT = 65.0
 
 TOOL_INSTRUCTIONS = (
-    "A Puppy VNC connection is a live view of another machine's screen, on "
-    "this session's backend. VNC IDs are four uppercase A-Z/0-9 characters. "
-    "Use these tools only when the user asks you to work on a remote screen or "
-    "names a VNC ID; they are not a shell and not a browser. The chat box "
-    "inserts mentions in the form \"@VNC A8AR\" (use exactly that open "
-    "connection) and \"@VNC host:port\" or \"@VNC host:port password\" (connect "
-    "to that server first with connect, passing the host, port and password "
-    "exactly as written; a display number such as :1 means port 5901, IPv6 goes "
-    "in brackets, and a quoted password keeps its spaces). Never repeat a "
-    "password back into the conversation. Once a connection is selected, omit "
-    "vnc_id and every tool uses it. "
+    "A Puppy remote screen is a live view of another machine's screen, over "
+    "VNC or Windows Remote Desktop (RDP), on this session's backend. Screen IDs "
+    "are four uppercase A-Z/0-9 characters. Use these tools only when the user "
+    "asks you to work on a remote screen or names a screen ID; they are not a "
+    "shell and not a browser. The chat box inserts mentions in the form "
+    "\"@VNC A8AR\" or \"@RDP A8AR\" (use exactly that open connection), "
+    "\"@VNC host:port\" or \"@VNC host:port password\" (connect to that VNC "
+    "server first with connect, passing the host, port and password exactly as "
+    "written; a display number such as :1 means port 5901), and \"@RDP "
+    "host:port\" or \"@RDP host:port user password\" (connect with protocol "
+    "rdp, passing the host, port, user name and password exactly as written; "
+    "the port is 3389 unless one is written, and a user name may be "
+    "DOMAIN\\user or user@domain). IPv6 goes in brackets, and a quoted value "
+    "keeps its spaces. Never repeat a password back into the conversation. "
+    "Once a connection is selected, omit screen_id and every tool uses it. "
+    "Disconnecting from a Remote Desktop server leaves its Windows session "
+    "running and locked; signing out of Windows ends it. "
     "Work the way a person at that machine would: take a screenshot, decide "
     "what to do from what you see, act, then screenshot again to confirm it "
     "happened - never assume an action worked. Coordinates are always pixels "
@@ -76,11 +83,12 @@ def _tool(name, description, properties=None, required=None, read_only=False,
                             "settles, instead of a separate screenshot call."),
         }
     if screen_target:
-        properties["vnc_id"] = {
+        properties["screen_id"] = {
             "type": "string", "pattern": "^[A-Z0-9]{4}$",
             "description": (
-                "Existing VNC ID named by the user, e.g. via a \"@VNC A8AR\" "
-                "mention. Omit to use this chat's current remote screen."),
+                "Existing screen ID named by the user, e.g. via a \"@VNC A8AR\" "
+                "or \"@RDP A8AR\" mention. Omit to use this chat's current "
+                "remote screen."),
         }
     schema = {"type": "object", "properties": properties,
               "additionalProperties": False}
@@ -115,22 +123,36 @@ TOOLS = [
     _tool(
         "screens",
         "List the remote screens this backend is connected to, with their IDs, "
-        "servers and sizes.",
+        "protocols, servers and sizes.",
         read_only=True, screen_target=False),
     _tool(
         "connect",
-        "Open a VNC connection from this backend to a remote screen and make it "
-        "this chat's current one. Use only for a server the user named, e.g. "
-        "through a \"@VNC 192.168.1.10:5900 password\" mention.",
+        "Open a VNC or Remote Desktop connection from this backend to a remote "
+        "screen and make it this chat's current one. Use only for a server the "
+        "user named, e.g. through a \"@VNC host:5900 password\" or \"@RDP host "
+        "user password\" mention.",
         {
+            "protocol": {"type": "string", "enum": ["vnc", "rdp"],
+                         "default": "vnc",
+                         "description": "vnc, or rdp for Windows Remote Desktop."},
             "host": {"type": "string", "maxLength": 255,
                      "description": ("Host name or address, optionally with "
-                                     ":port or :display, IPv6 in brackets.")},
+                                     ":port (or a VNC :display), IPv6 in "
+                                     "brackets.")},
             "port": {"type": "integer", "minimum": 0, "maximum": 65535,
-                     "description": "Port, or a display number below 100 (1 = 5901)."},
+                     "description": ("Port. For VNC a number below 100 is a "
+                                     "display (1 = 5901); RDP defaults to "
+                                     "3389.")},
+            "username": {"type": "string", "maxLength": 256,
+                         "description": ("RDP only: the Windows user name, "
+                                         "DOMAIN\\user or user@domain.")},
             "password": {"type": "string", "maxLength": 256,
-                         "description": ("The server's VNC password, if it asks "
-                                         "for one. Never store or repeat it.")},
+                         "description": ("The server's password, if it asks for "
+                                         "one. Never store or repeat it.")},
+            "width": {"type": "integer", "minimum": 200, "maximum": 4096,
+                      "description": "RDP only: desktop width to ask for (1280)."},
+            "height": {"type": "integer", "minimum": 200, "maximum": 4096,
+                       "description": "RDP only: desktop height to ask for (800)."},
             "label": {"type": "string", "maxLength": 120,
                       "description": "Short name for this screen in the console."},
             "view_only": {"type": "boolean", "default": False,
@@ -205,8 +227,8 @@ TOOLS = [
         }, required=["x", "y", "to_x", "to_y"], with_screenshot=True),
     _tool(
         "scroll",
-        "Turn the wheel where the pointer is. VNC has no scroll axis, so this "
-        "sends the wheel button taps a physical mouse sends.",
+        "Turn the wheel where the pointer is, one notch per click, as a "
+        "physical mouse does.",
         {
             "x": _point("Horizontal position"), "y": _point("Vertical position"),
             "direction": {"type": "string",
@@ -248,8 +270,9 @@ TOOLS = [
         }, read_only=True, with_screenshot=True),
     _tool(
         "disconnect",
-        "Close a VNC connection and its tab. Use only when the user asks to "
-        "close it; leaving it open costs nothing while nobody is watching.",
+        "Close a remote screen connection and its tab. Use only when the user "
+        "asks to close it; leaving it open costs nothing while nobody is "
+        "watching.",
         destructive=True),
 ]
 
@@ -354,12 +377,13 @@ def _peer_is_owner(writer) -> bool:
 
 def _screen_line(instance) -> str:
     """The one description of a screen every result starts from."""
-    from puppy import vnc
-    target = instance.host if instance.port == vnc.DEFAULT_PORT else \
+    default = 3389 if instance.protocol == "rdp" else 5900
+    target = instance.host if instance.port == default else \
         "{}:{}".format(instance.host, instance.port)
-    parts = ["VNC {} on {}".format(instance.vnc_id, target)]
+    parts = ["{} {} on {}".format(instance.kind, instance.vnc_id, target)]
     for extra in (instance.label,
-                  instance.name if instance.name != instance.label else ""):
+                  instance.name if instance.name != instance.label else "",
+                  getattr(instance, "username", "")):
         if extra:
             parts.append(extra)
     if instance.width and instance.height:
@@ -433,14 +457,15 @@ async def _dispatch(request: dict) -> dict:
             "this VNC tool belongs to a turn that is no longer running")
 
     arguments = dict(params)
-    requested_id = arguments.pop("vnc_id", None)
+    requested_id = arguments.pop("screen_id", None)
     manager = vnc.manager()
     try:
         if method == "screens":
             live = manager.instance_payloads()
             if not live:
-                return {"text": "This backend has no VNC connection open. "
-                                "Ask the user for a host, then use connect."}
+                return {"text": "This backend has no remote screen connection "
+                                "open. Ask the user for a host, then use "
+                                "connect."}
             bound = manager.bindings.get(session_id)
             lines = ["Remote screens on this backend:"]
             for item in live:
@@ -451,9 +476,13 @@ async def _dispatch(request: dict) -> dict:
 
         if method == "connect":
             spec = vnc._request_spec({
+                "protocol": arguments.get("protocol", "vnc"),
                 "host": arguments.get("host"),
                 "port": arguments.get("port"),
+                "username": arguments.get("username"),
                 "password": arguments.get("password"),
+                "width": arguments.get("width"),
+                "height": arguments.get("height"),
                 "label": arguments.get("label"),
                 "view_only": arguments.get("view_only", False),
             })
@@ -480,8 +509,8 @@ async def _act(instance, session_id: int, method: str, arguments: dict) -> dict:
     head = _screen_line(instance)
     if method == "disconnect":
         if not await manager.close(instance.vnc_id, "Closed by linked agent"):
-            raise VncAgentError(
-                "VNC {} is already closed".format(instance.vnc_id))
+            raise VncAgentError("{} {} is already closed".format(
+                instance.kind, instance.vnc_id))
         return {"text": "Closed {}.".format(head)}
 
     want_image = arguments.pop("screenshot", False) is True

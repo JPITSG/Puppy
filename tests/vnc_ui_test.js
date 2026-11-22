@@ -51,7 +51,11 @@ const context = vm.createContext({
   setTimeout(fn, wait) { const id = ++timerSerial; timers.set(id, { fn, wait }); return id; },
   clearTimeout(id) { timers.delete(id); },
   backendConnectionAllowed: () => true,
+  vncInstancesFor: () => null,
 });
+/* the protocol helpers the pane names itself with: "VNC" or "RDP" */
+vm.runInContext(source.slice(source.indexOf('const SCREEN_PROTOCOLS'),
+  source.indexOf('function vncTabTitle(')), context);
 vm.runInContext(source.slice(start, end) + ';this.View = VncView;', context);
 vm.runInContext(source.slice(source.indexOf('function fmtBytes('),
   source.indexOf('function fmtEndpoint(')), context);
@@ -83,7 +87,7 @@ function wire(node) { node.classList.classes = node.classes; return node; }
 function makeView(overrides = {}) {
   const view = Object.create(View.prototype);
   const nodes = {};
-  for (const name of ['idText', 'targetText', 'cadBtn', 'kbdBtn', 'stateText',
+  for (const name of ['idText', 'kindText', 'targetText', 'cadBtn', 'kbdBtn', 'stateText',
                       'stateDot', 'sizeText', 'fpsText', 'frameStats', 'throughputText', 'root', 'canvas'])
     nodes[name] = wire(element());
   const sent = [];
@@ -451,6 +455,7 @@ context.state = { backends: [{ id: 7, capabilities: ['vnc-instances', 'vnc-conne
 context.backendName = bid => `Backend ${bid}`;
 context.backendHasCapability = (backend, cap) => !!backend?.capabilities.includes(cap);
 context.vncEnabledFor = () => true;
+context.screenEnabledFor = (bid, protocol) => protocol !== 'rdp' || bid !== 8;
 context.esc = value => String(value);
 context.newDraftClientId = () => `fixture-request-${++nextId}`;
 context.openVncTab = (...args) => opened.push(args);
@@ -473,8 +478,8 @@ context.api = (bid, path, options) => {
 };
 // the list of connections already open has its own suite (running_list_ui_test.js)
 context.runningList = () => ({ show() {}, paint() {} });
-vm.runInContext(source.slice(source.indexOf('function modalNewVnc('),
-  source.indexOf('/* the "@VNC" shortcut wizard */')), context);
+vm.runInContext(source.slice(source.indexOf('const RDP_SIZES'),
+  source.indexOf('/* the "@VNC" and "@RDP" shortcut wizard */')), context);
 const nv = id => dialog.m.querySelector(`#nv-${id}`);
 function connectForm(bid = 0) {
   requests = []; opened = []; notices = []; pendingPosts = [];
@@ -533,5 +538,32 @@ const result = { vnc: { id: 'AB12', host: 'screen.example', port: 5900, label: '
   pendingPosts[1].resolve(result);
   await work;
   assert.equal(opened.length, 1);
+
+  /* Remote Desktop is the same dialog: a user name, a desktop size, the
+     protocol named in the request, and a backend that cannot dial it absent */
+  requests = []; opened = []; notices = []; pendingPosts = [];
+  context.state = { backends: [{ id: 7, name: 'Seven', capabilities: [] },
+                               { id: 8, name: 'Eight', capabilities: [] }] };
+  context.modalNewVnc('fixture-group', 'rdp');
+  assert.ok(dialog.m.innerHTML.includes('New RDP connection'));
+  assert.equal(nv('port').value, '3389');
+  assert.deepEqual([...nv('be').querySelectorAll('option')].map(option => option.value),
+    ['0', '7'], 'a backend without Remote Desktop is not offered');
+  assert.deepEqual([...nv('size').querySelectorAll('option')].map(option => option.value)[0],
+    '1280x800', 'the default desktop size comes first');
+  nv('host').value = 'desk.example';
+  nv('pass').value = 'secret';
+  await nv('form').onsubmit({ preventDefault() {} });
+  assert.equal(pendingPosts.length, 0, 'a password needs the user it belongs to');
+  assert.ok(dialog.m.querySelector('.form-error').textContent.includes('user name'));
+  nv('user').value = 'CORP\\alice';
+  nv('size').value = '1920x1080';
+  work = nv('form').onsubmit({ preventDefault() {} });
+  const body = requests.at(-1).body;
+  assert.deepEqual([body.protocol, body.username, body.width, body.height, body.host, body.port],
+    ['rdp', 'CORP\\alice', 1920, 1080, 'desk.example', '3389']);
+  pendingPosts[0].resolve({ vnc: { id: 'RD01', host: 'desk.example', port: 3389, label: '' } });
+  await work;
+  assert.equal(opened.at(-1)[3].protocol, 'rdp', 'the tab knows its protocol from the start');
   console.log('vnc disconnect and connection-modal tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

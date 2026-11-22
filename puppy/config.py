@@ -112,15 +112,16 @@ DEFAULT_TERMINAL_SYSTEM_PROMPT = (
 # node that serves the execution API. A remote screen is somebody else's
 # machine, so the default keeps the tools to what the user actually asked for.
 DEFAULT_VNC_SYSTEM_PROMPT = (
-    "When the Puppy VNC tools are available, use them only when the user asks "
-    "you to look at or work on a remote screen, or names a VNC ID. They drive "
-    "another machine's mouse and keyboard through Puppy's own VNC client: "
-    "there is no shell, no file access and no undo, so look before you act and "
-    "verify afterwards with a fresh screenshot. Do not connect to a server the "
-    "user has not named, keep passwords out of the conversation, and leave "
-    "anything unrelated to the request alone. The user watches the same screen "
-    "and may be using it, so avoid destructive actions, sign-outs and reboots "
-    "unless the request clearly authorizes them."
+    "When the Puppy remote screen tools are available, use them only when the "
+    "user asks you to look at or work on a remote screen, or names a VNC or RDP "
+    "ID. They drive another machine's mouse and keyboard through Puppy's own "
+    "VNC and Remote Desktop clients: there is no shell, no file access and no "
+    "undo, so look before you act and verify afterwards with a fresh "
+    "screenshot. Do not connect to a server the user has not named, keep "
+    "passwords out of the conversation, and leave anything unrelated to the "
+    "request alone. The user watches the same screen and may be using it, so "
+    "avoid destructive actions, sign-outs and reboots unless the request "
+    "clearly authorizes them."
 )
 
 # This is model-visible on every turn because the spawn bridge is always

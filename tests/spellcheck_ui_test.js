@@ -100,6 +100,7 @@ const context = vm.createContext({
   uploadSettingsFor: () => null, rememberUploadSettings: () => null,
   backendSupportsFileUploads: () => true, backendConnectionAllowed: () => true,
   nodeStateStreamActive: () => true, browserEnabledFor: () => false, vncEnabledFor: () => false,
+  rdpEnabledFor: () => false,
   backendHasCapability: () => false, spawnExecFor: () => false,
   findSessionMeta: () => null, backendName: () => "this node",
   browserInstancesFor: () => null, terminalInstancesFor: () => null, uploadPreviewUrl: () => "",

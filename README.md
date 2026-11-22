@@ -407,7 +407,7 @@ hide the checkboxes and keep the saved Enter choice.
 Everything typed at an agent goes through one shared prompt box: `Enter` sends
 (using the chosen action during a running turn),
 `Shift+Enter` or `Ctrl+J` breaks a line, and `@` opens the mention list (browsers,
-terminals, VNC screens, sessions, a new spawn; session chats also offer **New loop**).
+terminals, VNC and RDP screens, sessions, a new spawn; session chats also offer **New loop**).
 A word starting with `./` or `../` opens a folder list in the same place: the
 subfolders of that path, relative to the folder the session's agent works in (a
 schedule's own folder in the schedule editor), with `..` first to step up a level.
@@ -578,7 +578,7 @@ so opening the copy again shows the marks to change, and undoing them all
 brings the original back.
 
 Pictures a tool hands back to the engine open the same way: Claude Code reading
-an image or a screenshot, the managed browser's and VNC captures, and the images
+an image or a screenshot, the managed browser's and remote screens' captures, and the images
 in Codex's MCP results (an image in an OpenCode tool update is read the same
 way). The backend keeps a copy with the session's files, so a folded tool card
 shows a small thumbnail beside its status and the opened card shows the picture
@@ -771,7 +771,7 @@ menu on the session brings them back once they are hidden.
 
 ### Terminals, browsers and remote screens
 
-Browser, terminal and VNC identity and session-link rows stay on one line. When
+Browser, terminal and remote screen identity and session-link rows stay on one line. When
 space is tight, their edges fade and you can scroll sideways with touch, a
 trackpad, or the mouse wheel, just like the chat chips and tab bar.
 
@@ -878,18 +878,47 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   avoid this, connect through the VNC tab's dialog and mention only its ID.
   A screen the agent touches opens as a tab beside the chat, so you can
   watch it work and take over at any moment.
-- **Finding what is already running.** Browsers, terminals and VNC
-  connections belong to their backend, not to the console that opened them,
+- **Windows desktops over RDP.** *New RDP connection* dials a Windows Remote
+  Desktop server from the chosen backend into the same kind of tab as a VNC
+  screen: the same pills, Ctrl+Alt+Del button, typing row, unattended timeout,
+  ID and agent toolset. Give it a host (port 3389 unless you write one), a user
+  name (`user`, `DOMAIN\user` or `user@domain`), the password, and one of the
+  dialog's desktop sizes (1280 × 800 unless you pick another; the agent may ask
+  for any size from 200 to 4096 pixels a side, and the server has the last
+  word). Puppy is the Remote Desktop client itself, with nothing installed: it
+  signs in with Network Level Authentication (CredSSP with NTLMv2, not
+  Kerberos, inside TLS), sends the password only after the server has proved
+  it holds both the password's key and the TLS key the connection is
+  encrypted with, and keeps the password only in memory. A server that allows
+  connections without Network Level Authentication is reached over TLS alone;
+  given no user name, it shows its own sign-in screen. The tab's address
+  tooltip names the user, the security in use and the certificate's SHA-256
+  fingerprint, because Remote Desktop certificates are almost always
+  self-signed. Puppy asks for plain bitmaps only (Interleaved RLE or
+  uncompressed, at 15, 16 or 24 bits per pixel) and decodes them on the
+  backend; keys travel as scan codes and typed text as Unicode, so any
+  keyboard layout types the right characters. With nobody watching, Puppy
+  tells the server to stop sending the screen and asks for it again when you
+  or the agent look. Closing the tab disconnects and leaves the Windows
+  session running and locked for the next connection. `@RDP A8AR` points the
+  agent at an open connection and `@RDP host user password` at a server to
+  dial; the `@` menu's *New RDP connection* wizard builds either. Not
+  supported: legacy RDP security, servers that hand out client licenses
+  (Remote Desktop Session Hosts with licensing configured), smart-card sign-in,
+  redirection by a connection broker, and the clipboard, audio, drive and other
+  channels.
+- **Finding what is already running.** Browsers, terminals and remote screens
+  belong to their backend, not to the console that opened them,
   so one an agent opened while no console was watching, or one opened from
-  another machine, has no tab in this console. *New browser*, *New terminal*
-  and *New VNC connection* list what the chosen backend already runs of their
-  kind - who started each, the session it serves, what it runs or reaches,
-  and when - with the ones that have no tab here first. A click shows it in a
-  tab, attached to that same browser, terminal or connection rather than a new
-  one. A session's chat head also shows a chip for each browser, running
-  terminal and VNC connection its backend binds to that session (a screen is
-  bound to the session whose agent last used it), with a tab here or without,
-  and a click opens it beside the chat. *New browser* still opens a browser at once
+  another machine, has no tab in this console. *New browser*, *New terminal*,
+  *New VNC connection* and *New RDP connection* list what the chosen backend
+  already runs of their kind - who started each, the session it serves, what
+  it runs or reaches, and when - with the ones that have no tab here first. A
+  click shows it in a tab, attached to that same browser, terminal or
+  connection rather than a new one. A session's chat head also shows a chip for
+  each browser, running terminal and remote screen its backend binds to that
+  session (a screen is bound to the session whose agent last used it), with a
+  tab here or without, and a click opens it beside the chat. *New browser* still opens a browser at once
   when its one backend holds nothing else to show.
 
 ### Agents that delegate and collaborate
@@ -1032,7 +1061,7 @@ with a window of history around it.
   top dialog, phone drawer or Host activity panel; Forward reopens supported
   surfaces. Settings drafts and recent reading/search positions stay in place.
   History never repeats a command or recreates a closed terminal, browser or
-  VNC connection. Leaving a form runs its usual cleanup; Forward opens a fresh
+  remote screen connection. Leaving a form runs its usual cleanup; Forward opens a fresh
   form. Reload restores available views and message locations, while recent
   search results and dialog reopen state live only in this page's memory.
   Dialogs also have a close X in the header; it follows the same dismissal and
@@ -1053,7 +1082,7 @@ with a window of history around it.
   console's light or dark theme, never changes the main window's saved tabs,
   and closes when you close its tab. A link to another session opens in the
   window it came from, or in a new console tab once that one is closed.
-  Browsers, terminals and VNC screens its agent opens appear in the window it
+  Browsers, terminals and remote screens its agent opens appear in the window it
   came from. If the browser blocks the pop-up, a notice says so and the tab
   stays where it was.
 - **Sidebar width.** Drag its right edge to resize it, or double-click to reset
@@ -1333,7 +1362,8 @@ backend name stays readable; long button labels wrap within the button.
   background task duration - how long a turn keeps waiting on background tasks
   after the agent answers (24 hours; that wait does not count toward the turn
   duration) - spawned-agent runtime (2 hours) and inactivity (10 minutes), and
-  unattended terminal, browser and VNC timeouts (15 minutes each). Values are
+  unattended terminal, browser and remote screen (VNC and RDP) timeouts (15
+  minutes each). Values are
   seconds; **0 means unlimited**. Turn and spawn settings initialize new runs;
   changing an unattended timeout restarts that timer immediately. Agent
   interaction renews unattended timers. Spawned agents still stop with their
@@ -1363,7 +1393,7 @@ and styles are reused in server memory until their source changes; authenticatio
 and the browser's `no-store` policy still apply to every load.
 Terminal scripts and styles load when the first terminal is shown; Markdown
 parsing and sanitizing libraries load when a conversation opens. Concurrent panes
-share the same downloads, and later panes reuse them. Browser and VNC views use
+share the same downloads, and later panes reuse them. Browser and remote screen views use
 built-in browser APIs and require no additional libraries.
 
 ## Data, privacy and security
@@ -1409,14 +1439,19 @@ built-in browser APIs and require no additional libraries.
   the controller relays everything over channels it already authenticates.
   Managed browsers are reachable only through Puppy's private debugging pipe,
   never a DevTools port.
-- **VNC connection passwords stay in memory.** A connection's password lives
-  only in the backend process that dialled the server, for as long as that
-  connection exists; the VNC client does not persist it. A password you include in a chat
-  prompt or tool call can still appear in the transcript and its backups, so
-  use the connection dialog and share the connection ID with the agent.
-  RFB's own challenge is legacy DES over at most eight characters and its
-  screen traffic is unencrypted, so treat a VNC server the way VNC itself does:
-  reach it over a trusted network or a tunnel, not the open internet.
+- **Remote screen passwords stay in memory.** A VNC or RDP connection's
+  password lives only in the backend process that dialled the server, for as
+  long as that connection exists; neither client persists it. A password you
+  include in a chat prompt or tool call can still appear in the transcript and
+  its backups, so use the connection dialog and share the connection ID with
+  the agent. RFB's own challenge is legacy DES over at most eight characters
+  and its screen traffic is unencrypted, so treat a VNC server the way VNC
+  itself does: reach it over a trusted network or a tunnel, not the open
+  internet. Remote Desktop traffic is TLS-encrypted, and with Network Level
+  Authentication the password is sent only to a server that proves it holds
+  both the password's key and the certificate's key; without it, the password
+  rides TLS to a certificate nobody verified, so check the fingerprint the
+  tab shows.
 - **Clocks follow the server.** Times in the console use the Puppy process's
   locale hour cycle, not the browser's.
 
@@ -1482,6 +1517,7 @@ python3 tests/mcp_startup_test.py     # source/zipapp MCP startup with filtered 
 python3 tests/workspace_sync_test.py # remote workspace sync and conflicts
 python3 tests/browser_test.py        # managed browsers against a stub Chromium
 python3 tests/vnc_test.py            # the VNC client and its agent tools against a stub RFB server
+python3 tests/rdp_test.py            # the RDP client, its sign-in and agent tools against a stub RDP server
 node tests/vnc_ui_test.js            # damage painting, button mapping, input coalescing, quiet reconnection
 python3 tests/browser_cursor_test.py # bounded, private cursor reads and input latency
 node tests/browser_cursor_ui_test.js # cursor refresh, stale replies and viewer lifecycle

@@ -54,14 +54,16 @@ renewal/cancellation rules remain active. Old peers accept only their existing
 30–7200-second explicit limits; a controller refuses other explicit values
 before sending to a peer without `timeout-settings`.
 
-Browser, terminal and VNC idle settings count time without connected viewers;
+Browser, terminal and remote screen (VNC and RDP) idle settings count time
+without connected viewers;
 agent interaction restarts the timer. A settings change cancels the previous
 timer and starts a full interval for each running, unviewed instance, or leaves
 no timer for zero. Connected viewers prevent unattended shutdown. These are
 not an absence-of-output detector: an unattended terminal command may still
-be running when a finite timeout stops it. A lapsed VNC timer drops the remote
-session but keeps its identity and its tab: reattaching a viewer dials the same
-server again, so unlike a terminal nothing is lost.
+be running when a finite timeout stops it. A lapsed remote screen timer drops
+the connection but keeps its identity and its tab: reattaching a viewer dials
+the same server again, so unlike a terminal nothing is lost (a Windows session
+behind an RDP connection keeps running, locked).
 
 ## Existing installations and backups
 

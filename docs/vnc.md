@@ -6,6 +6,12 @@ console viewer only the rectangles that changed. Nothing is installed, spawned
 or proxied: the whole client is `asyncio`, `zlib` and a small DES for RFB's
 legacy challenge.
 
+The same surface also dials Windows Remote Desktop: an RDP connection is an
+instance of this one with another wire beneath it, sharing the IDs, the
+catalog, the viewer protocol below, the pane and the agent's tools. See
+[Remote Desktop connections](rdp.md). Every catalog entry and status payload
+names its `protocol`, `vnc` or `rdp`.
+
 ## What is spoken
 
 | Layer | Supported |
@@ -160,14 +166,15 @@ whole factor, and the result states the screen size, the image size and the
 factor, because every coordinate an action takes is a remote screen pixel.
 
 The chat box inserts `@VNC A8AR` for an open connection and
-`@VNC host:port password` for one to dial; `vnc_agent.TOOL_INSTRUCTIONS` and
-`modalVncShortcut` in `app.js` are the two halves of that wording and must stay
-in lockstep. Each screen first touched in a turn broadcasts one ephemeral
+`@VNC host:port password` for one to dial (`@RDP` likewise, with a user name
+before the password); `vnc_agent.TOOL_INSTRUCTIONS` and `modalVncShortcut` in
+`app.js` are the two halves of that wording and must stay in lockstep. Every
+tool addresses a connection of either kind by its `screen_id`. Each screen first touched in a turn broadcasts one ephemeral
 `vnc_activity` event, so its tab appears beside the chat without taking focus,
 and the node remembers which screen a session's tools mean until it is closed.
 The catalog names that session as each connection's additive `session_id` (the
 session whose agent last chose the screen, `null` before any has), so that
-chat's head shows a `VNC <ID>` chip for it like a browser's or a terminal's,
+chat's head shows a `VNC <ID>` (or `RDP <ID>`) chip for it like a browser's or a terminal's,
 in every console, with a tab there or without.
 The editable policy sent with every turn is Settings → System prompt → Remote
 screen guidance (`system_prompt.vnc`).

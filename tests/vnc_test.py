@@ -436,8 +436,9 @@ def check_validation() -> None:
     assert spec["host"] == "fe80::1" and spec["port"] == 5901, spec
     spec = vnc._request_spec({"host": " desk.example ", "port": "3",
                               "label": " Lab screen ", "view_only": True})
-    assert spec == {"host": "desk.example", "port": 5903, "password": "",
-                    "view_only": True, "label": "Lab screen"}, spec
+    assert spec == {"protocol": "vnc", "host": "desk.example", "port": 5903,
+                    "password": "", "view_only": True, "label": "Lab screen",
+                    "username": "", "width": 0, "height": 0}, spec
     try:
         vnc._request_spec({"host": "desk", "port": 1, "view_only": "yes"})
     except vnc.VncError:
@@ -1644,7 +1645,7 @@ async def check_agent_bridge(session_id: int) -> None:
             "method": method, "params": params})
 
         empty = await call("screens")
-        assert "no VNC connection open" in empty["text"], empty
+        assert "no remote screen connection open" in empty["text"], empty
         try:
             await call("screenshot")
         except vnc_agent.VncAgentError as exc:
@@ -1687,9 +1688,9 @@ async def check_agent_bridge(session_id: int) -> None:
         assert "unchanged" in waited["text"], waited
 
         # An explicit ID selects; an unknown one is refused, not invented.
-        assert (await call("screenshot", vnc_id=vnc_id))["image"]
+        assert (await call("screenshot", screen_id=vnc_id))["image"]
         try:
-            await call("screenshot", vnc_id="ZZZZ")
+            await call("screenshot", screen_id="ZZZZ")
         except vnc_agent.VncAgentError as exc:
             assert "closed or unknown" in str(exc), exc
         else:
@@ -1705,7 +1706,7 @@ async def check_agent_bridge(session_id: int) -> None:
             raise AssertionError("a stale turn kept its VNC tools")
         hub._active_turn_id = "vnc-turn"
 
-        closed = await call("disconnect", vnc_id=vnc_id)
+        closed = await call("disconnect", screen_id=vnc_id)
         assert "Closed VNC {}".format(vnc_id) in closed["text"], closed
         assert registry.instance_payloads() == []
         assert session_id not in registry.bindings, "a closed screen is unbound"
@@ -1804,7 +1805,8 @@ def check_static_contract() -> None:
     assert "function modalNewVnc" in app_js
     # The composer's half of the mention contract vnc_agent.TOOL_INSTRUCTIONS
     # describes: existing screens by ID, and the wizard that builds a target.
-    assert "`@VNC ${inst.id}`" in app_js
+    # The same rows name a Remote Desktop screen "@RDP <ID>" (see rdp_test).
+    assert "`@${kind} ${inst.id}`" in app_js
     assert "function modalVncShortcut" in app_js
     assert "function vncShortcutText" in app_js
     assert "handleVncActivity" in app_js and "vnc_activity" in app_js

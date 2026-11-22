@@ -251,6 +251,11 @@ VNC_CAPABILITY = "vnc"
 VNC_INSTANCES_CAPABILITY = "vnc-instances"
 # Create request IDs and DELETE /api/vnc/connect/{request_id} abort pending dials.
 VNC_CONNECT_CANCEL_CAPABILITY = "vnc-connect-cancel"
+# The same routes, catalog and viewer socket also dial Windows Remote Desktop:
+# a create request may carry protocol "rdp" with a user name and desktop size,
+# and every catalog entry names its protocol. Additive: an older node takes
+# only VNC and lists entries without the field.
+RDP_CAPABILITY = "rdp"
 
 # GET /api/host/metrics reports this node's own CPU history, memory/load
 # facts, and the trimmed process tree descending from its Puppy process. It is
@@ -376,6 +381,7 @@ BASE_CAPABILITIES = (
     VNC_CAPABILITY,
     VNC_INSTANCES_CAPABILITY,
     VNC_CONNECT_CANCEL_CAPABILITY,
+    RDP_CAPABILITY,
     UPLOAD_PREVIEW_CAPABILITY,
     TOOL_IMAGE_FILES_CAPABILITY,
     ENGINE_AUTO_UPGRADE_CAPABILITY,
