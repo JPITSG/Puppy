@@ -596,6 +596,25 @@ is removed from both the tool card's thumbnail and its result's image controls;
 its filename and the tool's text remain. An open viewer disables the missing
 picture, and Forward cannot reopen a picture already known to be missing.
 
+**Files from the agent** arrive as links in its answer: "The latest STL file
+is [here]", one click and the file downloads under its own name. When you ask
+for a file, or the agent made one you will want to keep (a model, an export, an
+archive, a log), it calls Puppy's `share_file` tool on one file inside the
+session's working folder or the system's temporary folder. Puppy copies it at
+that moment into the session's private storage on its backend, so the link
+always serves exactly what was shared, and hands the agent the link to write;
+a session on another backend downloads through the controller like everything
+else. The tool's card offers the same download in its folded head and under its
+result, and a link whose file has since gone reads as unavailable. Copies stay
+with the session's other files: deleted with it, carried in its backups, and
+moved into Main when a task is folded into it. One file may be up to 256 MiB, a
+conversation may hold 1 GiB of them and a turn may share 20; sharing the same
+unchanged file again reuses its copy. Puppy's own data folder, the engines'
+CLI homes, the hidden files and folders directly in the home folder (where
+sign-ins and keys live) and system locations such as `/etc/shadow` or `/proc`
+are never shared. The design is described in
+[docs/shared-files.md](docs/shared-files.md).
+
 Engines that keep working after answering are handled too: Claude Code's
 background commands, agents and monitors keep their turn alive until they end.
 Their completion, failure and stop updates are labeled and left-aligned, attached
@@ -1452,6 +1471,14 @@ built-in browser APIs and require no additional libraries.
   both the password's key and the certificate's key; without it, the password
   rides TLS to a certificate nobody verified, so check the fingerprint the
   tab shows.
+- **Shared files are copies, served only as downloads.** A link an agent
+  shares names an unguessable id, never a path, and resolves only inside its
+  own session, behind the console's sign-in. The bytes are always sent as an
+  attachment of type `application/octet-stream` with sniffing off and a
+  sandboxing content policy, so a shared page or SVG can never run as part of
+  the console; a controller relaying a backend's file imposes those headers
+  itself, whatever the backend answers. The source file is opened without
+  following a symbolic link anywhere along its path.
 - **Clocks follow the server.** Times in the console use the Puppy process's
   locale hour cycle, not the browser's.
 
@@ -1488,6 +1515,8 @@ node tests/status_bar_ui_test.js     # the status bar: one session setting, foll
 node tests/tool_result_ui_test.js    # tool results folded into their call's card
 python3 tests/tool_images_test.py    # tool pictures: the reader, each driver, storage, both runtimes
 node tests/image_viewer_ui_test.js   # the image viewer, and the pictures on tool cards
+python3 tests/shared_files_test.py   # files an agent shares: what may be shared, storage, routes, the relay, the tool
+node tests/shared_files_ui_test.js   # shared-file links in answers and on the share tool's card
 node tests/session_request_ui_test.js # the session request and workflow sheet
 node tests/prompt_gutter_ui_test.js   # the prompt gutter: pins, numbers, plates, steps, the prompt list and its answer marks
 python3 tests/prompt_index_test.py   # the prompt index: one line per prompt and its turn's end, paged, on both runtimes

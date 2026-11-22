@@ -129,6 +129,15 @@ still contain a value written before that release.
   File and upload previews use `private, no-store`. Consoles check visible
   previews periodically and on viewer opening, retiring missing images from
   every entry point. No event, database or snapshot shape changes.
+- `session-shared-files` adds GET `/api/sessions/{sid}/files` (the session's
+  shares, newest first) and GET/HEAD `/api/sessions/{sid}/files/{id}` for one
+  file an agent shared through the turn-bound `puppy_files` bridge, served only
+  as an `application/octet-stream` attachment with `nosniff`, a sandboxing
+  content policy and `private, no-store`. A share is an `f<32 hex>` one-file
+  directory beside the session's uploads, never orphan-swept, deleted with the
+  session and carried in its backups. A controller streams a backend's share
+  and imposes the download headers itself. No event, database or snapshot
+  shape changes. See [Shared files](shared-files.md).
 - Session reordering requires both starting-order and pin-cohort compare tokens.
   `session-order-recency` adds durable `order_at` timestamps for merging the
   sidebar across backends below all pins, and an optional `expected_recency`

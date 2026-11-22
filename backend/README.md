@@ -1315,6 +1315,28 @@ the original file, including for old history, and disappear when it is removed
 or becomes unreadable. Work runs off the event loop; no copy or new durable
 record is created.
 
+The additive `session-shared-files` capability covers files an agent shares
+for the user to download. Every prompt turn carries the `puppy_files` stdio MCP
+bridge (`python -m puppy.files_agent`, turn-bound through a mode-0600 same-uid
+socket under `data/files/`, like the other bridges) whose one tool,
+`share_file`, copies one regular file from the session's execution folder or
+the system temporary folder into the session's upload storage under an
+`f`-prefixed id (`f<32 hex>`, a one-file directory) and answers the Markdown
+link `[name](puppy-file:<id>)` for the agent to write. Puppy's data folder
+(except a session folder Puppy manages there), the engines' CLI homes, hidden
+entries directly in the home folder and system locations are refused; the path
+is opened without following a symbolic link anywhere; a file is at most 256
+MiB, a session holds at most 1 GiB and a turn shares at most 20.
+`GET /api/sessions/{sid}/files` lists a session's shares (`{files: [{id, name,
+size, created_at}], more}`, newest first, at most 500) and `GET|HEAD
+/api/sessions/{sid}/files/{id}` serves one only as a download:
+`application/octet-stream`, `Content-Disposition: attachment` with the UTF-8
+name, `nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`,
+`private, no-store`, ranges supported. Shares are never orphan-swept, go with
+the session's storage and its backups, and move to Main when a task is folded.
+A controller relays a backend's share as a stream and imposes those download
+headers itself.
+
 Controllers stream remote uploads rather than buffering them and preserve TLS
 pinning, token authentication, redirect rejection, and the receiving node's
 authority over the limit. Active transfers temporarily make upgrade readiness

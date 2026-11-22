@@ -3190,9 +3190,16 @@ function wsUrl(bid, path) {
   return proto + location.host + apiPath(bid, path);
 }
 
+/* DOMPurify's own allowed-URI rule plus the puppy-file: scheme an agent's
+   shared file is linked by, so that one link survives sanitizing for
+   decorateMarkdownLinks to turn into a download - or, anywhere it has no
+   session to download from, back into plain words. */
+const MD_URI_PATTERN = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|puppy-file):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
+
 function md(text) {
   try {
-    return DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }));
+    return DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }),
+      { ALLOWED_URI_REGEXP: MD_URI_PATTERN });
   } catch (e) {
     return esc(text);
   }
@@ -3201,9 +3208,19 @@ function md(text) {
 /* Engine output sometimes uses Markdown's link syntax for editor-style file
    references. Those targets are meaningful to a local IDE, not to this web
    page, where clicking them only produces a bogus same-origin request. Keep
-   genuine web URLs clickable and unwrap every other link back to its contents. */
-function decorateMarkdownLinks(root) {
+   genuine web URLs clickable and unwrap every other link back to its contents.
+   The one exception is a file the agent shared (`puppy-file:<id>`), which
+   becomes a download of that session's own copy where `source` ({bid, sid})
+   names the session the words belong to. */
+function decorateMarkdownLinks(root, source = null) {
   root.querySelectorAll("a").forEach(a => {
+    const shared = SHARED_FILE_LINK.exec(a.getAttribute("href") || "");
+    if (shared) {
+      if (source && Number(source.sid) > 0 && sharedFilesEnabledFor(Number(source.bid) || 0))
+        sharedFileLinkInto(a, source, shared[1]);
+      else a.replaceWith(...a.childNodes);
+      return;
+    }
     let protocol = "";
     try { protocol = new URL(a.getAttribute("href") || "").protocol; }
     catch (error) { /* a relative path is not a web URL */ }
@@ -3249,6 +3266,182 @@ function decorateMarkdownImages(root) {
     if (!loadable) { asCard(); return; }
     img.onerror = asCard;
   });
+}
+
+/* ================= files an agent shares =================
+   The puppy_files bridge copies a file the agent names into its session's
+   storage and hands the agent `[name](puppy-file:f…)` to write; the link is
+   drawn as an ordinary link that downloads, marked by the drawn download
+   glyph, pointing at that session's own copy on its own backend. Nothing in
+   the URL but numbers and the checked id. One read of the session's shares
+   (`GET sessions/{sid}/files`) gives every link its name and size and shows a
+   link whose file is gone - or never was - as unavailable instead of a failed
+   download; it is read again only for an id it did not know yet. */
+const SHARED_FILE_ID = /^f[0-9a-f]{32}$/;
+const SHARED_FILE_LINK = /^puppy-file:(f[0-9a-f]{32})$/;
+const SHARED_FILE_MENTION = /\[((?:\\.|[^\]\\\n]){0,400})\]\(puppy-file:(f[0-9a-f]{32})\)/g;
+const sharedFileSessions = new Map();
+
+function sharedFilesEnabledFor(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && backendHasCapability(backend, "session-shared-files");
+}
+
+function sharedFileUrl(bid, sid, id) {
+  return apiPath(bid, `sessions/${sid}/files/${id}`);
+}
+
+function sharedFileRecord(bid, sid) {
+  const key = `${bid}:${sid}`;
+  let record = sharedFileSessions.get(key);
+  if (!record) {
+    record = { bid, sid, files: null, more: false, links: new Set(), wanted: new Set(), tried: new Set(),
+      loading: false, queued: false };
+    sharedFileSessions.set(key, record);
+  }
+  return record;
+}
+
+/* The shares a tool result names, each with the name its link carries. */
+function sharedFilesIn(text) {
+  const found = new Map();
+  for (const match of String(text || "").matchAll(SHARED_FILE_MENTION))
+    if (!found.has(match[2])) found.set(match[2], match[1].replace(/\\(.)/g, "$1"));
+  return [...found].map(([id, name]) => ({ id, name: name || "file" }));
+}
+
+function noteSharedFileLink(record, node, id) {
+  node._sharedFileId = id;
+  record.links.add(node);
+  if ((record.files && record.files.has(id)) || record.tried.has(id)) {
+    paintSharedFileLink(record, node);
+    return;
+  }
+  record.wanted.add(id);
+  /* every link drawn in one pass - a whole page of history - joins one read */
+  if (record.loading || record.queued) return;
+  record.queued = true;
+  Promise.resolve().then(() => { record.queued = false; if (!record.loading) loadSharedFiles(record); });
+}
+
+async function loadSharedFiles(record) {
+  /* an unreachable backend is never asked; a press says why instead */
+  if (record.bid && !backendConnectionAllowed(record.bid)) { record.wanted.clear(); return; }
+  const asking = [...record.wanted];
+  record.wanted.clear();
+  record.loading = true;
+  let answer = null;
+  try { answer = await api(record.bid, `sessions/${record.sid}/files`, { timeoutMs: 15000 }); }
+  catch (_) { /* the links stay as they are; a press still tries */ }
+  record.loading = false;
+  if (answer && Array.isArray(answer.files)) {
+    record.files = new Map(answer.files
+      .filter(file => file && SHARED_FILE_ID.test(String(file.id || "")))
+      .map(file => [file.id, file]));
+    /* a list cut short proves nothing about what it left out */
+    record.more = !!answer.more;
+    for (const id of asking) record.tried.add(id);
+  }
+  for (const node of [...record.links]) {
+    if (node.isConnected) paintSharedFileLink(record, node);
+    else record.links.delete(node);
+  }
+  /* ids a link named while this read was on its way */
+  if (record.wanted.size) loadSharedFiles(record);
+}
+
+function paintSharedFileLink(record, node) {
+  const id = node._sharedFileId;
+  const file = record.files ? record.files.get(id) : null;
+  const missing = !file && !!record.files && !record.more && record.tried.has(id);
+  node.classList.toggle("unavailable", missing);
+  if (missing) {
+    node.removeAttribute("href");
+    node.setAttribute("aria-disabled", "true");
+    node.title = "This file is no longer available";
+  } else {
+    node.setAttribute("href", sharedFileUrl(record.bid, record.sid, id));
+    node.removeAttribute("aria-disabled");
+    node.title = file ? `Download ${file.name} · ${fmtBytes(file.size)}` : "Download";
+  }
+  /* the stored name is the file's own; the one read from the tool's text
+     may still wear an engine's escaping */
+  const name = node.querySelector(".attach-file-name");
+  if (name && file && file.name) name.textContent = file.name;
+  const size = node.querySelector(".attach-file-size");
+  if (size) size.textContent = missing ? "No longer available" : file ? fmtBytes(file.size) : "Download";
+}
+
+/* A press is the browser's own download, which streams to disk; it is held
+   back only to say why it could not work. */
+function sharedFileClick(event, record, node) {
+  event.stopPropagation();
+  if (record.bid && !backendConnectionAllowed(record.bid)) {
+    event.preventDefault();
+    toast(`${backendName(record.bid)}: Could not download the file · the backend is unavailable`, "bad");
+    return;
+  }
+  if (node.classList.contains("unavailable")) {
+    event.preventDefault();
+    toast("Could not download the file · it is no longer available", "warn");
+  }
+}
+
+function sharedFileLinkInto(a, source, id) {
+  const bid = Number(source.bid) || 0, sid = Number(source.sid);
+  const record = sharedFileRecord(bid, sid);
+  a.className = "md-file";
+  a.setAttribute("href", sharedFileUrl(bid, sid, id));
+  a.setAttribute("download", "");
+  a.removeAttribute("target");
+  a.rel = "noopener";
+  if (!a.textContent.trim()) a.setAttribute("aria-label", "Download the shared file");
+  /* the glyph never wraps away from the link's last word: a word joiner
+     ties them, inside a span a copy of the answer leaves out */
+  const icon = el("span", "md-file-icon");
+  icon.append(document.createTextNode("\u2060"), downloadIcon(12));
+  a.appendChild(icon);
+  a.addEventListener("click", event => sharedFileClick(event, record, a));
+  noteSharedFileLink(record, a, id);
+}
+
+/* The share tool's own card: a download in its head, there while the card
+   is folded, and under the result the card a sent file wears. */
+function sharedFileChipsInto(card, body, source, shares) {
+  const bid = Number(source.bid) || 0, sid = Number(source.sid);
+  const record = sharedFileRecord(bid, sid);
+  const strip = el("div", "attach-strip shared-files");
+  for (const share of shares) {
+    const chip = el("a", "attach-chip file shared-file");
+    chip.setAttribute("href", sharedFileUrl(bid, sid, share.id));
+    chip.setAttribute("download", "");
+    chip.rel = "noopener";
+    const icon = el("span", "attach-file-icon");
+    icon.appendChild(downloadIcon(14));
+    const copy = el("span", "attach-file-copy");
+    copy.appendChild(el("span", "attach-file-name", share.name));
+    copy.appendChild(el("span", "attach-file-size", "Download"));
+    chip.append(icon, copy);
+    chip.addEventListener("click", event => sharedFileClick(event, record, chip));
+    strip.appendChild(chip);
+    noteSharedFileLink(record, chip, share.id);
+  }
+  body.appendChild(strip);
+  const head = card.querySelector(".tool-head");
+  if (head && !head.querySelector(".t-file")) {
+    const first = shares[0];
+    const button = el("a", "t-file");
+    button.setAttribute("href", sharedFileUrl(bid, sid, first.id));
+    button.setAttribute("download", "");
+    button.rel = "noopener";
+    button.setAttribute("aria-label", shares.length === 1 ? `Download ${first.name}` :
+      `Download ${first.name} (${shares.length} files shared)`);
+    button.appendChild(downloadIcon(12));
+    button.addEventListener("click", event => sharedFileClick(event, record, button));
+    head.insertBefore(button, head.querySelector(".t-state"));
+    noteSharedFileLink(record, button, first.id);
+  }
 }
 
 const PLAIN_CODE_LANGS = new Set([
@@ -10810,7 +11003,8 @@ function scheduleRunNode(schedule, run, onDelete) {
   if (run.answer) {
     const answer = el("div", "sr-answer md");
     answer.innerHTML = md(run.answer);
-    decorateMarkdownLinks(answer);
+    decorateMarkdownLinks(answer, scheduleRunSession(schedule, run) ?
+      { bid: Number(run.backend) || 0, sid: Number(run.session) } : null);
     decorateMarkdownImages(answer);
     node.appendChild(answer);
     const more = el("button", "sr-more linklike", "Show all");
@@ -17424,6 +17618,7 @@ function displayInput(value, limit = 12000) {
 function toolIconNode(tool) {
   if (TOOL_ICON_DRAWERS[tool]) return TOOL_ICON_DRAWERS[tool]();
   const name = String(tool || "").toLowerCase();
+  if (/share_file$/.test(name)) return downloadIcon(12);   // Puppy's puppy_files bridge, any engine's spelling
   if (isQuestionTool(tool) || /question/.test(name)) return askActionIcon(12);
   if (/(web|search|browse|fetch|url)/.test(name)) return globeIcon(12);
   if (/(read|view|image)/.test(name)) return attachmentFileIcon(12);
@@ -17805,6 +18000,13 @@ function fillToolResultInto(card, d, endedAt, source = null, resultSeq = 0) {
     : displayValue(d.content);
   if (text || !images.length) body.appendChild(linkifyInto(el("pre"), text || "(Empty)"));
   if (images.length) toolImagesInto(card, body, images);
+  /* share_file's answer names the file it shared: a download, folded or
+     not. Only that tool's card (each engine spells the name its own way,
+     every spelling ends in share_file), never output that quotes a link. */
+  const shares = source && Number(source.sid) > 0 && !d.is_error && !d.interrupted &&
+    /share_file$/.test(String(card._toolName || "")) &&
+    sharedFilesEnabledFor(Number(source.bid) || 0) ? sharedFilesIn(text) : [];
+  if (shares.length) sharedFileChipsInto(card, body, source, shares);
 }
 
 /* ================= tool images =================
@@ -19840,7 +20042,7 @@ function nameStatusList(text) {
 /* The tool card's disclosure, so a Main with hundreds of folded tasks stays
    a list of one-line heads. An archive is uncapped, so its body is only
    built the first time it is opened. */
-function taskArchiveNode(d, ts, bid) {
+function taskArchiveNode(d, ts, bid, source = null) {
   const n = el("div", "tool-card task-archive");
   const head = el("div", "tool-head");
   const caret = el("span", "t-caret");
@@ -19863,14 +20065,14 @@ function taskArchiveNode(d, ts, bid) {
   const body = el("div", "tool-body");
   let built = false;
   head.onclick = () => {
-    if (!built) { built = true; fillTaskArchive(body, d, applied, bid); }
+    if (!built) { built = true; fillTaskArchive(body, d, applied, bid, source); }
     n.classList.toggle("open");
   };
   n.appendChild(head);
   n.appendChild(body);
   return n;
 }
-function fillTaskArchive(body, d, applied, bid) {
+function fillTaskArchive(body, d, applied, bid, source = null) {
   const facts = el("div", "ta-facts");
   const fact = (label, value) => {
     if (!value) return;
@@ -19900,7 +20102,7 @@ function fillTaskArchive(body, d, applied, bid) {
   const mdBox = text => {
     const box = el("div", "md");
     box.innerHTML = md(text || "");
-    decorateMarkdownLinks(box);
+    decorateMarkdownLinks(box, source);
     decorateMarkdownImages(box);
     decorateCodeBlocks(box);
     return box;
@@ -24578,7 +24780,7 @@ class SessionView {
         const n = el("div", "msg msg-assistant");
         const box = el("div", "md");
         box.innerHTML = md(d.text || "");
-        decorateMarkdownLinks(box);
+        decorateMarkdownLinks(box, this.tab);
         decorateMarkdownImages(box);
         decorateCodeBlocks(box);
         n.appendChild(box);
@@ -24679,7 +24881,7 @@ class SessionView {
         }
         if (d.subtype === "session_task" || d.subtype === "session_task_refresh" ||
             d.subtype === "session_task_sync") return sessionTaskUpdateNode(d);
-        if (d.subtype === "session_task_archive") return taskArchiveNode(d, ev.ts, this.tab.bid);
+        if (d.subtype === "session_task_archive") return taskArchiveNode(d, ev.ts, this.tab.bid, this.tab);
         if (d.subtype === "session_request" && d.session_request) {
           const card = el("div", "session-request-card");
           card.appendChild(el("div", "session-request-text", d.text || "Session request"));

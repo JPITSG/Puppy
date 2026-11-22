@@ -51,7 +51,7 @@ function harness() {
     ResizeObserver: class { observe() {} disconnect() {} },
   });
   vm.runInContext(between("/* ================= optional libraries", "/* ================= helpers") +
-    between("function md(text)", "/* Engine output sometimes") +
+    between("const MD_URI_PATTERN", "/* Engine output sometimes") +
     between("class SessionView {", "/* ================= BrowserView") +
     "\nglobalThis.Chat = SessionView; globalThis.Term = TermView;", context);
   const nodes = () => document.head.children.filter(node => node.src || node.href);

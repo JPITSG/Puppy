@@ -2556,6 +2556,206 @@ async def tool_image_checks(instance):
           "named for the file read, the card never folded by it, its head never grown, focus home on Escape", flush=True)
 
 
+async def shared_file_checks(instance):
+    """A file an agent shared, in real layout on a desktop and a phone in both
+    themes. The node holds a real share (shared_files.share) and the view
+    builds the share tool's card and an answer linking it: the answer's link
+    keeps the agent's words with the drawn download glyph standing on their
+    line, a link whose file is gone reads in the help colour with no address,
+    the folded card's head offers the file without growing and the opened
+    card's result carries the file's chip. Real clicks download the node's
+    own bytes under the file's own name from the answer and from the head -
+    which never folds or unfolds the card - and a press on the gone link
+    explains instead of downloading."""
+    import tempfile
+    from puppy import shared_files
+    page = instance.page_session
+    sid = await evaluate(instance, "demoView.tab.sid")
+    scratch = Path(tempfile.mkdtemp(prefix="puppy-share-lane-"))
+    payload = b"solid harbor-bracket\n" + bytes(range(256)) * 64 + b"endsolid harbor-bracket\n"
+    (scratch / "bracket.stl").write_bytes(payload)
+    share = shared_files.share(sid, str(scratch / "bracket.stl"))
+    gone = "f" + "e" * 32
+    text = ("Shared bracket.stl (%s) for download in this conversation.\nMarkdown link: %s\n"
+            "Put that link in your answer where the user should click; any link text works."
+            % (shared_files._size(len(payload)), share["link"]))
+    downloads = Path(instance.root) / "downloads"
+    saved = downloads / "bracket.stl"
+    spot = """(async () => { if (typeof closeDrawer === 'function') closeDrawer();
+        const b = %s;
+        b.scrollIntoView({block: 'center'});
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const r = b.getBoundingClientRect(), x = r.left + Math.min(r.width / 2, 12), y = r.top + r.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        return {x, y, hit: !!hit && b.contains(hit)}; })()"""
+
+    async def click(expression):
+        point = await evaluate(instance, spot % expression)
+        assert point["hit"], (expression, point)
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {"type": kind, "x": point["x"], "y": point["y"],
+                                "button": "left", "clickCount": 1}, session=page)
+
+    async def downloaded():
+        end = time.monotonic() + 10
+        while time.monotonic() < end and not (saved.exists() and saved.stat().st_size == len(payload)):
+            await asyncio.sleep(.05)
+        assert saved.exists() and saved.read_bytes() == payload, "the node's own bytes, by the file's own name"
+        saved.unlink()
+
+    await evaluate(instance, """(() => {
+        window.shareShot = document.createElement('div');
+        const add = event => { const node = demoView.buildEventNode(event); if (node) shareShot.appendChild(node); };
+        add({kind: 'tool_use', seq: 1, ts: 1, data: {tool: 'mcp__puppy_files__share_file', tool_use_id: 'toolu_share',
+             input: {path: 'build/bracket.stl'}}});
+        add({kind: 'tool_result', seq: 2, ts: 2, data: {tool_use_id: 'toolu_share', content: %s, is_error: false}});
+        add({kind: 'tool_use', seq: 3, ts: 3, data: {tool: 'Read', tool_use_id: 'toolu_plain',
+             input: {file_path: '/tmp/notes.txt'}}});
+        add({kind: 'tool_result', seq: 4, ts: 4, data: {tool_use_id: 'toolu_plain', content: 'notes', is_error: false}});
+        add({kind: 'assistant', seq: 5, ts: 5, data: {text: %s}});
+        demoView.inner.appendChild(shareShot);
+        window.shareCard = shareShot.querySelector('.tool-card');
+        window.shareAnswer = shareShot.querySelector('.msg-assistant');
+        return true;
+    })()""" % (json.dumps(text), json.dumps(
+        "The bracket is ready: [bracket.stl](puppy-file:%s). Last week's [print log](puppy-file:%s) is gone, "
+        "and [the guide](https://example.test/guide) explains the supports." % (share["id"], gone))))
+    measure = """(() => {
+        const r = node => node.getBoundingClientRect();
+        const [link, lost] = shareAnswer.querySelectorAll('a.md-file');
+        const web = shareAnswer.querySelector('a:not(.md-file)');
+        const icon = r(link.querySelector('.md-file-icon svg')), box = r(link);
+        const lastLine = node => {
+            const range = document.createRange();
+            range.selectNodeContents(node.firstChild);
+            const rects = [...range.getClientRects()];
+            return rects[rects.length - 1];
+        };
+        const words = lastLine(link), lostWords = lastLine(lost);
+        const lostIcon = r(lost.querySelector('.md-file-icon svg'));
+        const heads = [...shareShot.querySelectorAll('.tool-head')].map(r);
+        const file = shareCard.querySelector('.t-file'), state = shareCard.querySelector('.t-state');
+        const style = getComputedStyle(link), lostStyle = getComputedStyle(lost), webStyle = getComputedStyle(web);
+        const help = getComputedStyle(document.documentElement).getPropertyValue('--txt3').trim();
+        const probe = document.createElement('span');
+        probe.style.color = help; document.body.appendChild(probe);
+        const helpColour = getComputedStyle(probe).color; probe.remove();
+        return {
+            words: link.firstChild.textContent, href: link.getAttribute('href'), title: link.title,
+            download: link.getAttribute('download'), colour: style.color, webColour: webStyle.color,
+            iconGap: icon.left - words.right, iconCentre: icon.top + icon.height / 2 - (words.top + words.height / 2),
+            iconSize: [icon.width, icon.height],
+            lostGap: lostIcon.left - lostWords.right,
+            lostCentre: lostIcon.top + lostIcon.height / 2 - (lostWords.top + lostWords.height / 2),
+            copied: (() => { const range = document.createRange(); range.selectNodeContents(shareAnswer);
+                const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+                const text = selection.toString(); selection.removeAllRanges(); return text; })(),
+            lostHref: lost.getAttribute('href'), lostColour: lostStyle.color, helpColour,
+            lostLine: lostStyle.textDecorationLine, lostCursor: lostStyle.cursor, lostTitle: lost.title,
+            headWith: heads[0].height, headWithout: heads[1].height,
+            fileSize: [r(file).width, r(file).height],
+            fileCentre: r(file).top + r(file).height / 2 - (heads[0].top + heads[0].height / 2),
+            beforeState: r(state).left - r(file).right, fileLabel: file.getAttribute('aria-label'),
+            fileHref: file.getAttribute('href'), overflow: shareAnswer.scrollWidth > shareAnswer.clientWidth + 1,
+        };
+    })()"""
+    try:
+        await until(instance, "shareAnswer.querySelectorAll('a.md-file').length === 2 && "
+                              "shareAnswer.querySelectorAll('a.md-file')[0].title.startsWith('Download bracket.stl')")
+        for width, height, mobile in ((1440, 900, False), (390, 844, True)):
+            await instance.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
+                "deviceScaleFactor": 2 if mobile else 1, "mobile": mobile}, session=page)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); shareAnswer.scrollIntoView({block: 'center'}); true"
+                               % json.dumps(theme))
+                g = await evaluate(instance, measure)
+                label = (width, theme)
+                assert g["words"] == "bracket.stl" and g["download"] == "", (label, g)
+                assert g["href"].endswith("/api/sessions/%d/files/%s" % (sid, share["id"])), (label, g)
+                assert g["title"] == "Download bracket.stl · %s" % await evaluate(
+                    instance, "fmtBytes(%d)" % len(payload)), (label, g)
+                assert g["colour"] == g["webColour"], ("a share reads as a link", label, g)
+                assert 2 <= g["iconGap"] <= 4.5 and abs(g["iconCentre"]) <= 1.5, ("the glyph on its line", label, g)
+                assert 2 <= g["lostGap"] <= 4.5 and abs(g["lostCentre"]) <= 1.5, ("never wrapped from its words", label, g)
+                assert "\u2060" not in g["copied"] and "bracket.stl. Last week" in g["copied"].replace("\n", " "), \
+                    ("a copy of the answer is its words", label, g["copied"])
+                assert g["iconSize"] == [12, 12] and not g["overflow"], (label, g)
+                assert g["lostHref"] is None and g["lostColour"] == g["helpColour"], ("gone reads as gone", label, g)
+                assert g["lostLine"] == "none" and g["lostCursor"] == "default", (label, g)
+                assert g["lostTitle"] == "This file is no longer available", (label, g)
+                assert g["headWith"] == g["headWithout"], ("the head never grows", label, g)
+                assert g["fileSize"] == [24, 24] and abs(g["fileCentre"]) < 0.6 and g["beforeState"] > 0, (label, g)
+                assert g["fileLabel"] == "Download bracket.stl" and g["fileHref"] == g["href"], (label, g)
+                if os.environ.get("SHARE_SHOT"):
+                    clip = await evaluate(instance, """(() => {
+                        const a = shareCard.getBoundingClientRect(), b = shareAnswer.getBoundingClientRect();
+                        return {x: Math.min(a.left, b.left) - 8, y: a.top - 8, width: Math.max(a.right, b.right) -
+                                Math.min(a.left, b.left) + 16, height: b.bottom - a.top + 16, scale: 2}; })()""")
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png", "clip": clip}, session=page)
+                    Path(os.environ["SHARE_SHOT"], "share-%d-%s.png" % (width, theme)).write_bytes(
+                        base64.b64decode(shot["data"]))
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=page)
+        await evaluate(instance, "applyTheme('dark'); true")
+        if saved.exists():
+            saved.unlink()
+        # a real click on the answer's link downloads the shared bytes
+        await click("shareAnswer.querySelector('a.md-file')")
+        await downloaded()
+        # the folded card's head downloads too, and the card stays folded
+        await click("shareCard.querySelector('.t-file')")
+        await downloaded()
+        assert await evaluate(instance, "!shareCard.classList.contains('open')"), "the card never folds or unfolds"
+        # opened, the result carries the file's chip, which downloads the same bytes
+        await click("shareCard.querySelector('.t-sum')")
+        await until(instance, "shareCard.classList.contains('open') && "
+                              "shareCard.querySelector('.tool-body a.attach-chip.shared-file .attach-file-size')"
+                              ".textContent === fmtBytes(%d)" % len(payload))
+        chip = await evaluate(instance, """(() => { const c = shareCard.querySelector('a.attach-chip.shared-file');
+            return {name: c.querySelector('.attach-file-name').textContent, pre: !!c.closest('.tool-body'),
+                    strips: shareShot.querySelectorAll('.attach-strip.shared-files').length}; })()""")
+        assert chip == {"name": "bracket.stl", "pre": True, "strips": 1}, chip
+        if os.environ.get("SHARE_SHOT"):
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                clip = await evaluate(instance, """(async () => {
+                    const strip = shareCard.querySelector('.attach-strip.shared-files');
+                    strip.scrollIntoView({block: 'center'});
+                    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+                    const label = [...shareCard.querySelectorAll('.tb-label')].pop().getBoundingClientRect();
+                    const a = shareCard.getBoundingClientRect(), b = strip.getBoundingClientRect();
+                    return {x: a.left - 8, y: label.top - 12, width: a.width + 16, height: b.bottom - label.top + 28,
+                            scale: 2}; })()""")
+                shot = await instance.call("Page.captureScreenshot", {"format": "png", "clip": clip}, session=page)
+                Path(os.environ["SHARE_SHOT"], "share-open-%s.png" % theme).write_bytes(base64.b64decode(shot["data"]))
+            await evaluate(instance, "applyTheme('dark'); true")
+        await click("shareCard.querySelector('a.attach-chip.shared-file')")
+        await downloaded()
+        assert await evaluate(instance, "shareCard.classList.contains('open')")
+        # a press on the gone file explains, and downloads nothing
+        before = sorted(child.name for child in downloads.iterdir()) if downloads.exists() else []
+        await click("shareAnswer.querySelectorAll('a.md-file')[1]")
+        await until(instance, "[...document.querySelectorAll('.toast')].some(t => "
+                              "t.textContent.includes('Could not download the file · it is no longer available'))")
+        await asyncio.sleep(.5)
+        after = sorted(child.name for child in downloads.iterdir()) if downloads.exists() else []
+        assert after == before, ("nothing downloads", before, after)
+    finally:
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=page)
+        await evaluate(instance, """(() => { if (window.shareShot) shareShot.remove();
+            delete window.shareShot; delete window.shareCard; delete window.shareAnswer;
+            delete demoView.toolCards.toolu_share; delete demoView.toolCards.toolu_plain;
+            applyTheme('dark'); return true; })()""")
+        shutil.rmtree(str(scratch), ignore_errors=True)
+        for item in shared_files.shared(sid):
+            shutil.rmtree(str(uploads._validated_upload_file(sid, item["id"]).parent), ignore_errors=True)
+    print("PASS: a shared file is a link in the answer with the drawn download glyph on its line, a gone one "
+          "reads as gone, the share tool's folded head offers it without growing and its result carries its "
+          "chip, on a desktop and a phone in both themes; real clicks download the node's bytes by the "
+          "file's own name and the gone one explains", flush=True)
+
+
 async def prompt_gutter_checks(instance):
     """The prompt gutter in real layout. A session longer than the page, its
     first prompts not loaded: a pin level with every prompt on the page,
@@ -11310,6 +11510,9 @@ async def main(args):
             if args.schedules_only:
                 await schedules_checks(instances[0])
                 return
+            if args.shared_files_only:
+                await shared_file_checks(instances[0])
+                return
             if args.image_viewer_only:
                 await image_viewer_checks(instances[0], args.screenshots)
                 await image_mark_checks(instances[0])
@@ -11342,6 +11545,7 @@ async def main(args):
             await image_viewer_checks(instances[0], args.screenshots)
             await image_mark_checks(instances[0])
             await tool_image_checks(instances[0])
+            await shared_file_checks(instances[0])
             await avif_attachment_checks(instances[0])
             await composer_resize_checks(instances[0])
             await task_tools_checks(instances[0])
@@ -11398,6 +11602,7 @@ if __name__ == "__main__":
     parser.add_argument("--token-usage-only", action="store_true")
     parser.add_argument("--question-scroll-only", action="store_true")
     parser.add_argument("--image-viewer-only", action="store_true")
+    parser.add_argument("--shared-files-only", action="store_true")
     parser.add_argument("--session-request-only", action="store_true")
     parser.add_argument("--schedules-only", action="store_true")
     parser.add_argument("--prompt-gutter-only", action="store_true")

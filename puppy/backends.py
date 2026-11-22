@@ -49,6 +49,18 @@ PROXY_TOTAL_TIMEOUT = 60.0
 PROXY_UPLOAD_TIMEOUT = 15 * 60.0
 MAX_BACKEND_URLS = 8
 UPLOAD_PROXY_PATH = re.compile(r"^sessions/\d+/upload$")
+# A file an agent shared (shared_files): relayed as a stream, never buffered,
+# with this controller's own download headers whatever the backend answered.
+SHARED_FILE_PROXY_PATH = re.compile(r"^sessions/\d+/files/f[0-9a-f]{32}$")
+PROXY_DOWNLOAD_IDLE_TIMEOUT = 120.0
+RELAYED_DOWNLOAD_HEADERS = ("Content-Length", "Content-Range", "Accept-Ranges",
+                            "Last-Modified", "ETag")
+# Whatever a backend answers is served from this controller's origin, so no
+# relayed body is ever sniffed into, or rendered as, a page here.
+RELAY_SAFETY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+}
 AUTO_UPGRADE_INTERVAL = 8.0
 AUTO_UPGRADE_FAILURE_RETRY = 30.0
 AUTO_UPGRADE_CURRENT_RECHECK = 5 * 60.0
@@ -2148,6 +2160,8 @@ async def proxy(request: web.Request):
 
     if _is_ws(request):
         return await _proxy_ws(request, be, urls, tail, headers)
+    if request.method in ("GET", "HEAD") and SHARED_FILE_PROXY_PATH.fullmatch(tail):
+        return await _proxy_download(request, be, urls, tail, headers)
 
     streaming_upload = request.method == "POST" and UPLOAD_PROXY_PATH.fullmatch(tail)
     if streaming_upload:
@@ -2192,7 +2206,8 @@ async def proxy(request: web.Request):
                 if changed:
                     _broadcast_backends()
                 return web.Response(status=r.status, body=payload,
-                                    content_type=r.content_type or "application/json")
+                                    content_type=r.content_type or "application/json",
+                                    headers=RELAY_SAFETY_HEADERS)
         except Exception as exc:
             last_error = exc
             can_retry = _failed_before_request(exc) or (
@@ -2207,6 +2222,85 @@ async def proxy(request: web.Request):
         _broadcast_backends()
     await close_proxy_websockets(bid, "Backend unavailable")
     return _unavailable_response(be)
+
+
+def _download_headers(upstream) -> dict:
+    """The download headers this controller sends, whatever the backend said."""
+    from puppy import shared_files
+    headers = dict(shared_files.DOWNLOAD_HEADERS)
+    disposition = str(upstream.get("Content-Disposition") or "")
+    headers["Content-Disposition"] = disposition \
+        if disposition.lower().startswith("attachment") and not any(
+            char in disposition for char in "\r\n\x00") else "attachment"
+    for name in RELAYED_DOWNLOAD_HEADERS:
+        value = upstream.get(name)
+        if value:
+            headers[name] = value
+    return headers
+
+
+async def _proxy_download(request: web.Request, backend: dict, urls: list,
+                          tail: str, headers: dict):
+    """Relay one shared file from a backend as a stream.
+
+    The general relay buffers a whole answer and keeps only its content type,
+    which a large file and its download headers cannot survive. Before the
+    backend answers, the usual failover and offline marking apply; once it
+    has, a failure can only cut the download short.
+    """
+    bid = int(backend["id"])
+    timeout = aiohttp.ClientTimeout(
+        total=None, connect=FAILOVER_CONNECT_TIMEOUT,
+        sock_connect=FAILOVER_CONNECT_TIMEOUT, sock_read=PROXY_DOWNLOAD_IDLE_TIMEOUT)
+    last_error = None
+    for index, url in enumerate(urls):
+        target = f"{url}/api/{tail}"
+        if request.query_string:
+            target += "?" + request.query_string
+        try:
+            async with client().request(request.method, target, headers=headers,
+                                        timeout=timeout, allow_redirects=False,
+                                        ssl=_ssl_pin(backend["tls_fingerprint"])) as r:
+                changed = _remember_active_url(bid, url, _backend_urls(backend))
+                changed = _mark_backend_online(bid) or changed
+                if changed:
+                    _broadcast_backends()
+                if r.status not in (200, 206):
+                    payload = await r.content.read(64 * 1024)
+                    return web.Response(status=r.status, body=payload,
+                                        content_type=r.content_type or "application/json",
+                                        headers=dict(RELAY_SAFETY_HEADERS,
+                                                     **{"Cache-Control": "no-store"}))
+                response = web.StreamResponse(status=r.status, headers=_download_headers(r.headers))
+                try:
+                    await response.prepare(request)
+                    if request.method != "HEAD":
+                        async for chunk in r.content.iter_chunked(256 * 1024):
+                            await response.write(chunk)
+                    await response.write_eof()
+                except Exception as exc:
+                    # The reader went away or the backend stopped mid-file.
+                    # The connection ends without the response's own end, so
+                    # the browser sees a failed download, never a short one
+                    # complete; the backend's health stays the ping's to judge.
+                    log.info("shared file relay from backend %s ended early: %s",
+                             bid, _connection_error(exc))
+                    if request.transport is not None:
+                        request.transport.close()
+                return response
+        except Exception as exc:
+            last_error = exc
+            can_retry = _failed_before_request(exc) or isinstance(
+                exc, (aiohttp.ClientConnectionError, asyncio.TimeoutError))
+            if index + 1 < len(urls) and can_retry:
+                continue
+            break
+    _advance_url_cursor(bid, len(urls))
+    detail = _connection_error(last_error) if last_error else "no URL is available"
+    if _mark_backend_offline(bid, detail):
+        _broadcast_backends()
+    await close_proxy_websockets(bid, "Backend unavailable")
+    return _unavailable_response(backend)
 
 
 async def _proxy_ws(request: web.Request, backend: dict, urls: list,

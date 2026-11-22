@@ -195,6 +195,12 @@ textarea,.md pre,.approval pre,.task-review-files,.task-review-diff,.session-git
    first keystroke moves nothing */
 textarea::placeholder{text-box:trim-both cap alphabetic}
 a{color:var(--acc2)}
+/* the link an agent's shared file downloads from: its words, then the drawn
+   download glyph that tells it from a web link */
+.md a.md-file{cursor:pointer}
+.md a.md-file .md-file-icon{margin-left:3px;-webkit-user-select:none;user-select:none}
+.md a.md-file .md-file-icon svg{display:inline-block;vertical-align:-1px}
+.md a.md-file.unavailable{color:var(--txt3);text-decoration:none;cursor:default}
 
 /* ---------- layout ---------- */
 .app{display:flex;height:100vh;height:100dvh;position:relative;z-index:1}
@@ -1849,6 +1855,27 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   position:absolute;right:0;bottom:0;padding:2px 3px;border-top-left-radius:var(--r-xs);
   background:rgba(6,9,14,.72);color:#fff;font:var(--fs-2xs)/1 var(--mono);pointer-events:none;
 }
+/* A file the agent shared (shared_files): a download in the head, standing
+   in the row's centre like the thumbnail above, and the file card under the
+   result. Both are links that download; a file since gone reads as such. */
+.tool-head .t-file{
+  flex-shrink:0;display:flex;align-items:center;justify-content:center;margin:-3px 0;
+  width:24px;height:24px;border:1px solid var(--line2);border-radius:var(--r-xs);
+  background:transparent;color:var(--txt2);cursor:pointer;
+  transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease);
+}
+.tool-head .t-file svg{display:block}
+@media (hover:hover){.tool-head .t-file:hover{background:var(--hov);color:var(--txt)}}
+.tool-head .t-file:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.tool-head .t-file.unavailable{color:var(--txt3);cursor:default}
+.tool-body .attach-strip.shared-files{margin:8px 0 2px}
+.attach-chip.file.shared-file{color:inherit;text-decoration:none;cursor:pointer;padding-right:10px;
+  transition:background var(--t-fast) var(--ease)}
+.attach-chip.file.shared-file .attach-file-icon{color:var(--acc2)}
+@media (hover:hover){.attach-chip.file.shared-file:hover{background:var(--hov)}}
+.attach-chip.file.shared-file:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+.attach-chip.file.shared-file.unavailable{cursor:default}
+.attach-chip.file.shared-file.unavailable .attach-file-icon{color:var(--txt3)}
 .tool-body .attach-strip.tool-images{margin:8px 0 2px}
 .tool-body .tb-label+.attach-strip.tool-images{margin-top:2px}
 @media (prefers-reduced-motion:reduce){.tool-head .t-thumb-img{transition:none}}

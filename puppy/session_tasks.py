@@ -558,6 +558,11 @@ async def remove(parent_id, sid, fold):
                     operations.commit()
                     seq = runner.hub(parent_id)._emit("info", payload)["seq"]
             operations.commit()
+            if fold:
+                # the archive keeps the task's answers and their puppy-file
+                # links, drawn in Main's view: the shared files move with them
+                from puppy import shared_files
+                await operations.to_thread(shared_files.adopt, sid, parent_id)
             removed = await web.remove_session(task)
         finally:
             _busy_roots.discard(task_root)

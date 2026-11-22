@@ -19,6 +19,7 @@ from puppy import (__version__, agent_notes, auth, backends, backup_schedule, bi
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
                    project_move, prompt_index, spelling, token_usage,
                    live_websockets, localization, protocol, runner, schedules, search, session_git,
+                   shared_files,
                    snapshots, session_titles, spawn_exec,
                    state_stream, system_prompts, terminal, timeouts, uploads, vnc,
                    usage_refresh, workspace_links, workspace_sync, workspaces)
@@ -2288,6 +2289,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     browser.register(app)
     vnc.register(app)
     uploads.register(app)
+    shared_files.register(app)
     workspace_sync.register(app)
     spawn_exec.register(app)
     from puppy import session_links

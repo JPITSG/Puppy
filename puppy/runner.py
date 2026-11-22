@@ -14,7 +14,8 @@ import signal
 import time
 import uuid
 
-from puppy import (agent_notes, browser_agent, config, db, engine_defaults, handoff, notify, spawn_agent,
+from puppy import (agent_notes, browser_agent, config, db, engine_defaults, files_agent, handoff, notify,
+                   spawn_agent,
                    system_prompts, task_agent, terminal_agent, vnc_agent,
                    session_agent, session_directories, session_git, session_links, uploads, workspace_sync,
                    workspaces, schedules, session_tasks, session_titles, timeouts, token_usage,
@@ -3603,6 +3604,7 @@ class SessionHub:
             terminal_mcp = None if tool else terminal_agent.turn_mcp(self.id, pinned)
             vnc_mcp = None if tool else vnc_agent.turn_mcp(self.id, pinned)
             spawn_mcp = None if tool else spawn_agent.turn_mcp(self.id, pinned)
+            files_mcp = None if tool else files_agent.turn_mcp(self.id, pinned)
             if not tool:
                 await session_links.prepare_turn(self.id, pinned, text)
                 from puppy import session_actions
@@ -3629,6 +3631,8 @@ class SessionHub:
                 driver_kwargs["session_mcp"] = session_mcp
             if task_mcp:
                 driver_kwargs["task_mcp"] = task_mcp
+            if files_mcp:
+                driver_kwargs["files_mcp"] = files_mcp
             if tool:
                 driver_kwargs["tool"] = tool_fields
             argv = driver.build_cmd(session, first_turn, prompt, pinned, **driver_kwargs)

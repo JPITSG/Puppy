@@ -22,7 +22,7 @@ from pathlib import Path
 import subprocess
 
 from puppy import (config, browser_agent, terminal_agent, vnc_agent,
-                   spawn_agent, session_agent, task_agent)
+                   spawn_agent, session_agent, task_agent, files_agent)
 from puppy.drivers.claude import ClaudeDriver
 from puppy.drivers.codex import CodexDriver
 from puppy.drivers.opencode import OpenCodeDriver
@@ -35,9 +35,9 @@ config.set_value("browser.enabled", True)
 bridges = {
     "spawn": spawn_agent, "browser": browser_agent,
     "terminal": terminal_agent, "vnc": vnc_agent, "session": session_agent,
-    "task": task_agent,
+    "task": task_agent, "files": files_agent,
 }
-# each bridge's editable policy; the session bridge has none
+# each bridge's editable policy; the session and file bridges have none
 policies = {"spawn": "spawn", "browser": "browser", "terminal": "terminal",
             "vnc": "vnc", "task": "tasks"}
 descriptors = {}
@@ -105,7 +105,7 @@ for engine, servers in (("codex", codex_servers), ("claude", claude_servers),
         assert server["env"]["PUPPY_DATA"] == str(node_data)
         assert (node_data / "config.json").read_bytes() == config_bytes
         assert list(child_cwd.iterdir()) == [], (engine, kind)
-print("MCP startup: six bridges through all three drivers passed")
+print("MCP startup: seven bridges through all three drivers passed")
 '''
 
 

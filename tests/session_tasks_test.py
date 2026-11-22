@@ -248,9 +248,17 @@ async def fold_flow(parent):
     applied = db.get_events(parent, limit=1)[0]['data']
     assert applied['subtype'] == 'session_task' and 'folded.txt' in applied['files'], applied
     (ap/'later.txt').write_text('never applied\n')
+    # A file the task's agent shared from its own copy moves to Main with
+    # the fold, so the archive's links keep working in Main's view.
+    from puppy import shared_files
+    (ap/'model.stl').write_bytes(b'solid fold\n')
+    share = shared_files.share(aid, 'model.stl')
+    (ap/'model.stl').unlink()
     result = await tasks.remove(parent, aid, True)
     assert result['folded'] is True and isinstance(result['seq'], int) and result['workspace_removed']
     assert tasks.record(aid) is None and db.get_session(aid) is None and not ap.exists()
+    assert share['id'] in {item['id'] for item in shared_files.shared(parent)}
+    assert shared_files.shared(aid) == []
     archive = db.get_events(parent, limit=1)[0]
     d = archive['data']
     assert archive['seq'] == result['seq'] and archive['kind'] == 'info'
@@ -310,8 +318,13 @@ async def fold_flow(parent):
     # Declining the fold removes the conversation outright.
     c = await tasks.create(parent, {'prompt': 'Discard me', 'request_id': 'fold-c'})
     finish(c['id'])
+    (Path(c['cwd'])/'gone.stl').write_bytes(b'solid gone\n')
+    discarded = shared_files.share(c['id'], 'gone.stl')
+    (Path(c['cwd'])/'gone.stl').unlink()
     result = await tasks.remove(parent, c['id'], False)
     assert result['folded'] is False and result['seq'] is None
+    assert discarded['id'] not in {item['id'] for item in shared_files.shared(parent)}
+    assert not (Path(config.DATA_DIR).resolve()/'uploads'/str(c['id'])).exists()
     assert len(tasks.folded(parent, 64)) == before + 1 and tasks.record(c['id']) is None
     # Blockers: a running task, a foreign parent, and a busy copy.
     busy = await tasks.create(parent, {'prompt': 'Busy', 'request_id': 'fold-d'})
