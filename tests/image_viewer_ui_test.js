@@ -113,7 +113,8 @@ const api = vm.runInContext(`({ attachmentChipNode, openImageViewer, openImageVi
   fillToolResultInto, toolImageItems, el, checkImagePreviews, imagePreviewUnavailable,
   imageViewerFit, imageViewerRange, imageViewerClamp, imageViewerAround, imageViewerCover,
   imageViewerInset, imageViewerVelocity, IMAGE_VIEWER_MAX_SCALE, IMAGE_VIEWER_TAP_MS,
-  imageMarkSizes, imageMarkBox, imageBoxShape, imageMarkArrow, imageArrowShape, markedImageName, IMAGE_MARK_COLOR })`, context);
+  imageMarkSizes, imageMarkBox, imageBoxShape, imageMarkArrow, imageArrowShape, imageMarkLine, markedImageName,
+  IMAGE_MARK_COLOR })`, context);
 const current = () => vm.runInContext("imageViewerOpen", context);
 const close = (a, b) => Math.abs(a - b) < 1e-6;
 /* values built inside the context carry its own prototypes; compare them as data */
@@ -674,7 +675,7 @@ console.log("PASS: Forward reopens a fresh viewer on the picture last shown, a f
 }
 console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in the head that opens the viewer without folding the card, the sent image's chips under the caption, local and remote, named for the file read, an unknown id or type never a picture");
 
-/* ---- marks on a waiting picture: a box and an arrow for the agent ---- */
+/* ---- marks on a waiting picture: a box, an arrow and a line for the agent ---- */
 {
   const near = (a, b) => Math.abs(a - b) < 1e-6;
   const sizes = api.imageMarkSizes(2000, 1000);
@@ -703,6 +704,17 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
   const shape = api.imageArrowShape({kind: "arrow", w: 6, x1: 200, y1: 100, x2: 100, y2: 100});
   assert.deepEqual(plain(shape.head[0]), [100, 100], "the head's point is the arrow's point");
   assert.ok(shape.shaft[2] > 100 && shape.head[1][0] > 100, "the shaft stops at the head");
+  assert.deepEqual(plain(api.imageMarkLine({x: 10, y: 20}, {x: 110, y: 70}, sizes)),
+    {kind: "line", w: 6, x1: 10, y1: 20, x2: 110, y2: 70}, "a line from the press to the release");
+  assert.equal(api.imageMarkLine({x: 10, y: 20}, {x: 11, y: 20}, sizes, false), null,
+    "a click draws no line: a line needs two points");
+  assert.equal(api.imageMarkLine({x: 10, y: 20}, {x: 10, y: 20}, sizes), null);
+  const level = api.imageMarkLine({x: 0, y: 0}, {x: 100, y: 12}, sizes, true, true);
+  assert.ok(level.y2 === 0 && near(level.x2, Math.hypot(100, 12)), "Shift holds it level, at the drag's length");
+  const upright = api.imageMarkLine({x: 0, y: 0}, {x: -9, y: -100}, sizes, true, true);
+  assert.ok(upright.x2 === 0 && near(upright.y2, -Math.hypot(9, 100)), "or upright");
+  const diagonal = api.imageMarkLine({x: 0, y: 0}, {x: 100, y: -80}, sizes, true, true);
+  assert.ok(near(diagonal.x2, -diagonal.y2) && diagonal.x2 > 0, "or on the diagonal nearest the drag");
   assert.equal(api.markedImageName("shot.png"), "shot-marked.png");
   assert.equal(api.markedImageName("shot-marked.png"), "shot-marked.png", "marked again, named once");
   assert.equal(api.markedImageName("photo.final.jpeg"), "photo.final-marked.png");
@@ -737,12 +749,13 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
 
   const {viewer, box} = waiting();
   const bar = viewer.bar.children;
-  assert.deepEqual([...bar].slice(0, 4).map(node => node.className),
-    ["icon-btn iv-tool iv-box", "icon-btn iv-tool iv-arrow", "icon-btn iv-tool iv-undo", "iv-sep"],
-    "the tools lead the bar, set off from the zoom");
-  assert.deepEqual([viewer.boxButton, viewer.arrowButton, viewer.undoButton].map(b => b.getAttribute("aria-label")),
-    ["Draw a box", "Draw an arrow", "Undo the last mark"]);
-  assert.ok(!viewer.boxButton.disabled && !viewer.arrowButton.disabled && viewer.undoButton.disabled);
+  assert.deepEqual([...bar].slice(0, 5).map(node => node.className),
+    ["icon-btn iv-tool iv-box", "icon-btn iv-tool iv-arrow", "icon-btn iv-tool iv-line", "icon-btn iv-tool iv-undo",
+     "iv-sep"], "the tools lead the bar, set off from the zoom");
+  assert.deepEqual([viewer.boxButton, viewer.arrowButton, viewer.lineButton, viewer.undoButton]
+    .map(b => b.getAttribute("aria-label")), ["Draw a box", "Draw an arrow", "Draw a line", "Undo the last mark"]);
+  assert.ok(!viewer.boxButton.disabled && !viewer.arrowButton.disabled && !viewer.lineButton.disabled &&
+    viewer.undoButton.disabled);
   assert.equal(viewer.boxButton.getAttribute("aria-pressed"), "false");
   const item = viewer.items[0];
 
@@ -832,8 +845,43 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
   cleared.viewer.undoButton.onclick();
   cleared.viewer.dialog.close();
   assert.deepEqual(cleared.box.applied.map(entry => entry[1]), [[]], "every mark taken back puts the picture back");
+
+  // a line: drawn live from the press to the pointer, kept on release; a click draws none
+  const lined = waiting();
+  const lv = lined.viewer, litem = lv.items[0];
+  lv.lineButton.onclick();
+  assert.ok(lv.lineButton.getAttribute("aria-pressed") === "true" && lv.lineButton.classList.contains("on") &&
+    lv.boxButton.getAttribute("aria-pressed") === "false" && lv.arrowButton.getAttribute("aria-pressed") === "false",
+    "one tool at a time");
+  const [lx, ly] = point(lv, 450, 380), [mx, my] = point(lv, 640, 460);
+  press(lv, "pointerdown", 1, 450, 380);
+  assert.equal(lv.marksLayer.children.length, 0, "nothing until the press travels");
+  press(lv, "pointermove", 1, 640, 460);
+  assert.equal(lv.marksLayer.children.length, 1, "the line shows while it is drawn");
+  const shown = lv.marksLayer.children[0];
+  assert.ok(shown.tag === "line" && shown.getAttribute("stroke") === api.IMAGE_MARK_COLOR &&
+    shown.getAttribute("stroke-linecap") === "round");
+  press(lv, "pointerup", 1, 640, 460);
+  assert.equal(litem.marks.length, 1);
+  const line = litem.marks[0];
+  assert.ok(line.kind === "line" && near(line.x1, lx) && near(line.y1, ly) && near(line.x2, mx) && near(line.y2, my),
+    "in the picture's own pixels");
+  press(lv, "pointerdown", 1, 300, 300);
+  press(lv, "pointerup", 1, 301, 300);
+  assert.equal(litem.marks.length, 1, "a click with the line on leaves the picture as it was");
+  // Shift holds it level
+  lv.stage.dispatchEvent(ev("pointerdown", {pointerId: 1, clientX: 400, clientY: 300, pointerType: "mouse", button: 0}));
+  lv.stage.dispatchEvent(ev("pointermove", {pointerId: 1, clientX: 600, clientY: 320, pointerType: "mouse",
+    button: 0, shiftKey: true}));
+  lv.stage.dispatchEvent(ev("pointerup", {pointerId: 1, clientX: 600, clientY: 320, pointerType: "mouse", button: 0}));
+  assert.ok(litem.marks.length === 2 && near(litem.marks[1].y2, litem.marks[1].y1), "Shift holds a line level");
+  key(lv, "z", {ctrlKey: true});
+  assert.equal(litem.marks.length, 1, "undo takes a line back like any mark");
+  lv.dialog.close();
+  assert.equal(lined.box.applied.length, 1);
+  assert.equal(lined.box.applied[0][1][0].kind, "line", "and the line goes to the prompt box");
 }
-console.log("PASS: marks on a waiting picture - rounded boxes and arrows sized for the picture, the tools leading the bar only for a picture a prompt box waits to send, a box from its drag or a click, an arrow pointing at the press from wherever it is let go, a pinch never half a mark, undo, and the marks handed to the box on close");
+console.log("PASS: marks on a waiting picture - rounded boxes, arrows and lines sized for the picture, the tools leading the bar only for a picture a prompt box waits to send, a box from its drag or a click, an arrow pointing at the press from wherever it is let go, a line between press and release (none from a click, held level by Shift), a pinch never half a mark, undo, and the marks handed to the box on close");
 
 /* ---- Copy: the picture onto the clipboard, offered only where a page may write one ---- */
 (async () => {

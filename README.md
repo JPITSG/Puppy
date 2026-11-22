@@ -566,12 +566,14 @@ pulling it up or down puts it away.
 
 A picture still waiting in a prompt box can be marked up for the agent before
 it is sent. The bar then starts with a red **box** (a rectangle with rounded
-corners) and a red **arrow** tool and an undo button. With the box on, drag
-across what you mean (hold Shift for a square) or click to box a spot. With the
-arrow on, press on what you mean and let go in any direction: the arrow points
-at the press and comes from where you let go (a plain click points up and to
-the left). Ctrl/Cmd+Z takes back the last mark, and a second finger still
-zooms. Marks are sized for the picture, whatever the zoom, and closing the
+corners), a red **arrow** and a red **line** tool and an undo button. With the
+box on, drag across what you mean (hold Shift for a square) or click to box a
+spot. With the arrow on, press on what you mean and let go in any direction:
+the arrow points at the press and comes from where you let go (a plain click
+points up and to the left). With the line on, drag from one end to the other
+to underline something or join two things (hold Shift to keep it level,
+upright or on a diagonal); a click draws no line. Ctrl/Cmd+Z takes back the
+last mark, and a second finger still zooms. Marks are sized for the picture, whatever the zoom, and closing the
 viewer puts a marked PNG copy (`<name>-marked.png`) in the picture's place;
 the message waits while it uploads. The prompt box keeps the unmarked picture,
 so opening the copy again shows the marks to change, and undoing them all

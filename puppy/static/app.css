@@ -3468,6 +3468,9 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
    of bar around them as the top and bottom, never a corner in its curve */
 .iv-bar .icon-btn,.iv-bar .iv-level{border-radius:calc(var(--r-md) - var(--iv-bar-pad) - 1px)}
 .iv-bar .icon-btn{width:34px;height:34px;color:var(--txt)}
+/* four marking tools, zoom, copy and download stay on one screen's width
+   on the narrowest phones too */
+@media (max-width:380px){.iv-bar .icon-btn{width:30px}}
 /* the download stands apart from the zoom it is not part of */
 .iv-sep{flex:none;width:1px;height:20px;margin:0 4px;background:var(--tip-line)}
 .iv-level{

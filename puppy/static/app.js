@@ -325,7 +325,7 @@ function downloadIcon(size) {
    previous and next. */
 /* The image viewer's marking tools, on the download glyph's 12-grid and
    stroke: a box with rounded corners, an arrow pointing up and to the left,
-   and undo. */
+   a line rising to the right, and undo. */
 function markToolIcon(kind, size = 14) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -338,6 +338,7 @@ function markToolIcon(kind, size = 14) {
     box: "M3.5 2.75 H8.5 A1.75 1.75 0 0 1 10.25 4.5 V7.5 A1.75 1.75 0 0 1 8.5 9.25 H3.5 " +
       "A1.75 1.75 0 0 1 1.75 7.5 V4.5 A1.75 1.75 0 0 1 3.5 2.75 Z",
     arrow: "M9.5 9.5 L2.75 2.75 M2.75 7 L2.75 2.75 7 2.75",
+    line: "M2.75 9.25 L9.25 2.75",
     undo: "M4.25 2.5 L2.25 4.5 4.25 6.5 M2.5 4.5 H7.25 A2.5 2.5 0 0 1 7.25 9.5 H5",
   }[kind]);
   p.setAttribute("stroke", "currentColor");
@@ -18837,7 +18838,8 @@ function imageViewerVisibleBox(node) {
 
 /* ---- marks on a waiting picture ----
    A picture waiting in a prompt box can carry red marks for the agent: a
-   box with rounded corners around something, an arrow pointing at it. Marks
+   box with rounded corners around something, an arrow pointing at it, a
+   line under it or between two things. Marks
    are kept in the picture's own pixels and sized for the picture rather than
    the zoom they were drawn at, so the copy the agent receives shows them as
    they looked. */
@@ -18894,6 +18896,24 @@ function imageMarkArrow(tip, toward, sizes, moved = true) {
            y1: tip.y + dy / length * sizes.arrow, x2: tip.x, y2: tip.y };
 }
 
+/* The line a drag draws: from the press to wherever the pointer is let go,
+   held to the nearest eighth of a turn with `snap` (Shift) at the same
+   length. A press that did not travel draws nothing - a line needs two
+   points - so a click with the line on leaves the picture as it was. */
+function imageMarkLine(from, to, sizes, moved = true, snap = false) {
+  let dx = to.x - from.x, dy = to.y - from.y;
+  const length = Math.hypot(dx, dy);
+  if (!moved || length < 0.5) return null;
+  if (snap) {
+    const angle = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+    dx = Math.cos(angle) * length; dy = Math.sin(angle) * length;
+    // an exact zero, not cos(pi/2)'s 6e-17, so a level line stays level
+    if (Math.abs(dx) < 1e-9) dx = 0;
+    if (Math.abs(dy) < 1e-9) dy = 0;
+  }
+  return { kind: "line", w: sizes.stroke, x1: from.x, y1: from.y, x2: from.x + dx, y2: from.y + dy };
+}
+
 /* An arrow as drawn: its shaft from the tail to the head's base, and the
    head's three corners, the first its point. */
 function imageArrowShape(mark) {
@@ -18927,6 +18947,9 @@ function drawImageMarks(svg, marks) {
       add("polygon", { points: shape.head.map(([x, y]) => x + "," + y).join(" "),
         fill: IMAGE_MARK_COLOR, stroke: IMAGE_MARK_COLOR, "stroke-width": mark.w * 0.5,
         "stroke-linejoin": "round" });
+    } else if (mark.kind === "line") {
+      add("line", { x1: mark.x1, y1: mark.y1, x2: mark.x2, y2: mark.y2,
+        stroke: IMAGE_MARK_COLOR, "stroke-width": mark.w, "stroke-linecap": "round" });
     }
   }
 }
@@ -18960,6 +18983,12 @@ function paintImageMarks(ctx, marks) {
       shape.head.forEach(([x, y], at) => at ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
       ctx.closePath();
       ctx.fill();
+      ctx.stroke();
+    } else if (mark.kind === "line") {
+      ctx.lineWidth = mark.w;
+      ctx.beginPath();
+      ctx.moveTo(mark.x1, mark.y1);
+      ctx.lineTo(mark.x2, mark.y2);
       ctx.stroke();
     }
   }
@@ -19009,7 +19038,7 @@ class ImageViewer {
     this.bare = false;
     this.lastTap = null;
     this.timers = new Set();
-    this.tool = "";                // the marking tool that is on: "", "box" or "arrow"
+    this.tool = "";                // the marking tool that is on: "", "box", "arrow" or "line"
     this.draft = null;             // the mark a press is drawing
   }
 
@@ -19082,16 +19111,18 @@ class ImageViewer {
       };
       this.boxButton = tool("box", "Draw a box");
       this.arrowButton = tool("arrow", "Draw an arrow");
+      this.lineButton = tool("line", "Draw a line");
       this.undoButton = tool("undo", "Undo the last mark");
-      this.boxButton.setAttribute("aria-pressed", "false");
-      this.arrowButton.setAttribute("aria-pressed", "false");
-      this.boxButton.onclick = () => this.setTool(this.tool === "box" ? "" : "box");
-      this.arrowButton.onclick = () => this.setTool(this.tool === "arrow" ? "" : "arrow");
+      this.toolButtons = { box: this.boxButton, arrow: this.arrowButton, line: this.lineButton };
+      for (const [kind, button] of Object.entries(this.toolButtons)) {
+        button.setAttribute("aria-pressed", "false");
+        button.onclick = () => this.setTool(this.tool === kind ? "" : kind);
+      }
       this.undoButton.onclick = () => this.undoMark();
       const sep = el("span", "iv-sep");
       sep.setAttribute("aria-hidden", "true");
       const first = this.bar.firstElementChild;
-      for (const node of [this.boxButton, this.arrowButton, this.undoButton, sep])
+      for (const node of [this.boxButton, this.arrowButton, this.lineButton, this.undoButton, sep])
         this.bar.insertBefore(node, first);
     }
     this.prevButton.onclick = () => this.go(this.index - 1);
@@ -19372,8 +19403,7 @@ class ImageViewer {
   syncTools() {
     if (!this.boxButton) return;
     const item = this.markItem(), on = !!item && this.ready;
-    this.enable(this.boxButton, on);
-    this.enable(this.arrowButton, on);
+    for (const button of Object.values(this.toolButtons)) this.enable(button, on);
     this.enable(this.undoButton, on && item.marks.length > 0);
     if (!on && this.tool) this.setTool("");
   }
@@ -19382,10 +19412,10 @@ class ImageViewer {
     this.tool = tool;
     this.m.classList.toggle("iv-marking", !!tool);
     if (!this.boxButton) return;
-    this.boxButton.setAttribute("aria-pressed", String(tool === "box"));
-    this.arrowButton.setAttribute("aria-pressed", String(tool === "arrow"));
-    this.boxButton.classList.toggle("on", tool === "box");
-    this.arrowButton.classList.toggle("on", tool === "arrow");
+    for (const [kind, button] of Object.entries(this.toolButtons)) {
+      button.setAttribute("aria-pressed", String(tool === kind));
+      button.classList.toggle("on", tool === kind);
+    }
   }
 
   undoMark() {
@@ -19399,8 +19429,9 @@ class ImageViewer {
   /* What a press is drawing, from where it began to where the pointer is. */
   draftMark(g, p, square = false) {
     const to = this.imagePoint(p);
-    return this.tool === "box" ? imageMarkBox(g.from, to, this.sizes(), g.moved, square) :
-      imageMarkArrow(g.from, to, this.sizes(), g.moved);
+    if (this.tool === "box") return imageMarkBox(g.from, to, this.sizes(), g.moved, square);
+    if (this.tool === "line") return imageMarkLine(g.from, to, this.sizes(), g.moved, square);
+    return imageMarkArrow(g.from, to, this.sizes(), g.moved);
   }
 
   /* Closing hands every picture whose marks changed to its prompt box, which

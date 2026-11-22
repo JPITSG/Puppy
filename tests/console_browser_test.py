@@ -2296,14 +2296,16 @@ async def composer_resize_checks(instance):
 
 
 async def image_mark_checks(instance):
-    """A picture waiting in a prompt box takes red boxes for the agent, and
-    the bar that offers them keeps one even ring of bar around its first and
-    last controls. In real layout on a desktop and a phone in both themes: a
-    lit box tool and the download stand as far in from the bar's ends as
-    from its top and bottom, every control's corners follow the bar's at
-    that inset, a real drag draws a box with rounded corners in the
-    picture's red, and closing hands the box to the prompt box. MARK_SHOT
-    names a directory to save each bar and box for a look."""
+    """A picture waiting in a prompt box takes red boxes and lines for the
+    agent, and the bar that offers them keeps one even ring of bar around
+    its first and last controls. In real layout on a desktop and phones in
+    both themes: the bar inside the screen's width (the narrowest phone's
+    buttons a little narrower), a lit box tool and the download as far in
+    from the bar's ends as from its top and bottom, every control's corners
+    following the bar's at that inset, a real drag drawing a box with
+    rounded corners in the picture's red and another a line, the marked copy
+    red along that line, and closing handing both to the prompt box.
+    MARK_SHOT names a directory to save each bar and its marks for a look."""
     page = instance.page_session
     shots = os.environ.get("MARK_SHOT")
     measure = """(() => {
@@ -2317,7 +2319,9 @@ async def image_mark_checks(instance):
             lastTop: l.top - b.top, lastBottom: b.bottom - l.bottom,
             radius: parseFloat(cs.borderTopLeftRadius), border: parseFloat(cs.borderTopWidth),
             radii: controls.map(n => parseFloat(getComputedStyle(n).borderTopLeftRadius)),
-            bar: [b.left, b.top, b.width, b.height]};
+            bar: [b.left, b.top, b.width, b.height], vw: innerWidth,
+            line: v.lineButton ? v.lineButton.getAttribute('aria-label') : '',
+            tools: [...bar.querySelectorAll('.iv-tool')].map(n => n.classList[2])};
     })()"""
 
     async def mouse(kind, x, y, buttons=0):
@@ -2340,7 +2344,8 @@ async def image_mark_checks(instance):
 
     try:
         for width, height, scale, mobile, theme in ((1280, 800, 1, False, "dark"), (1280, 800, 1, False, "light"),
-                                                    (390, 844, 2, True, "dark"), (390, 844, 2, True, "light")):
+                                                    (390, 844, 2, True, "dark"), (390, 844, 2, True, "light"),
+                                                    (360, 740, 2, True, "dark")):
             await instance.call("Emulation.setDeviceMetricsOverride", {
                 "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile}, session=page)
             await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); true")
@@ -2384,6 +2389,8 @@ async def image_mark_checks(instance):
                 assert abs(g[side] - inset) < 0.6, ("one even ring around the ends", side, where)
             assert all(abs(r - (g["radius"] - inset)) < 0.01 for r in g["radii"]), \
                 ("every control's corners follow the bar's", where)
+            assert g["tools"] == ["iv-box", "iv-arrow", "iv-line", "iv-undo"] and g["line"] == "Draw a line", where
+            assert g["bar"][0] >= 4 and g["bar"][0] + g["bar"][2] <= g["vw"] - 4, ("the bar fits the screen", where)
             await shot("bar-{}-{}".format(width, theme), g["bar"])
             # a real drag across the picture draws a box with rounded corners
             pic = await evaluate(instance, """(() => { const r = imageViewerOpen.img.getBoundingClientRect();
@@ -2406,21 +2413,56 @@ async def image_mark_checks(instance):
             assert drawn["stroke"] == drawn["color"], drawn
             assert abs(mark["width"] / mark["height"] - (0.45 * pic[2]) / (0.35 * pic[3])) < 0.02, \
                 ("the box between the press and the release", drawn, pic)
-            await shot("box-{}-{}".format(width, theme), pic)
+            # the line tool: a real drag draws a straight red line between press and release
+            tool = await evaluate(instance, """(() => { const r = imageViewerOpen.lineButton.getBoundingClientRect();
+                return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()""")
+            await click(tool["x"], tool["y"])
+            cx, cy = pic[0] + pic[2] * 0.15, pic[1] + pic[3] * 0.85
+            dx, dy = pic[0] + pic[2] * 0.85, pic[1] + pic[3] * 0.8
+            await mouse("mouseMoved", cx, cy)
+            await mouse("mousePressed", cx, cy, 1)
+            await mouse("mouseMoved", (cx + dx) / 2, (cy + dy) / 2, 1)
+            await mouse("mouseMoved", dx, dy, 1)
+            await mouse("mouseReleased", dx, dy, 0)
+            lined = await evaluate(instance, """(async () => { const v = imageViewerOpen;
+                const line = v.marksLayer.querySelector('line');
+                const marks = v.items[0].marks.map(m => ({...m}));
+                const mark = marks[marks.length - 1];
+                // the copy the agent receives: red along the line, the picture's own colour beside it
+                const blob = await imageWithMarks(v.items[0].url, marks);
+                const img = new Image(); img.src = URL.createObjectURL(blob); await img.decode();
+                const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+                const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+                const at = (x, y) => [...g.getImageData(Math.round(x), Math.round(y), 1, 1).data];
+                const mx = (mark.x1 + mark.x2) / 2, my = (mark.y1 + mark.y2) / 2;
+                return {count: marks.length, kind: mark.kind, tool: v.lineButton.classList.contains('on'),
+                        stroke: line ? line.getAttribute('stroke') : '', cap: line ? line.getAttribute('stroke-linecap') : '',
+                        on: at(mx, my), off: at(mx, my - mark.w * 4), size: [c.width, c.height],
+                        mark, color: IMAGE_MARK_COLOR}; })()""")
+            assert lined["count"] == 2 and lined["kind"] == "line" and lined["tool"], (where, lined)
+            assert lined["stroke"] == lined["color"] and lined["cap"] == "round", lined
+            mark = lined["mark"]
+            assert abs((mark["x2"] - mark["x1"]) / lined["size"][0] - 0.7) < 0.02 and \
+                abs((mark["y2"] - mark["y1"]) / lined["size"][1] + 0.05) < 0.02, ("from press to release", lined)
+            # the stroke's own red, give or take its anti-aliased edge
+            r, g, b = lined["on"][:3]
+            assert r >= 240 and g <= 90 and b <= 90, ("the copy is red on the line", lined)
+            assert lined["off"][:3] == [0xdf, 0xe6, 0xee], ("and the picture beside it", lined)
+            await shot("marks-{}-{}".format(width, theme), pic)
             await instance.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape",
                                                            "windowsVirtualKeyCode": 27}, session=page)
             await instance.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Escape", "code": "Escape",
                                                            "windowsVirtualKeyCode": 27}, session=page)
             await until(instance, "!imageViewerOpen && markApplied.length === 1")
             applied = await evaluate(instance, "markApplied[0]")
-            assert len(applied) == 1 and applied[0]["kind"] == "box", applied
+            assert [mark["kind"] for mark in applied] == ["box", "line"], applied
     finally:
         await evaluate(instance, "document.querySelectorAll('.mark-lane').forEach(n => n.remove()); "
                                  "applyTheme('dark'); true")
         await instance.call("Emulation.clearDeviceMetricsOverride", {}, session=page)
-    print("PASS: a waiting picture's marking bar keeps one even ring around its ends with its controls' "
-          "corners following the bar's, and a real drag draws a rounded box handed to the prompt box, "
-          "desktop/phone in both themes", flush=True)
+    print("PASS: a waiting picture's marking bar fits the screen and keeps one even ring around its ends with "
+          "its controls' corners following the bar's, and real drags draw a rounded box and a line - red in the "
+          "marked copy - handed to the prompt box, desktop and phones in both themes", flush=True)
 
 
 async def tool_image_checks(instance):
