@@ -350,6 +350,27 @@ function markToolIcon(kind, size = 14) {
   return svg;
 }
 
+/* The marking bar's colour button: a dot of the colour new marks take, ringed
+   in the bar's own ink so white and black read on either theme. */
+function markColorIcon(color, size = 14) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 12 12");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("aria-hidden", "true");
+  const dot = document.createElementNS(NS, "circle");
+  dot.setAttribute("cx", "6");
+  dot.setAttribute("cy", "6");
+  dot.setAttribute("r", "4.5");
+  dot.setAttribute("fill", color);
+  dot.setAttribute("stroke", "currentColor");
+  dot.setAttribute("stroke-opacity", "0.55");
+  dot.setAttribute("stroke-width", "1");
+  svg.appendChild(dot);
+  return svg;
+}
+
 function chevronIcon(size, direction = "right") {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -14122,6 +14143,13 @@ function openChoiceMenu(anchor, { opts = [], current = "", onPick = () => {},
     opts.forEach((o, index) => {
       const selected = !actions && current === o.value;
       const row = choiceOptionNode(o.label, selected);
+      if (o.swatch) {
+        // a colour list's row leads with the colour itself
+        const swatch = el("span", "choice-swatch");
+        swatch.style.background = o.swatch;
+        swatch.setAttribute("aria-hidden", "true");
+        row.insertBefore(swatch, row.firstElementChild);
+      }
       row._choiceKey = "option:" + o.value;
       row._choiceValue = o.value;
       const starred = !!stars && (starPending !== null ? starPending : stars.value) === o.value;
@@ -18843,8 +18871,37 @@ function imageViewerVisibleBox(node) {
    are kept in the picture's own pixels and sized for the picture rather than
    the zoom they were drawn at, so the copy the agent receives shows them as
    they looked. */
-const IMAGE_MARK_COLOR = "#ff2b2b";   // burned into the picture, so no theme token
+/* The colours a mark can take: the standard set, burned into the picture, so
+   fixed values rather than theme tokens. Red is where every browser starts;
+   the last one picked is remembered per browser (`puppy.markColor`, one of
+   the names here exactly, anything else read as red). */
+const IMAGE_MARK_COLORS = [
+  { value: "red", label: "Red", hex: "#ff2b2b" },
+  { value: "orange", label: "Orange", hex: "#ff8a1f" },
+  { value: "yellow", label: "Yellow", hex: "#ffd400" },
+  { value: "green", label: "Green", hex: "#22c55e" },
+  { value: "blue", label: "Blue", hex: "#2f80ff" },
+  { value: "purple", label: "Purple", hex: "#a855f7" },
+  { value: "black", label: "Black", hex: "#000000" },
+  { value: "white", label: "White", hex: "#ffffff" },
+];
+const IMAGE_MARK_COLOR = IMAGE_MARK_COLORS[0].hex;
+const IMAGE_MARK_COLOR_PREF = "puppy.markColor";
 const IMAGE_MARK_TRAVEL = 4;          // screen px a press must move to be a drag
+
+function imageMarkColor(value) {
+  return IMAGE_MARK_COLORS.find(color => color.value === value) || IMAGE_MARK_COLORS[0];
+}
+
+function imageMarkColorPref() {
+  let value = null;
+  try { value = lsGet(IMAGE_MARK_COLOR_PREF); } catch (_) { /* storage is optional */ }
+  return imageMarkColor(value).value;
+}
+
+function setImageMarkColorPref(value) {
+  try { lsSet(IMAGE_MARK_COLOR_PREF, value); } catch (_) { /* storage is optional */ }
+}
 
 function imageMarkSizes(width, height) {
   const side = Math.max(1, Math.min(width, height));
@@ -18936,29 +18993,29 @@ function drawImageMarks(svg, marks) {
     svg.appendChild(node);
   };
   for (const mark of marks) {
+    const color = mark.color || IMAGE_MARK_COLOR;
     if (mark.kind === "box") {
       const box = imageBoxShape(mark);
       add("rect", { x: box.x, y: box.y, width: box.width, height: box.height, rx: box.r, ry: box.r,
-        fill: "none", stroke: IMAGE_MARK_COLOR, "stroke-width": mark.w });
+        fill: "none", stroke: color, "stroke-width": mark.w });
     } else if (mark.kind === "arrow") {
       const shape = imageArrowShape(mark);
       add("line", { x1: shape.shaft[0], y1: shape.shaft[1], x2: shape.shaft[2], y2: shape.shaft[3],
-        stroke: IMAGE_MARK_COLOR, "stroke-width": mark.w, "stroke-linecap": "round" });
+        stroke: color, "stroke-width": mark.w, "stroke-linecap": "round" });
       add("polygon", { points: shape.head.map(([x, y]) => x + "," + y).join(" "),
-        fill: IMAGE_MARK_COLOR, stroke: IMAGE_MARK_COLOR, "stroke-width": mark.w * 0.5,
-        "stroke-linejoin": "round" });
+        fill: color, stroke: color, "stroke-width": mark.w * 0.5, "stroke-linejoin": "round" });
     } else if (mark.kind === "line") {
       add("line", { x1: mark.x1, y1: mark.y1, x2: mark.x2, y2: mark.y2,
-        stroke: IMAGE_MARK_COLOR, "stroke-width": mark.w, "stroke-linecap": "round" });
+        stroke: color, "stroke-width": mark.w, "stroke-linecap": "round" });
     }
   }
 }
 
 /* The same marks onto a canvas, for the copy the agent receives. */
 function paintImageMarks(ctx, marks) {
-  ctx.strokeStyle = ctx.fillStyle = IMAGE_MARK_COLOR;
   ctx.lineCap = ctx.lineJoin = "round";
   for (const mark of marks) {
+    ctx.strokeStyle = ctx.fillStyle = mark.color || IMAGE_MARK_COLOR;
     if (mark.kind === "box") {
       // the same corners an SVG rect's rx draws: a quarter circle each
       const { x, y, width, height, r } = imageBoxShape(mark);
@@ -19039,6 +19096,7 @@ class ImageViewer {
     this.lastTap = null;
     this.timers = new Set();
     this.tool = "";                // the marking tool that is on: "", "box", "arrow" or "line"
+    this.markColor = imageMarkColorPref();   // the colour new marks take
     this.draft = null;             // the mark a press is drawing
   }
 
@@ -19112,18 +19170,24 @@ class ImageViewer {
       this.boxButton = tool("box", "Draw a box");
       this.arrowButton = tool("arrow", "Draw an arrow");
       this.lineButton = tool("line", "Draw a line");
+      this.colorButton = el("button", "icon-btn iv-tool iv-color");
+      this.colorButton.type = "button";
+      this.paintColorButton();
       this.undoButton = tool("undo", "Undo the last mark");
       this.toolButtons = { box: this.boxButton, arrow: this.arrowButton, line: this.lineButton };
       for (const [kind, button] of Object.entries(this.toolButtons)) {
         button.setAttribute("aria-pressed", "false");
         button.onclick = () => this.setTool(this.tool === kind ? "" : kind);
       }
+      this.colorButton.onclick = () => this.pickColor();
       this.undoButton.onclick = () => this.undoMark();
       const sep = el("span", "iv-sep");
       sep.setAttribute("aria-hidden", "true");
       const first = this.bar.firstElementChild;
-      for (const node of [this.boxButton, this.arrowButton, this.lineButton, this.undoButton, sep])
+      for (const node of [this.boxButton, this.arrowButton, this.lineButton, this.colorButton,
+                          this.undoButton, sep])
         this.bar.insertBefore(node, first);
+      m.classList.add("iv-markable");
     }
     this.prevButton.onclick = () => this.go(this.index - 1);
     this.nextButton.onclick = () => this.go(this.index + 1);
@@ -19404,6 +19468,7 @@ class ImageViewer {
     if (!this.boxButton) return;
     const item = this.markItem(), on = !!item && this.ready;
     for (const button of Object.values(this.toolButtons)) this.enable(button, on);
+    this.enable(this.colorButton, on);
     this.enable(this.undoButton, on && item.marks.length > 0);
     if (!on && this.tool) this.setTool("");
   }
@@ -19418,6 +19483,28 @@ class ImageViewer {
     }
   }
 
+  /* The colour button wears the colour new marks take; its list is the
+     console's own choice menu, each colour by its name beside its swatch. */
+  paintColorButton() {
+    const color = imageMarkColor(this.markColor);
+    this.colorButton.replaceChildren(markColorIcon(color.hex));
+    this.colorButton.setAttribute("aria-label", `Mark color: ${color.label}`);
+  }
+
+  pickColor() {
+    openChoiceMenu(this.colorButton, {
+      opts: IMAGE_MARK_COLORS.map(color => ({ value: color.value, label: color.label, swatch: color.hex })),
+      current: this.markColor, label: "Mark color",
+      onPick: value => this.setMarkColor(value),
+    });
+  }
+
+  setMarkColor(value) {
+    this.markColor = imageMarkColor(value).value;
+    setImageMarkColorPref(this.markColor);
+    this.paintColorButton();
+  }
+
   undoMark() {
     const item = this.markItem();
     if (!item || !item.marks.length) return;
@@ -19429,9 +19516,11 @@ class ImageViewer {
   /* What a press is drawing, from where it began to where the pointer is. */
   draftMark(g, p, square = false) {
     const to = this.imagePoint(p);
-    if (this.tool === "box") return imageMarkBox(g.from, to, this.sizes(), g.moved, square);
-    if (this.tool === "line") return imageMarkLine(g.from, to, this.sizes(), g.moved, square);
-    return imageMarkArrow(g.from, to, this.sizes(), g.moved);
+    const mark = this.tool === "box" ? imageMarkBox(g.from, to, this.sizes(), g.moved, square) :
+      this.tool === "line" ? imageMarkLine(g.from, to, this.sizes(), g.moved, square) :
+      imageMarkArrow(g.from, to, this.sizes(), g.moved);
+    if (mark) mark.color = imageMarkColor(this.markColor).hex;
+    return mark;
   }
 
   /* Closing hands every picture whose marks changed to its prompt box, which

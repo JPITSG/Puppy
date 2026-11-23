@@ -2321,7 +2321,8 @@ async def image_mark_checks(instance):
             radii: controls.map(n => parseFloat(getComputedStyle(n).borderTopLeftRadius)),
             bar: [b.left, b.top, b.width, b.height], vw: innerWidth,
             line: v.lineButton ? v.lineButton.getAttribute('aria-label') : '',
-            tools: [...bar.querySelectorAll('.iv-tool')].map(n => n.classList[2])};
+            tools: [...bar.querySelectorAll('.iv-tool')].map(n => n.classList[2]),
+            zoom: [...bar.querySelectorAll('.iv-out,.iv-in')].map(n => getComputedStyle(n).display !== 'none')};
     })()"""
 
     async def mouse(kind, x, y, buttons=0):
@@ -2352,6 +2353,7 @@ async def image_mark_checks(instance):
             spot = await evaluate(instance, r"""(async () => {
                 if (typeof closeDrawer === 'function') closeDrawer();
                 document.querySelectorAll('.mark-lane').forEach(n => n.remove());
+                lsDel('puppy.markColor');
                 const c = document.createElement('canvas'); c.width = 800; c.height = 500;
                 const g = c.getContext('2d'); g.fillStyle = '#dfe6ee'; g.fillRect(0, 0, 800, 500);
                 const url = c.toDataURL('image/png');
@@ -2389,7 +2391,10 @@ async def image_mark_checks(instance):
                 assert abs(g[side] - inset) < 0.6, ("one even ring around the ends", side, where)
             assert all(abs(r - (g["radius"] - inset)) < 0.01 for r in g["radii"]), \
                 ("every control's corners follow the bar's", where)
-            assert g["tools"] == ["iv-box", "iv-arrow", "iv-line", "iv-undo"] and g["line"] == "Draw a line", where
+            assert g["tools"] == ["iv-box", "iv-arrow", "iv-line", "iv-color", "iv-undo"] and \
+                g["line"] == "Draw a line", where
+            assert g["zoom"] == ([False, False] if width <= 440 else [True, True]), \
+                ("on a phone the zoom buttons give the tools their room", where)
             assert g["bar"][0] >= 4 and g["bar"][0] + g["bar"][2] <= g["vw"] - 4, ("the bar fits the screen", where)
             await shot("bar-{}-{}".format(width, theme), g["bar"])
             # a real drag across the picture draws a box with rounded corners
@@ -2413,7 +2418,43 @@ async def image_mark_checks(instance):
             assert drawn["stroke"] == drawn["color"], drawn
             assert abs(mark["width"] / mark["height"] - (0.45 * pic[2]) / (0.35 * pic[3])) < 0.02, \
                 ("the box between the press and the release", drawn, pic)
-            # the line tool: a real drag draws a straight red line between press and release
+            # the colour: the console's own choice menu over the viewer, Escape closing it alone
+            spot_of = """(() => { const r = %s.getBoundingClientRect();
+                return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()"""
+            swatch = await evaluate(instance, spot_of % "imageViewerOpen.colorButton")
+            await click(swatch["x"], swatch["y"])
+            placed = ("document.querySelectorAll('.choice-menu.dyn .choice-option').length === 8 && "
+                      "document.querySelector('.choice-menu.dyn').style.visibility === 'visible'")
+            await until(instance, placed)
+            menu = await evaluate(instance, """(() => { const menu = document.querySelector('.choice-menu.dyn');
+                const rows = [...menu.querySelectorAll('.choice-option')], r = menu.getBoundingClientRect();
+                const bar = imageViewerOpen.bar.getBoundingClientRect();
+                return {labels: rows.map(row => row.querySelector('.choice-option-label').textContent),
+                    swatches: rows.map(row => getComputedStyle(row.querySelector('.choice-swatch')).backgroundColor),
+                    selected: rows.filter(row => row.classList.contains('selected')).map(row => row.textContent),
+                    top: rows.every(row => { const b = row.getBoundingClientRect();
+                        return row.contains(document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2)); }),
+                    inside: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight,
+                    above: r.bottom <= bar.top,
+                    clip: [Math.min(r.left, bar.left), r.top, Math.max(r.right, bar.right) - Math.min(r.left, bar.left),
+                           bar.bottom - r.top]}; })()""")
+            await shot("menu-{}-{}".format(width, theme), menu["clip"])
+            assert menu["labels"] == ["Red", "Orange", "Yellow", "Green", "Blue", "Purple", "Black", "White"], menu
+            assert menu["swatches"][0] == "rgb(255, 43, 43)" and menu["swatches"][-1] == "rgb(255, 255, 255)", menu
+            assert menu["selected"] == ["Red"] and menu["top"] and menu["inside"] and menu["above"], (where, menu)
+            await instance.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape",
+                                                           "windowsVirtualKeyCode": 27}, session=page)
+            await instance.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Escape", "code": "Escape",
+                                                           "windowsVirtualKeyCode": 27}, session=page)
+            await until(instance, "!document.querySelector('.choice-menu.dyn') && !!imageViewerOpen")
+            await click(swatch["x"], swatch["y"])
+            await until(instance, placed)
+            blue = await evaluate(instance, spot_of % "document.querySelectorAll('.choice-menu.dyn .choice-option')[4]")
+            await click(blue["x"], blue["y"])
+            await until(instance, "!document.querySelector('.choice-menu.dyn') && "
+                                  "imageViewerOpen.colorButton.getAttribute('aria-label') === 'Mark color: Blue'")
+            await shot("color-{}-{}".format(width, theme), g["bar"])
+            # the line tool: a real drag draws a straight blue line between press and release
             tool = await evaluate(instance, """(() => { const r = imageViewerOpen.lineButton.getBoundingClientRect();
                 return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()""")
             await click(tool["x"], tool["y"])
@@ -2438,15 +2479,16 @@ async def image_mark_checks(instance):
                 return {count: marks.length, kind: mark.kind, tool: v.lineButton.classList.contains('on'),
                         stroke: line ? line.getAttribute('stroke') : '', cap: line ? line.getAttribute('stroke-linecap') : '',
                         on: at(mx, my), off: at(mx, my - mark.w * 4), size: [c.width, c.height],
-                        mark, color: IMAGE_MARK_COLOR}; })()""")
+                        mark, box: v.marksLayer.querySelector('rect').getAttribute('stroke')}; })()""")
             assert lined["count"] == 2 and lined["kind"] == "line" and lined["tool"], (where, lined)
-            assert lined["stroke"] == lined["color"] and lined["cap"] == "round", lined
+            assert lined["stroke"] == "#2f80ff" and lined["cap"] == "round", lined
+            assert lined["box"] == "#ff2b2b", ("the box drawn earlier keeps its red", lined)
             mark = lined["mark"]
             assert abs((mark["x2"] - mark["x1"]) / lined["size"][0] - 0.7) < 0.02 and \
                 abs((mark["y2"] - mark["y1"]) / lined["size"][1] + 0.05) < 0.02, ("from press to release", lined)
-            # the stroke's own red, give or take its anti-aliased edge
+            # the stroke's own blue, give or take its anti-aliased edge
             r, g, b = lined["on"][:3]
-            assert r >= 240 and g <= 90 and b <= 90, ("the copy is red on the line", lined)
+            assert b >= 235 and r <= 110 and 100 <= g <= 160, ("the copy is blue on the line", lined)
             assert lined["off"][:3] == [0xdf, 0xe6, 0xee], ("and the picture beside it", lined)
             await shot("marks-{}-{}".format(width, theme), pic)
             await instance.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape",
@@ -2455,14 +2497,17 @@ async def image_mark_checks(instance):
                                                            "windowsVirtualKeyCode": 27}, session=page)
             await until(instance, "!imageViewerOpen && markApplied.length === 1")
             applied = await evaluate(instance, "markApplied[0]")
-            assert [mark["kind"] for mark in applied] == ["box", "line"], applied
+            assert [(mark["kind"], mark["color"]) for mark in applied] == [("box", "#ff2b2b"), ("line", "#2f80ff")], \
+                applied
     finally:
         await evaluate(instance, "document.querySelectorAll('.mark-lane').forEach(n => n.remove()); "
-                                 "applyTheme('dark'); true")
+                                 "lsDel('puppy.markColor'); applyTheme('dark'); true")
         await instance.call("Emulation.clearDeviceMetricsOverride", {}, session=page)
-    print("PASS: a waiting picture's marking bar fits the screen and keeps one even ring around its ends with "
-          "its controls' corners following the bar's, and real drags draw a rounded box and a line - red in the "
-          "marked copy - handed to the prompt box, desktop and phones in both themes", flush=True)
+    print("PASS: a waiting picture's marking bar fits the screen (the zoom buttons stepping aside on a phone) and "
+          "keeps one even ring around its ends with its controls' corners following the bar's; the colour menu "
+          "opens over the viewer with Escape closing it alone, and real drags draw a red box and, after a real "
+          "pick of blue, a blue line - blue in the marked copy - handed to the prompt box, desktop and phones in "
+          "both themes", flush=True)
 
 
 async def tool_image_checks(instance):

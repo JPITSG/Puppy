@@ -88,7 +88,14 @@ function modal(html, className = "", reopen = null) {
           onDismiss: fn => { record.dismissal = fn; }};
 }
 
+/* the browser's own storage and the console's shared choice menu, as the
+   marking bar's colour reaches them */
+const stored = new Map();
+const menus = [];
 const context = vm.createContext({
+  lsGet: key => stored.has(key) ? stored.get(key) : null,
+  lsSet: (key, value) => stored.set(key, String(value)),
+  openChoiceMenu: (anchor, spec) => { menus.push({anchor, spec}); return {}; },
   document, window, modal, console, Math, Number, Promise, AbortController,
   fetch: async () => ({status: 200}),
   setTimeout: setTimeoutFake, clearTimeout: clearTimeoutFake,
@@ -114,7 +121,7 @@ const api = vm.runInContext(`({ attachmentChipNode, openImageViewer, openImageVi
   imageViewerFit, imageViewerRange, imageViewerClamp, imageViewerAround, imageViewerCover,
   imageViewerInset, imageViewerVelocity, IMAGE_VIEWER_MAX_SCALE, IMAGE_VIEWER_TAP_MS,
   imageMarkSizes, imageMarkBox, imageBoxShape, imageMarkArrow, imageArrowShape, imageMarkLine, markedImageName,
-  IMAGE_MARK_COLOR })`, context);
+  IMAGE_MARK_COLOR, IMAGE_MARK_COLORS, drawImageMarks, paintImageMarks })`, context);
 const current = () => vm.runInContext("imageViewerOpen", context);
 const close = (a, b) => Math.abs(a - b) < 1e-6;
 /* values built inside the context carry its own prototypes; compare them as data */
@@ -749,13 +756,15 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
 
   const {viewer, box} = waiting();
   const bar = viewer.bar.children;
-  assert.deepEqual([...bar].slice(0, 5).map(node => node.className),
-    ["icon-btn iv-tool iv-box", "icon-btn iv-tool iv-arrow", "icon-btn iv-tool iv-line", "icon-btn iv-tool iv-undo",
-     "iv-sep"], "the tools lead the bar, set off from the zoom");
-  assert.deepEqual([viewer.boxButton, viewer.arrowButton, viewer.lineButton, viewer.undoButton]
-    .map(b => b.getAttribute("aria-label")), ["Draw a box", "Draw an arrow", "Draw a line", "Undo the last mark"]);
+  assert.deepEqual([...bar].slice(0, 6).map(node => node.className),
+    ["icon-btn iv-tool iv-box", "icon-btn iv-tool iv-arrow", "icon-btn iv-tool iv-line", "icon-btn iv-tool iv-color",
+     "icon-btn iv-tool iv-undo", "iv-sep"], "the tools lead the bar, set off from the zoom");
+  assert.deepEqual([viewer.boxButton, viewer.arrowButton, viewer.lineButton, viewer.colorButton, viewer.undoButton]
+    .map(b => b.getAttribute("aria-label")),
+    ["Draw a box", "Draw an arrow", "Draw a line", "Mark color: Red", "Undo the last mark"]);
   assert.ok(!viewer.boxButton.disabled && !viewer.arrowButton.disabled && !viewer.lineButton.disabled &&
-    viewer.undoButton.disabled);
+    !viewer.colorButton.disabled && viewer.undoButton.disabled);
+  assert.ok(viewer.m.classList.contains("iv-markable"), "the bar knows it carries the tools");
   assert.equal(viewer.boxButton.getAttribute("aria-pressed"), "false");
   const item = viewer.items[0];
 
@@ -880,8 +889,65 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
   lv.dialog.close();
   assert.equal(lined.box.applied.length, 1);
   assert.equal(lined.box.applied[0][1][0].kind, "line", "and the line goes to the prompt box");
+
+  // the colour: red until another is picked from the shared menu, each mark keeping its own
+  const palette = plain(api.IMAGE_MARK_COLORS);
+  assert.deepEqual(palette.map(color => color.value),
+    ["red", "orange", "yellow", "green", "blue", "purple", "black", "white"], "the standard set");
+  assert.ok(palette.every(color => /^#[0-9a-f]{6}$/.test(color.hex)) && palette[0].hex === api.IMAGE_MARK_COLOR);
+  stored.clear();
+  const colored = waiting();
+  const cv = colored.viewer, citem = cv.items[0];
+  assert.equal(cv.markColor, "red", "every browser starts on red");
+  cv.boxButton.onclick();
+  press(cv, "pointerdown", 1, 420, 360);
+  press(cv, "pointermove", 1, 520, 430);
+  press(cv, "pointerup", 1, 520, 430);
+  assert.equal(citem.marks[0].color, "#ff2b2b");
+  menus.length = 0;
+  cv.colorButton.onclick();
+  assert.equal(menus.length, 1, "the colour button opens the console's own choice menu");
+  const {anchor, spec} = menus[0];
+  assert.ok(anchor === cv.colorButton && spec.current === "red" && spec.label === "Mark color");
+  assert.deepEqual(plain(spec.opts), palette.map(color => ({value: color.value, label: color.label, swatch: color.hex})),
+    "each colour by its name beside its swatch");
+  spec.onPick("blue");
+  assert.equal(cv.colorButton.getAttribute("aria-label"), "Mark color: Blue");
+  assert.equal(cv.colorButton.querySelector("circle").getAttribute("fill"), "#2f80ff", "the button wears it");
+  assert.equal(stored.get("puppy.markColor"), "blue", "remembered by this browser");
+  cv.lineButton.onclick();
+  press(cv, "pointerdown", 1, 400, 500);
+  press(cv, "pointermove", 1, 600, 520);
+  assert.equal(cv.marksLayer.children[1].getAttribute("stroke"), "#2f80ff", "drawn in it as it is drawn");
+  press(cv, "pointerup", 1, 600, 520);
+  assert.deepEqual(citem.marks.map(mark => mark.color), ["#ff2b2b", "#2f80ff"], "an earlier mark keeps its own");
+  assert.equal(cv.marksLayer.children[0].getAttribute("stroke"), "#ff2b2b");
+  cv.dialog.close();
+  assert.deepEqual(colored.box.applied[0][1].map(mark => mark.color), ["#ff2b2b", "#2f80ff"]);
+  const again = waiting();
+  assert.ok(again.viewer.markColor === "blue" && again.viewer.colorButton.getAttribute("aria-label") === "Mark color: Blue",
+    "the next picture opens on the colour last picked");
+  again.viewer.dialog.close();
+  stored.set("puppy.markColor", "#00ff00");
+  const odd = waiting();
+  assert.equal(odd.viewer.markColor, "red", "anything but a colour's name reads as red");
+  odd.viewer.dialog.close();
+  stored.clear();
+  // a picture's arrow head in its own colour, and the copy painted mark by mark
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  api.drawImageMarks(svg, [{kind: "arrow", w: 6, x1: 200, y1: 100, x2: 100, y2: 100, color: "#ffd400"}, {
+    kind: "box", w: 6, x: 0, y: 0, width: 50, height: 50, r: 5}]);
+  assert.deepEqual(svg.children.map(node => [node.tag, node.getAttribute("stroke"), node.getAttribute("fill")]),
+    [["line", "#ffd400", null], ["polygon", "#ffd400", "#ffd400"], ["rect", api.IMAGE_MARK_COLOR, "none"]],
+    "a mark without a colour is red");
+  const painted = [];
+  const ctx = {set strokeStyle(value) { painted.push(value); }, set fillStyle(_) {}, set lineCap(_) {}, set lineJoin(_) {},
+    lineWidth: 0, beginPath() {}, moveTo() {}, lineTo() {}, arcTo() {}, closePath() {}, stroke() {}, fill() {}};
+  api.paintImageMarks(ctx, [{kind: "line", w: 4, x1: 0, y1: 0, x2: 9, y2: 9, color: "#000000"},
+    {kind: "line", w: 4, x1: 0, y1: 0, x2: 9, y2: 9}]);
+  assert.deepEqual(painted, ["#000000", api.IMAGE_MARK_COLOR], "the copy takes each mark's colour");
 }
-console.log("PASS: marks on a waiting picture - rounded boxes, arrows and lines sized for the picture, the tools leading the bar only for a picture a prompt box waits to send, a box from its drag or a click, an arrow pointing at the press from wherever it is let go, a line between press and release (none from a click, held level by Shift), a pinch never half a mark, undo, and the marks handed to the box on close");
+console.log("PASS: marks on a waiting picture - rounded boxes, arrows and lines sized for the picture, the tools leading the bar only for a picture a prompt box waits to send, a box from its drag or a click, an arrow pointing at the press from wherever it is let go, a line between press and release (none from a click, held level by Shift), the standard colours from the shared menu remembered per browser and kept per mark, a pinch never half a mark, undo, and the marks handed to the box on close");
 
 /* ---- Copy: the picture onto the clipboard, offered only where a page may write one ---- */
 (async () => {
