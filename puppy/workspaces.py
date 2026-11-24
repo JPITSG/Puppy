@@ -15,7 +15,7 @@ import shutil
 import stat
 import tempfile
 
-from puppy import config, db, operations
+from puppy import config, db, operations, workers
 
 log = logging.getLogger("puppy.workspaces")
 
@@ -230,19 +230,18 @@ async def move_session(sid: int, destination) -> dict:
             raise WorkspaceError("The scratch workspace is missing or is not owned by this service")
         async with session_tasks.workspace_operation(str(source)):
             async with session_tasks.workspace_operation(str(target)):
-                loop = asyncio.get_running_loop()
                 await operations.to_thread(_copy_to_directory, source, target)
                 try:
                     operations.commit()
                     db.touch_session(sid, cwd=str(target), workspace_kind=KIND_DIRECTORY,
                                      native_session_id="", last_model="")
                 except BaseException:
-                    await loop.run_in_executor(None, shutil.rmtree, str(target))
+                    await workers.jobs.run(shutil.rmtree, str(target))
                     raise
                 # Commit precedes reclamation: failed cleanup must never undo a
                 # successful move or expose this ordinary directory to cleanup.
                 try:
-                    await loop.run_in_executor(None, _remove_path, str(source))
+                    await workers.jobs.run(_remove_path, str(source))
                 except WorkspaceError as exc:
                     log.warning("moved scratch workspace retained for cleanup: %s", exc)
                 updated = db.get_session(sid)

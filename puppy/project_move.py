@@ -31,7 +31,7 @@ import stat
 import subprocess
 import sys
 
-from puppy import config, db, operations, workspaces
+from puppy import config, db, operations, workers, workspaces
 from puppy.workspaces import WorkspaceError
 
 log = logging.getLogger("puppy.project_move")
@@ -432,7 +432,6 @@ def _repair_worktrees(sources, target: str, folders) -> None:
 
 async def _relocate(sid: int, path: str, real: str, target: str) -> dict:
     from puppy import runner
-    loop = asyncio.get_running_loop()
     await operations.to_thread(_reserve, target)
     try:
         same = await operations.to_thread(_same_filesystem, real, target)
@@ -441,7 +440,7 @@ async def _relocate(sid: int, path: str, real: str, target: str) -> dict:
         # Last cancellable point: the files and the sessions change below.
         operations.commit()
     except BaseException:
-        await loop.run_in_executor(None, _discard, target)
+        await workers.jobs.run(_discard, target)
         raise
     # Found again now the folder is owned and still in place: a session made
     # during a long copy follows too.
@@ -455,14 +454,14 @@ async def _relocate(sid: int, path: str, real: str, target: str) -> dict:
             renamed = True
         except OSError as exc:
             if exc.errno != errno.EXDEV:
-                await loop.run_in_executor(None, _discard, target)
+                await workers.jobs.run(_discard, target)
                 raise WorkspaceError("Could not move {}: {}".format(real, exc.strerror or exc)) from exc
         if not renamed:
             # A bind mount shares its device number but not its mount: copy.
             try:
                 await operations.to_thread(_copy, real, target)
             except BaseException:
-                await loop.run_in_executor(None, _discard, target)
+                await workers.jobs.run(_discard, target)
                 raise
     try:
         db.relocate_sessions(moves)
@@ -476,13 +475,12 @@ async def _relocate(sid: int, path: str, real: str, target: str) -> dict:
                 raise WorkspaceError("The project is now in {} but its sessions could not be "
                                      "updated; move it back by hand".format(target)) from exc
         else:
-            await loop.run_in_executor(None, _discard, target)
+            await workers.jobs.run(_discard, target)
         raise
-    leftover = "" if renamed else await loop.run_in_executor(None, _remove_original, real)
+    leftover = "" if renamed else await workers.jobs.run(_remove_original, real)
     if leftover:
         log.warning("moved project's original %s retained: %s", real, leftover)
-    await loop.run_in_executor(None, _repair_worktrees, (real, path), target,
-                               [target, *moves.values()])
+    await workers.jobs.run(_repair_worktrees, (real, path), target, [target, *moves.values()])
     for fid, (session, _relative) in sorted(followers.items()):
         if db.get_session(fid) is None:
             continue   # deleted while a long copy ran: no transcript left to tell

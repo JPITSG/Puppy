@@ -60,7 +60,7 @@ from typing import Dict, Optional, Set
 
 from aiohttp import web
 
-from puppy import config, db, operations
+from puppy import config, db, operations, workers
 
 log = logging.getLogger("puppy.session_git")
 
@@ -525,7 +525,7 @@ async def _check(cwd: str, fresh: bool = False, listing: bool = False) -> dict:
         # fresh asks for; whether it lists is judged again
         fresh = False
     if future is None:
-        future = asyncio.get_running_loop().run_in_executor(None, inspect, cwd, listing)
+        future = workers.git.run(inspect, cwd, listing)
         _inflight[cwd] = future
         if listing:
             _listing.add(cwd)
@@ -614,8 +614,7 @@ async def history(session: dict, skip: int = 0, limit: int = LOG_PAGE) -> dict:
         raise GitRefused("the session has no working directory")
     skip = max(0, int(skip))
     limit = max(1, min(int(limit), LOG_PAGE))
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _log_page, cwd, skip, limit)
+    return await workers.git.run(_log_page, cwd, skip, limit)
 
 
 # ---- the actions ----

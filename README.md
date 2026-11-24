@@ -1072,10 +1072,13 @@ all three back.
 The advanced **Search** tab searches the full history of every online backend:
 prompts, replies, thinking, tool activity and system notes, with phrases,
 `-exclusion`, `OR`, kind filters, a time window, relevance or newest ordering,
-and grouped results. Once a search has run, changing a backend, kind, time or
+and grouped results. Words match from their start; words of one or two letters
+match only whole. Once a search has run, changing a backend, kind, time or
 sort filter searches again at once for the same query; the query box searches
 only when you press Enter or Search. Opening a hit lands on that exact message
-with a window of history around it.
+with a window of history around it. A search that takes longer than 8 seconds
+is stopped and says so, and the searches agents run never take the places kept
+for yours. See [worker threads](docs/worker-pools.md).
 
 ### Never lose your place
 
@@ -1424,6 +1427,11 @@ Signed-in console startup uses one authenticated state request. Startup scripts,
 styles, HTML and the initial state use gzip when supported. Compressed scripts
 and styles are reused in server memory until their source changes; authentication
 and the browser's `no-store` policy still apply to every load.
+Long work never takes the threads the pages need: task copies, moves, backups,
+workspace sync, Git checks and searches run in pools of their own. If
+Puppy's event loop or the pages' threads stop answering for ten seconds, it
+writes what every thread is doing to its log and shows a notice. See
+[worker threads](docs/worker-pools.md).
 Terminal scripts and styles load when the first terminal is shown; Markdown
 parsing and sanitizing libraries load when a conversation opens. Concurrent panes
 share the same downloads, and later panes reuse them. Browser and remote screen views use
@@ -1551,7 +1559,8 @@ python3 tests/backend_test.py        # headless package, auth, protocol, capabil
 python3 tests/snapshot_test.py       # backup export/import and rollback
 python3 tests/backup_schedule_test.py # daily backups, rotation, downloads, recovery and the archive limit
 node tests/backup_schedule_ui_test.js # backup settings and the archive limit, status polling and edits
-python3 tests/search_test.py         # the search index and query language
+python3 tests/search_test.py         # the search index, query language, limits, lanes and cancellation
+python3 tests/workers_test.py        # thread pools: who uses which, lanes, stuck pools, the watchdog
 node tests/search_ui_test.js         # the Search tab's results, Show all pages and their cancellation
 python3 tests/spawn_test.py          # spawned agents and their optional replies against a stub engine
 python3 tests/session_titles_test.py # generated titles: the record, the job and both runtimes' routes

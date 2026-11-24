@@ -19,7 +19,7 @@ from urllib.parse import unquote
 
 from aiohttp import web
 
-from puppy import config, db, operations
+from puppy import config, db, operations, workers
 
 log = logging.getLogger("puppy.uploads")
 
@@ -756,8 +756,9 @@ def _tool_image_file(session_id: int, seq: int, head: bool = False):
 
 async def h_session_tool_image(request: web.Request):
     try:
-        raw, content_type, size = await asyncio.get_running_loop().run_in_executor(
-            None, _tool_image_file, int(request.match_info["sid"]),
+        # a path the tool named, which may be on a mount that has gone
+        raw, content_type, size = await workers.files.run(
+            _tool_image_file, int(request.match_info["sid"]),
             int(request.match_info["seq"]), request.method == "HEAD")
     except (OSError, ValueError, TypeError):
         return web.json_response({"error": "tool image not available"}, status=404,

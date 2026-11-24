@@ -929,7 +929,7 @@ field; that is unknown, not unavailable.
 One in-memory answer per directory is shared by its sessions. Linux inotify
 events on paths, ancestors and symlink targets trigger a debounced check;
 ordinary file edits do not. A 15-second fallback covers network filesystems,
-watch limits and systems without inotify. Filesystem work runs in an executor,
+watch limits and systems without inotify. Filesystem work runs in threads,
 and changed answers publish the existing sessions state topic. There is no
 new route, browser poll, configuration key or persisted state.
 
@@ -1200,7 +1200,12 @@ deleted and rebuilt from the events table), never snapshotted, and a restored
 backup triggers a full re-derivation. Queries support implicit AND, quoted
 phrases, `-` exclusion, `OR`, kind/time/session filters, relevance or recency
 order, and grouped-by-session or per-session paginated responses with
-control-character-delimited snippet highlights. A controller fans one query
+control-character-delimited snippet highlights. Words match from their start,
+one- and two-letter words only whole. A search runs in threads and on read-only
+connections of its own for at most 8 seconds, a few at a time, and stops when
+its caller has gone; one that is stopped or finds no place answers `503` with the
+reason and `Retry-After`. Agents' searches and consoles' have separate places,
+and one session's run one at a time. A controller fans one query
 out to itself and its online capable nodes and merges results; offline or
 offline or search-incapable nodes contribute nothing, so no transcript is mirrored for
 search. Opening a hit lands on that exact message: nodes advertising the
@@ -1208,6 +1213,16 @@ additive `session-event-window` capability accept an `after_seq` cursor on
 `GET /api/sessions/{sid}/events` (oldest first), so the console loads a
 window of history around the target rather than paging back from the tail,
 and offers Load newer / Jump to latest to return.
+
+## Worker threads
+
+Both runtimes keep the event loop's default pool - 32 threads, whatever the
+host - for serving and other short work, and run searches, indexing, Git checks,
+history reads, host readings, foreign files and long jobs in pools of their
+own. A watchdog thread logs what every thread is doing when the event loop or
+the default pool has not answered for ten seconds. A headless node only logs;
+the console's own instance also shows a notice. Nothing is persisted and no
+capability is involved. See [worker threads](../docs/worker-pools.md).
 
 ## Graceful shutdown notice
 
@@ -1408,7 +1423,8 @@ UUID. References remain valid across node/session renames.
 
 `GET /api/session-links/catalog` lists this runtime's available sessions and named
 coverage gaps. `POST /api/session-links/node` is the authenticated node-local
-read/search/request/status/cancel surface. `POST /api/session-links/action` exposes
+read/search/request/status/cancel surface; a read or search waits up to 2.5 seconds
+for a place there, inside the 12 seconds the controller allows. `POST /api/session-links/action` exposes
 source-owned operations to consoles. A controller opens
 `/api/ws/session-links?controller=<uuid>` on each online capable backend to relay
 its active turns' requests back through that controller. The channel reuses the

@@ -39,7 +39,7 @@ import time
 
 from aiohttp import web
 
-from puppy import config, db
+from puppy import config, db, workers
 
 log = logging.getLogger("puppy.wsync")
 
@@ -291,7 +291,7 @@ def _write_all(fd, block: bytes) -> None:
 class Store:
     """One synchronized tree plus its private metadata directory.
 
-    Methods are blocking; async callers run them in an executor. The HTTP
+    Methods are blocking; async callers run them in the ``jobs`` pool. The HTTP
     layer serializes applies and scans per store through one asyncio lock.
     """
 
@@ -1081,16 +1081,15 @@ def acknowledge_mirror_reset(store: Store, reset_id: str) -> bool:
 
 async def _stream_manifest(request: web.Request, store: Store,
                            kind: str) -> web.StreamResponse:
-    loop = asyncio.get_running_loop()
     reset_id = None
     if kind == "mirror":
-        reset_id = await loop.run_in_executor(None, mirror_reset, store)
+        reset_id = await workers.jobs.run(mirror_reset, store)
         if reset_id and request.headers.get(MIRROR_RESET_HEADER) != "1":
             raise SyncError(
                 "this workspace mirror was rebuilt from a backup; upgrade its "
                 "controller before synchronizing it", 409)
     async with store_lock(store):
-        scanned = await loop.run_in_executor(None, store.scan)
+        scanned = await workers.jobs.run(store.scan)
     response = web.StreamResponse(status=200, headers={
         "Content-Type": CONTENT_TYPE, "Cache-Control": "no-store"})
     await response.prepare(request)
@@ -1119,12 +1118,11 @@ async def _stream_fetch(request: web.Request, store: Store) -> web.StreamRespons
     if not isinstance(paths, list) or not paths or len(paths) > BATCH_MAX_FILES:
         raise SyncError("fetch requires 1-{} paths".format(BATCH_MAX_FILES))
     paths = [validate_relpath(str(path)) for path in paths]
-    loop = asyncio.get_running_loop()
     response = web.StreamResponse(status=200, headers={
         "Content-Type": CONTENT_TYPE, "Cache-Control": "no-store"})
     await response.prepare(request)
     for path in paths:
-        entry = await loop.run_in_executor(None, store.current_entry, path)
+        entry = await workers.jobs.run(store.current_entry, path)
         if entry is None or entry.get("t") != "f":
             await response.write(encode_frame({"p": path, "missing": True}))
             continue
@@ -1162,7 +1160,6 @@ async def _stream_fetch(request: web.Request, store: Store) -> web.StreamRespons
 async def _handle_apply(request: web.Request, store: Store) -> web.Response:
     if request.content_type != CONTENT_TYPE:
         raise SyncError("apply requires the sync content type", 415)
-    loop = asyncio.get_running_loop()
     async with store_lock(store):
         batch = ApplyBatch(store)
         stream = request.content
@@ -1175,21 +1172,21 @@ async def _handle_apply(request: web.Request, store: Store) -> web.Response:
                     break
                 op = header.get("op")
                 if op == "write":
-                    await _stage_write(loop, batch, header, stream)
+                    await _stage_write(batch, header, stream)
                 elif op in ("mkdir", "chmod", "symlink", "delete"):
-                    await loop.run_in_executor(None, batch.stage_action, header)
+                    await workers.jobs.run(batch.stage_action, header)
                 else:
                     raise SyncError("unknown sync operation")
-            results = await loop.run_in_executor(None, batch.commit)
+            results = await workers.jobs.run(batch.commit)
         except Exception:
-            await loop.run_in_executor(None, batch.abort)
+            await workers.jobs.run(batch.abort)
             raise
     applied = sum(1 for item in results if item.get("ok"))
     return web.json_response({"ok": True, "applied": applied,
                               "results": results})
 
 
-async def _stage_write(loop, batch: ApplyBatch, op: dict, stream) -> bool:
+async def _stage_write(batch: ApplyBatch, op: dict, stream) -> bool:
     """Stage one write item from the request stream, or drain it cleanly."""
     declared = op.get("s")
     if not isinstance(declared, int) or declared < 0:
@@ -1201,12 +1198,12 @@ async def _stage_write(loop, batch: ApplyBatch, op: dict, stream) -> bool:
         batch.fail(op, str(exc))
         await _drain_item(stream, declared)
         return False
-    ok = await loop.run_in_executor(None, batch.check_base, op)
+    ok = await workers.jobs.run(batch.check_base, op)
     if not ok:
         await _drain_item(stream, declared)
         return False
     try:
-        await loop.run_in_executor(None, batch.ensure_parents, path)
+        await workers.jobs.run(batch.ensure_parents, path)
         fd, _leaf = batch.store.walker.open_parent(path)
     except (OSError, SyncError) as exc:
         batch.fail(op, "parent directory unavailable: {}".format(exc))
@@ -1238,7 +1235,7 @@ async def _stage_write(loop, batch: ApplyBatch, op: dict, stream) -> bool:
                 mode = op.get("m")
                 if isinstance(mode, int):
                     os.fchmod(temp_fd, mode & _MODE_MASK)
-                await loop.run_in_executor(None, os.fsync, temp_fd)
+                await workers.jobs.run(os.fsync, temp_fd)
         except SyncError:
             os.close(temp_fd)
             try:
@@ -1273,11 +1270,9 @@ async def h_lease_create(request: web.Request):
         return web.json_response({"error": "invalid lease request"}, status=400)
     if not isinstance(body, dict):
         return web.json_response({"error": "invalid lease request"}, status=400)
-    loop = asyncio.get_running_loop()
     try:
-        record = await loop.run_in_executor(
-            None, create_lease, str(body.get("root") or ""),
-            body.get("reuse") is True)
+        record = await workers.jobs.run(
+            create_lease, str(body.get("root") or ""), body.get("reuse") is True)
     except SyncError as exc:
         return _sync_error_response(exc)
     log.info("workspace lease %s created for %s", record["id"], record["root"])
@@ -1295,9 +1290,7 @@ async def h_lease_delete(request: web.Request):
 async def _lease_store(request: web.Request) -> Store:
     lease = get_lease(request.match_info["lease"])
     touch_lease(lease["id"])
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, get_store, lease["root"], _lease_dir(lease["id"]))
+    return await workers.jobs.run(get_store, lease["root"], _lease_dir(lease["id"]))
 
 
 async def h_lease_manifest(request: web.Request):
@@ -1333,8 +1326,7 @@ def _session_for(request: web.Request) -> dict:
 
 async def _mirror_store(request: web.Request) -> Store:
     session = _session_for(request)
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, mirror_store_for, session)
+    return await workers.jobs.run(mirror_store_for, session)
 
 
 async def h_mirror_manifest(request: web.Request):
@@ -1361,8 +1353,7 @@ async def h_mirror_apply(request: web.Request):
             return web.json_response(
                 {"error": "the engine is mid-turn; the mirror accepts changes "
                           "only at a sync barrier"}, status=409)
-        loop = asyncio.get_running_loop()
-        store = await loop.run_in_executor(None, mirror_store_for, session)
+        store = await workers.jobs.run(mirror_store_for, session)
         return await _handle_apply(request, store)
     except SyncError as exc:
         return _sync_error_response(exc)
@@ -1382,9 +1373,8 @@ async def h_mirror_reset_ack(request: web.Request):
                                  status=400)
     try:
         store = await _mirror_store(request)
-        loop = asyncio.get_running_loop()
-        cleared = await loop.run_in_executor(
-            None, acknowledge_mirror_reset, store, body["reset_id"])
+        cleared = await workers.jobs.run(
+            acknowledge_mirror_reset, store, body["reset_id"])
         return web.json_response({"ok": True, "cleared": cleared})
     except SyncError as exc:
         return _sync_error_response(exc)

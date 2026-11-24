@@ -24,7 +24,7 @@ workspace ownership, and both execution runtimes. The following gaps are fixed.
 | Listener verification | Cancel preparation or the direct browser proof; no settings save or restart follows | Settings commit and graceful restart handoff |
 | Workspace sync | Cancel manifest discovery | Replacing an expired provider lease, or reconciliation begins writing preserved conflict copies, applying batches and updating its baseline |
 | Side question | Ask becomes Cancel question, including on other connected consoles; withdraw only the pending native question | An answer already received remains; cancellation never stops or steers the main turn |
-| Full-history search | Search becomes Cancel; Escape, a replacement search or closing its tab aborts outstanding browser waits | Read-only backend queries may finish independently |
+| Full-history search | Search becomes Cancel; Escape, a replacement search or closing its tab aborts outstanding browser waits and stops the instance's own search | Read-only; another backend's search ends within its 8-second limit |
 | Sign-in/setup | Stop waiting or Escape aborts the browser request, preserves input and suppresses late navigation | Does not reverse an account/session already created; retry first rechecks sign-in/setup state |
 
 Operations that already had an exit were checked: running agent turns and

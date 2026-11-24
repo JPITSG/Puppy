@@ -23,7 +23,7 @@ import stat
 import struct
 import sys
 
-from puppy import config, system_prompts
+from puppy import config, system_prompts, workers
 
 log = logging.getLogger("puppy.vnc.agent")
 
@@ -411,8 +411,8 @@ async def _capture(instance, arguments=None, settle_ms=400) -> dict:
     # Deflating a whole screen is the one expensive step here, and a VNC
     # connection must never hold up the turns and sockets this node is also
     # serving, so it runs off the event loop over a consistent snapshot.
-    shot = await asyncio.get_event_loop().run_in_executor(
-        None, instance.screenshot, arguments.get("region"),
+    shot = await workers.jobs.run(
+        instance.screenshot, arguments.get("region"),
         arguments.get("max_dimension", vnc.AGENT_IMAGE_DIMENSION))
     if shot["step"] == 1 and shot["width"] == shot["screen_width"] and \
             shot["height"] == shot["screen_height"]:

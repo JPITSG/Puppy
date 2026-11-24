@@ -18,7 +18,7 @@ import stat
 import struct
 import sys
 
-from puppy import config
+from puppy import config, workers
 from puppy.spawn_agent import _tool
 
 log = logging.getLogger("puppy.files.agent")
@@ -224,7 +224,7 @@ async def _dispatch(request: dict) -> dict:
     uploads._active_uploads += 1
     uploads._state_changed()
     try:
-        future = loop.run_in_executor(None, work)
+        future = workers.jobs.run(work)
     except BaseException:
         release()
         raise

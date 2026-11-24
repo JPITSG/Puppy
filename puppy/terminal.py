@@ -35,7 +35,7 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import config, live_websockets
+from puppy import config, live_websockets, workers
 from puppy.drivers.base import clean_env
 from puppy.user_paths import service_home
 
@@ -650,14 +650,14 @@ class TerminalInstance:
         self._broadcast_json(_binding_payload(self))
 
     async def _natural_end(self) -> None:
+        # The PTY has closed and its process is normally gone with it, but one
+        # that closed its own ends may live on: it is looked for, never waited
+        # for in a thread, and Close still ends it meanwhile.
+        while self.running and not await workers.child_exit(self.pid, limit=1.0):
+            pass
         async with self.lifecycle_lock:
             if not self.running:
                 return
-            try:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, os.waitpid, self.pid, 0)
-            except (ChildProcessError, OSError):
-                pass
             # An engine CLI that exits (its /quit, a crash) ends the terminal
             # under its own name: there is no shell left to fall back to.
             self._finish("{} ended".format(self.engine_label) if self.engine
@@ -1175,7 +1175,4 @@ async def _reap(pid: int) -> None:
         except ProcessLookupError:
             return
         await asyncio.sleep(wait)
-    try:
-        await asyncio.get_event_loop().run_in_executor(None, os.waitpid, pid, 0)
-    except Exception:
-        pass
+    await workers.child_exit(pid)

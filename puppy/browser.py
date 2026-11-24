@@ -48,7 +48,7 @@ from aiohttp import WSMsgType, web
 
 from puppy import operations
 
-from puppy import browser_cursor, browser_store, config, live_websockets
+from puppy import browser_cursor, browser_store, config, live_websockets, workers
 
 log = logging.getLogger("puppy.browser")
 
@@ -628,10 +628,7 @@ async def _reap_group(pid: int) -> None:
             except ProcessLookupError:
                 return
         await asyncio.sleep(wait)
-    try:
-        await asyncio.get_event_loop().run_in_executor(None, os.waitpid, pid, 0)
-    except Exception:
-        pass
+    await workers.child_exit(pid)
 
 
 class _ReadProtocol(asyncio.Protocol):
@@ -3986,8 +3983,7 @@ class BrowserRegistry:
     def _schedule_blocking(self, label: str, function, *args) -> None:
         async def run():
             try:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, function, *args)
+                await workers.jobs.run(function, *args)
             except Exception as exc:
                 log.warning("could not %s: %s", label, exc)
 

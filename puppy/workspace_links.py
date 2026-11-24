@@ -31,7 +31,7 @@ from aiohttp import WSMsgType, web
 
 from puppy import operations
 
-from puppy import backends, config, db, protocol, runner, workspace_sync
+from puppy import backends, config, db, protocol, runner, workers, workspace_sync
 
 log = logging.getLogger("puppy.wslinks")
 
@@ -761,8 +761,7 @@ async def run_reconcile(link_id: int) -> dict:
                 # this pass just preserved losing bytes; hold the link inside
                 # its budget before anyone can accumulate the next generation
                 try:
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, enforce_keeps_budget, str(link["uid"]))
+                    await workers.jobs.run(enforce_keeps_budget, str(link["uid"]))
                 except Exception as exc:
                     log.warning("keeps budget check skipped: %s", exc)
             if failed:

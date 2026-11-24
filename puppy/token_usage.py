@@ -26,7 +26,6 @@ of a day are kept ordered by time, then ref, then model.
 """
 from __future__ import annotations
 
-import asyncio
 import datetime
 import json
 import logging
@@ -34,7 +33,7 @@ import math
 import re
 import time
 
-from puppy import db
+from puppy import db, workers
 
 log = logging.getLogger("puppy.token_usage")
 
@@ -437,8 +436,7 @@ async def h_report(request):
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     try:
-        payload = await asyncio.get_running_loop().run_in_executor(
-            None, report, since, until, int(step), int(offset))
+        payload = await workers.history.run(report, since, until, int(step), int(offset))
     except ShapeError as exc:
         log.error("%s", exc)
         return web.json_response({"error": str(exc)}, status=500)

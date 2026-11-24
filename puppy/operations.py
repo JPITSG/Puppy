@@ -18,6 +18,8 @@ import time
 
 from aiohttp import web
 
+from puppy import workers
+
 HEADER = "X-Puppy-Operation"
 CAPABILITY = "operation-cancel-v1"
 TTL = 600
@@ -110,8 +112,11 @@ async def wait(awaitable):
 
 
 async def to_thread(function, *args, **kwargs):
-    """Never release a lock or delete staging while its worker still writes."""
-    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    """Never release a lock or delete staging while its worker still writes.
+
+    The worker is one of the ``jobs`` pool's: a clone, a copy or an archive
+    takes as long as it takes, and never a thread the pages wait for."""
+    task = workers.jobs.run_in_context(function, *args, **kwargs)
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:

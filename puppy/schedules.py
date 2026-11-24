@@ -41,7 +41,7 @@ import re
 import secrets
 import time
 
-from puppy import config, db, protocol
+from puppy import config, db, protocol, workers
 
 log = logging.getLogger("puppy.schedules")
 
@@ -857,8 +857,7 @@ async def _answer(bid: int, sid: int) -> tuple:
     at, as the node's prompt index names it."""
     if not bid:
         from puppy import prompt_index
-        loop = asyncio.get_running_loop()
-        index = await loop.run_in_executor(None, prompt_index.read, sid, 0, 5)
+        index = await workers.history.run(prompt_index.read, sid, 0, 5)
         rows = index.get("prompts") or []
         row = next((item for item in rows if not item[2]), None)
         if row is None or not row[4]:

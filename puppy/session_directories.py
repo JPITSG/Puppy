@@ -19,7 +19,7 @@ import struct
 import sys
 from typing import Optional
 
-from puppy import db
+from puppy import db, workers
 
 log = logging.getLogger("puppy.session_directories")
 CHECK_SECONDS = 15.0
@@ -40,7 +40,7 @@ def record(cwd) -> Optional[bool]:
     key = str(cwd or "")
     monitor = _monitor
     if key not in _records and monitor is not None:
-        # Search also builds session payloads in an executor.
+        # Search also builds session payloads, in its own threads.
         monitor.loop.call_soon_threadsafe(monitor.wake.set)
     return _records.get(key)
 
@@ -158,7 +158,7 @@ class Monitor:
                     continue
                 self.wake.clear()
                 directories = {str(s["cwd"] or "") for s in db.list_sessions(include_archived=True)}
-                pending = loop.run_in_executor(None, self.inspect_all, directories)
+                pending = workers.host.run(self.inspect_all, directories)
                 answers = await asyncio.shield(pending)
                 pending = None
                 changed = any(_records.get(cwd) != value for cwd, value in answers.items())
@@ -181,7 +181,7 @@ class Monitor:
         finally:
             if self.watch.fd >= 0:
                 loop.remove_reader(self.watch.fd)
-            # Never close/reuse an fd while its executor is adding watches.
+            # Never close/reuse an fd while its thread is adding watches.
             if pending is not None:
                 await asyncio.shield(pending)
             self.watch.close()

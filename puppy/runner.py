@@ -18,8 +18,8 @@ from puppy import (agent_notes, browser_agent, config, db, engine_defaults, file
                    spawn_agent,
                    system_prompts, task_agent, terminal_agent, vnc_agent,
                    session_agent, session_directories, session_git, session_links, uploads, workspace_sync,
-                   workspaces, schedules, session_tasks, session_titles, timeouts, token_usage,
-                   tool_calls)
+                   workers, workspaces, schedules, session_tasks, session_titles, timeouts,
+                   token_usage, tool_calls)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
 from puppy.drivers import messages as engine_messages
@@ -4056,8 +4056,8 @@ class SessionHub:
                             # the pictures a tool gave the model, stored off
                             # the loop; the event names them, never carries them
                             data = dict(data)
-                            stored = await asyncio.get_running_loop().run_in_executor(
-                                None, uploads.store_tool_images, self.id, data.pop("images"))
+                            stored = await workers.io.run(
+                                uploads.store_tool_images, self.id, data.pop("images"))
                             if stored:
                                 data["images"] = stored
                         event = self._emit(act["kind"], data)

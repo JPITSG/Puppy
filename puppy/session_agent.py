@@ -32,6 +32,9 @@ TOOL_INSTRUCTIONS = (
     "sessions discovers titles, folders, nodes and ids. search finds relevant excerpts; "
     "Search pages across sessions with session_offset and within matches with offset. "
     "Follow next_session_offset until null before claiming complete search coverage. "
+    "Words match from their start, one- and two-letter words only whole; \"quoted phrases\", "
+    "OR and -exclusion work. Search with distinctive words, one search at a time: a search "
+    "that takes too long is stopped and says so, and is then narrowed, never repeated. "
     "read retrieves conversation pages, with after_seq/before_seq and character offsets "
     "for long messages. Follow every next_offset to read a complete long message. "
     "All includes archived conversations on connected nodes, every one but this session. "
@@ -282,6 +285,34 @@ def _wire_response(response: dict) -> bytes:
                     "it began: " + text[:4000]})
 
 
+async def _answered(reader, coroutine) -> dict:
+    """The call's result, while there is somebody to give it to.
+
+    The stdio process on the other end goes with its turn, and whatever it was
+    still asking for - a long search, say - then has nobody to answer. Ending
+    the call asks the work to stop; a submission that was already accepted
+    carries on by itself (session_links.durable_call)."""
+    async def left():
+        while await reader.read(4096):
+            pass    # a caller says one thing; more of it changes nothing
+
+    call = asyncio.ensure_future(coroutine)
+    gone = asyncio.ensure_future(left())
+    try:
+        await asyncio.wait({call, gone}, timeout=REQUEST_TIMEOUT,
+                           return_when=asyncio.FIRST_COMPLETED)
+        if call.done():
+            return call.result()
+        if gone.done():
+            raise SessionAgentError("the caller of this tool has gone")
+        raise asyncio.TimeoutError()
+    finally:
+        for task in (call, gone):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(call, gone, return_exceptions=True)
+
+
 async def _handle_connection(reader, writer) -> None:
     request = None
     try:
@@ -294,8 +325,7 @@ async def _handle_connection(reader, writer) -> None:
         request = json.loads(raw.decode("utf-8"))
         if not isinstance(request, dict):
             raise SessionAgentError("invalid session agent request")
-        result = await asyncio.wait_for(_dispatch(request),
-                                        timeout=REQUEST_TIMEOUT)
+        result = await _answered(reader, _dispatch(request))
         response = {"ok": True, "result": result}
     except SessionAgentError as exc:
         response = {"ok": False, "error": str(exc)}

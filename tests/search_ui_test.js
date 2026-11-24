@@ -9,7 +9,8 @@
    a backend, kind, time or sort change once a search has run searches again
    for the results' own query and leaves the box's draft alone, while a
    filter before the first search, a choice already made, the last kind, a
-   reachability repaint and typing ask nothing. */
+   reachability repaint and typing ask nothing. A backend that refused the
+   search says why, and "No matches" is said only when one has searched. */
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -323,6 +324,28 @@ async function main() {
   for (const request of sorted) request.resolve({ total: 0, session_total: 0, sessions: [] });
   await settle();
   assert.match(live.resultsBox.textContent, /No matches for "dashboard"/);
+
+  /* A backend that could not search says why, and only one that did may say
+     there is nothing to find. */
+  const refused = new Error("the search took longer than 8 seconds and was stopped · use more distinctive words");
+  for (const [answered, says] of [[true, true], [false, false]]) {
+    seg(live.timeBox, live.timeKey === "day" ? "7 days" : "24 h").click();
+    await settle();
+    for (const request of requests.splice(0)) {
+      if (request.bid || !answered) request.reject(refused);
+      else request.resolve({ total: 0, session_total: 0, sessions: [] });
+    }
+    await settle();
+    assert.equal(/No matches for/.test(live.resultsBox.textContent), says, live.resultsBox.textContent);
+    assert.match(live.statusBox.textContent, /Peer: the search took longer than 8 seconds and was stopped · use more distinctive words/);
+    assert.equal(/Studio: the search took/.test(live.statusBox.textContent), !answered);
+    assert.equal(live.goButton.textContent, "Search");
+  }
+  assert.deepEqual(toasts, [], "a refusal stands beside the results, never as a notice too");
+  seg(live.timeBox, "7 days").click();
+  await settle();
+  for (const request of requests.splice(0)) request.resolve({ total: 0, session_total: 0, sessions: [] });
+  await settle();
 
   /* Nothing found is still an answer: widening the window asks again. */
   seg(live.timeBox, "Any time").click();

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import sys
 import shutil
+import threading
 import time
 import subprocess
 from unittest.mock import patch
@@ -23,6 +24,7 @@ ROOT = private_root("session-links-")
 os.environ["PUPPY_DATA"] = str(ROOT / "data")
 from puppy import config, db, runner, search, session_agent, session_links as links
 from puppy import session_actions as actions, session_coordination as coordination, session_aliases as aliases
+from puppy import workers as pools
 
 
 def session(name):
@@ -322,9 +324,9 @@ async def fleet_and_drivers():
     source = links.reference(session("Fleet origin"))
     peer = "a" * 32
     original = links.remote_call
-    async def fake_remote(bid, method, args):
+    async def fake_remote(bid, method, args, source=""):
         if bid == 0:
-            return await original(bid, method, args)
+            return await original(bid, method, args, source=source)
         if bid == 2:
             raise links.SessionLinkError("offline")
         if method == "sessions":
@@ -494,12 +496,84 @@ async def own_history():
           "and no requests to itself OK")
 
 
+async def many_readers():
+    """A turn's parallel reads, and its sub-agents', take their turns: two at a
+    time, never the threads the console reads with, and one that has waited too
+    long or finds too many ahead of it is told so. A search of many sessions is
+    one search, and answers each one in the order they were named."""
+    a = session("Reader")
+    ids = [session("Read {}".format(index)) for index in range(6)]
+    for index, sid in enumerate(ids):
+        for number in range(index):
+            db.add_event(sid, "assistant", {"text": "harvest note {} {}".format(index, number)})
+    search.reconcile()
+    refs = [links.reference(sid) for sid in ids]
+    gate, reading = threading.Event(), []
+
+    def slow(sid, args):
+        reading.append(sid)
+        gate.wait(10)
+        return {"events": [], "sid": sid}
+    with patch.object(links, "_events", slow):
+        calls = [asyncio.ensure_future(links.node_call("read", {"refs": [ref]}, source="turn"))
+                 for ref in refs * 3]
+        for _ in range(200):
+            if len(reading) == 2:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        assert len(reading) == 2 and links._reads.running == 2, reading
+        assert pools.history.state()["running"] == 2 and not pools.history.state()["waiting"]
+        # the console's own reads go past them
+        assert await asyncio.wait_for(pools.history.run(lambda: "console"), 2) == "console"
+        with patch.object(links, "READS_WAIT", 0.1):
+            await rejected(links.node_call("read", {"refs": [refs[0]]}), "too many reads")
+        with patch.object(search, "RELAYED_WAIT", 0.1):
+            await rejected(links.node_call("read", {"refs": [refs[0]]}, relayed=True), "too many reads")
+        gate.set()
+        answers = await asyncio.gather(*calls)
+    assert [answer["sid"] for answer in answers] == ids * 3
+    assert links._reads.running == 0
+    # many sessions, one search
+    passes = []
+    real = search._collect
+
+    def counted(*args):
+        passes.append(args[-1])
+        return real(*args)
+    with patch.object(search, "_collect", counted):
+        found = await links.node_call("search", {"refs": list(reversed(refs)), "query": "harvest",
+                                                 "limit": 2, "kinds": ["assistant"]}, source="turn")
+    assert passes == [list(reversed(ids))], passes
+    assert [row["sid"] for row in found["results"]] == list(reversed(ids))[:-1]     # the first has none
+    assert [row["total"] for row in found["results"]] == [5, 4, 3, 2, 1]
+    for row in found["results"]:
+        assert row["session"]["ref"] == links.reference(row["sid"]) and row["ok"] is True
+        assert len(row["matches"]) == min(2, row["total"]) and row["offset"] == 0
+        assert all(match["source"] == links.source_link(links.reference(row["sid"]), match["seq"])
+                   for match in row["matches"])
+    assert found["searched"] == found["selected"] == 6 and found["next_session_offset"] is None
+    later = await links.node_call("search", {"refs": refs, "query": "harvest", "limit": 2, "offset": 2})
+    assert {row["sid"]: len(row["matches"]) for row in later["results"]} == \
+        {ids[1]: 0, ids[2]: 0, ids[3]: 1, ids[4]: 2, ids[5]: 2}
+    # a stopped or refused search reaches the turn as what was not searched
+    with patch.object(search, "SEARCH_SECONDS", 0.0):
+        await links.prepare_turn(a, "turn", "@Session {}:{} look".format(db.node_uuid(), refs[0]))
+        answer = await links.dispatch(a, "turn", "search", {"query": "harvest"})
+    assert answer["results"] == [] and answer["unavailable"][0]["refs"] == [refs[0]], answer
+    assert "fewer sessions" in answer["unavailable"][0]["error"], answer
+    await rejected(links.node_call("search", {"refs": refs, "query": "--"}), "at least one term")
+    links.end_turn(a, "turn")
+    print("many readers: lanes for reads, one pass for many sessions, and what a stopped search says")
+
+
 async def main():
     config.ensure_dirs()
     await references()
     await short_references()
     await communication()
     await own_history()
+    await many_readers()
     await workflows()
     await fleet_and_drivers()
 

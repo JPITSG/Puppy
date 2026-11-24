@@ -5,7 +5,6 @@ their file identity. Nothing is written beside the source files, and an edit
 invalidates its cached representation automatically. Reads and compression run
 outside the event loop. JSON/HTML responses are compressed but never cached.
 """
-import asyncio
 from functools import lru_cache
 import gzip
 import mimetypes
@@ -15,6 +14,7 @@ import stat
 
 from aiohttp import web
 
+from puppy import workers
 
 MIN_BYTES = 1024
 GZIP_LEVEL = 6
@@ -98,8 +98,7 @@ async def middleware(request, handler):
         if not accepts_gzip(request) or any(name in request.headers for name in FILE_CONDITIONS):
             return response
         try:
-            asset = await asyncio.get_running_loop().run_in_executor(
-                None, _asset, info["directory"], filename)
+            asset = await workers.io.run(_asset, info["directory"], filename)
         except (OSError, ValueError, RuntimeError):
             # Preserve FileResponse's missing-file, permission and path errors.
             return response
@@ -115,7 +114,6 @@ async def middleware(request, handler):
             isinstance(response.body, bytes) and len(response.body) >= MIN_BYTES:
         vary_encoding(response)
         if accepts_gzip(request):
-            response.body = await asyncio.get_running_loop().run_in_executor(
-                None, _gzip, response.body)
+            response.body = await workers.io.run(_gzip, response.body)
             response.headers["Content-Encoding"] = "gzip"
     return response

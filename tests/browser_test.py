@@ -3510,7 +3510,7 @@ def check_system_prompt_settings(ui_source: str, css_source: str) -> None:
                      "it is not sent when the terminal is unavailable.")
     assert terminal_copy in ui_source.replace('" +\n      "', "")
     vnc_copy = ("Sent to every model turn on this backend; it governs how the "
-                "agent works the screens Puppy is connected to over VNC.")
+                "agent works the screens Puppy is connected to over VNC or Remote Desktop.")
     assert vnc_copy in ui_source.replace('" +\n      "', "")
     spawn_copy = ("Sent with every model turn on this backend; it governs when "
                   "the agent may delegate work to spawned agents on Puppy's backends.")
@@ -5195,6 +5195,7 @@ const browserEnabledFor=()=>false;
 const browserInstancesFor=()=>false;
 const terminalInstancesFor=()=>false;
 const vncEnabledFor=()=>false;
+const rdpEnabledFor=()=>false;
 const vncInstancesFor=()=>null;
 const findSessionMeta=()=>null;
 let apiCalls=[],apiResult=null;

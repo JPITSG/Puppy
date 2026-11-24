@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -335,7 +336,7 @@ def check_static_contract() -> None:
     assert '.term-host::after{' in css
     assert 'border-radius:inherit;box-shadow:inset 0 0 0 1px var(--browser-frame);' \
         in css
-    assert '.chip.browser,.chip.terminal,.chip.vnc{' in css
+    assert '.chip.browser,.chip.terminal,.chip.vnc,.chip.background-tasks{' in css
 
     # The grid is fitted from the box the terminal is opened on, so that box
     # must carry no inset of its own. FitAddon reads
@@ -455,6 +456,44 @@ def check_driver_wiring(session_id: int) -> None:
     prompt = inline["agent"]["puppy_console"]["prompt"]
     assert prompt == "Node policy.\n\nBrowser policy.\n\n" + \
         descriptor["engine_guidance"]
+
+
+async def check_process_outliving_its_pty() -> None:
+    """A process that lets go of its terminal and stays is not waited for in a
+    thread, and Close still ends it; one that ends with it ends the terminal."""
+    registry = terminal.TerminalRegistry()
+    old_manager = terminal._manager
+    terminal._manager = registry
+    before = threading.active_count()
+    try:
+        outliving = [await registry.create(
+            command="/bin/sh -c 'exec /bin/sleep 60 <&- >&- 2>&-'", cwd=str(TEST_ROOT))
+            for _ in range(6)]
+        # each has seen its end, and its process is still there
+        await wait_for(lambda: all(instance.end_task is not None for instance in outliving))
+        await asyncio.sleep(0.3)
+        assert all(instance.running for instance in outliving)
+        for instance in outliving:
+            os.kill(instance.pid, 0)
+        assert threading.active_count() <= before + 1, "a wait for a process took a thread"
+        started = time.monotonic()
+        await asyncio.gather(*(registry.close(instance.terminal_id, "closed by the test")
+                               for instance in outliving))
+        assert time.monotonic() - started < 10, "Close waited for the process"
+        for instance in outliving:
+            assert not instance.running
+            try:
+                os.kill(instance.pid, 0)
+            except ProcessLookupError:
+                continue
+            raise AssertionError("Close left the process behind")
+        natural = await registry.create(command="/bin/sh -c 'exit 3'", cwd=str(TEST_ROOT))
+        await wait_for(lambda: not natural.running, timeout=3.0)
+        assert natural.ended_reason == "Terminal ended", natural.ended_reason
+        await registry.close(natural.terminal_id, "done")
+    finally:
+        await registry.stop("test ended")
+        terminal._manager = old_manager
 
 
 async def check_terminal_lifecycle(session_id: int, other_session_id: int) -> None:
@@ -886,6 +925,7 @@ async def main() -> None:
         await check_input_readiness()
         await check_resize_deduplication()
         await check_slow_viewer()
+        await check_process_outliving_its_pty()
         await check_terminal_lifecycle(session_id, other_session_id)
         await check_engine_terminal()
         await check_engine_routes()

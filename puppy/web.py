@@ -22,7 +22,7 @@ from puppy import (__version__, agent_notes, auth, backends, backup_schedule, bi
                    shared_files,
                    snapshots, session_titles, spawn_exec,
                    state_stream, system_prompts, terminal, timeouts, uploads, vnc,
-                   usage_refresh, workspace_links, workspace_sync, workspaces)
+                   usage_refresh, workers, workspace_links, workspace_sync, workspaces)
 from puppy import web_tls
 from puppy.drivers import all_drivers, get_driver
 from puppy.drivers import base as driver_base
@@ -1247,8 +1247,7 @@ async def h_session_prompts(request: web.Request):
         return web.json_response(
             {"error": "prompt limit must be between 1 and {}".format(prompt_index.PAGE_LIMIT)}, status=400)
     # a whole index walks the session's turns: off the loop, like a search
-    index = await asyncio.get_running_loop().run_in_executor(
-        None, prompt_index.read, s["id"], after_seq, limit)
+    index = await workers.history.run(prompt_index.read, s["id"], after_seq, limit)
     return web.json_response(index)
 
 
@@ -1522,7 +1521,7 @@ def _snapshot_conflict(app: web.Application, saved=False):
 
 async def h_snapshot_storage(request: web.Request):
     try:
-        usage = await asyncio.get_running_loop().run_in_executor(None, snapshots.storage_usage)
+        usage = await workers.jobs.run(snapshots.storage_usage)
         return web.json_response(usage, headers={"Cache-Control": "no-store"})
     except (OSError, snapshots.SnapshotError):
         log.warning("backup storage measurement failed", exc_info=True)
@@ -2227,6 +2226,9 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     The full console and the deployable headless backend both call this. Keep
     backend-facing route changes here so the two runtimes cannot silently drift.
     """
+    # the threads every startup hook below may already use
+    workers.register(app)
+
     async def validate_records(_app):
         runner.validate_persisted_queues(db.connect())
         # an unreadable background task limit refuses to start, unrepaired

@@ -20,7 +20,7 @@ from typing import Optional, Tuple
 
 from aiohttp import web
 
-from puppy import browser, config, db, runner
+from puppy import browser, config, db, runner, workers
 from puppy.drivers import engine_keys
 
 
@@ -62,7 +62,7 @@ _INTERPRETERS = ("python", "python2", "python3", "node", "nodejs", "bun",
                  "deno", "ruby", "perl", "env", "npx", "sh", "bash", "zsh")
 # Two consecutive scans give one process its CPU share; the cache is pruned to
 # the live set on every scan so a finished process cannot leak. Scans run in
-# the executor, and two of them interleaving would read back each other's
+# threads, and two of them interleaving would read back each other's
 # fresh timestamps as "no time has passed", so one lock owns both.
 _process_samples = {}
 _process_cache = {"at": 0.0, "payload": None, "key": None}
@@ -662,8 +662,7 @@ async def h_metrics(request: web.Request):
         window = DEFAULT_WINDOW_SECONDS
     app = request.app
     projects = project_directories()
-    payload = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: snapshot(app, window, projects=projects))
+    payload = await workers.host.run(lambda: snapshot(app, window, projects=projects))
     return web.json_response(payload)
 
 

@@ -222,6 +222,13 @@ still contain a value written before that release.
   times rows from `started_at`; rows without them are still listed. The
   persisted `background_wait` row's `tasks` may carry `tool_use_id`. No
   capability, route or stored format changes.
+- A search runs for at most 8 seconds and a few run at a time. `GET /api/search`
+  answers `503 {error}` with `Retry-After` for one that was stopped or found no
+  place, where it used to keep its caller waiting, and the session tools' `search`
+  names the refused references under `unavailable`. Bare words of one or two
+  Latin letters or digits match whole words rather than prefixes. `search` and
+  `read` results keep their shape; no capability, stored shape or index format
+  changes. See [worker threads](worker-pools.md).
 - `POST /api/sessions/{sid}/background-tasks/{task_id}/stop` (both runtimes,
   additive `session-background-task-stop` capability) stops one task of the
   running turn's live set through the driver's control channel (claude's

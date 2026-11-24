@@ -29314,8 +29314,10 @@ class SearchView {
     this.setStatus(...statusParts);
 
     if (!groups.length) {
-      this.resultsBox.appendChild(el("div", "search-empty",
-        `No matches for "${query}"`));
+      // a backend that could not search has not found that there is nothing
+      if (failures.length < targets.length)
+        this.resultsBox.appendChild(el("div", "search-empty",
+          `No matches for "${query}"`));
       return;
     }
     for (const entry of groups)

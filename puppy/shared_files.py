@@ -33,7 +33,6 @@ orphan sweep never takes one, because its id is not an upload id.
 """
 from __future__ import annotations
 
-import asyncio
 import errno
 import hashlib
 import logging
@@ -50,7 +49,7 @@ from urllib.parse import quote
 
 from aiohttp import web
 
-from puppy import config, db, uploads
+from puppy import config, db, uploads, workers
 
 log = logging.getLogger("puppy.shared_files")
 
@@ -495,7 +494,7 @@ async def h_list(request: web.Request):
     session_id = int(request.match_info["sid"])
     if db.get_session(session_id) is None:
         return web.json_response({"error": "session not found"}, status=404)
-    files = await asyncio.get_running_loop().run_in_executor(None, shared, session_id)
+    files = await workers.io.run(shared, session_id)
     return web.json_response({"files": files[:MAX_LISTED], "more": len(files) > MAX_LISTED},
                              headers={"Cache-Control": "no-store"})
 

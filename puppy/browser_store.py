@@ -24,7 +24,7 @@ import math
 import os
 import time
 
-from puppy import config
+from puppy import config, workers
 
 log = logging.getLogger("puppy.browser")
 
@@ -232,8 +232,7 @@ class SharedStore:
         if self._loaded:
             return
         try:
-            loaded = await asyncio.get_event_loop().run_in_executor(
-                None, _load_blocking, store_path())
+            loaded = await workers.io.run(_load_blocking, store_path())
         except Exception as exc:
             # Preserve unreadable/non-current files. A load failure must never
             # become a successful empty load followed by a replacement write.
@@ -264,8 +263,7 @@ class SharedStore:
                         for origin, entry in self._storage.items()},
         }
         try:
-            await asyncio.get_event_loop().run_in_executor(
-                None, _save_blocking, store_path(), payload)
+            await workers.io.run(_save_blocking, store_path(), payload)
         except Exception as exc:
             self._dirty = True
             self._persistence_error = str(exc)[:400]

@@ -17,7 +17,7 @@ import uuid
 from aiohttp import web, WSMsgType, ClientTimeout
 
 from puppy import backends, config, db, prompt_index, protocol, runner, search, \
-    session_aliases
+    session_aliases, workers
 
 log = logging.getLogger("puppy.session_links")
 CAPABILITY = "session-references"
@@ -32,6 +32,10 @@ MENTION_RE = re.compile(
     r"(?<!\w)@session\s+(?:([a-f0-9]{32}):)?"
     r"(all|[a-f0-9]{32}/[1-9][0-9]{0,15})(?![\w/])", re.I)
 MAX_FRAME = 1024 * 1024
+# Turns reading conversations, two at a time: a turn's parallel reads, and its
+# sub-agents', take their turns instead of every thread the console reads with.
+READS_WAIT = 20.0
+_reads = workers.Lane(2, waiting=128)
 _app = None
 _relays = {}                 # controller UUID -> backend end of its socket
 _pending = {}                # relay request UUID -> future
@@ -278,7 +282,9 @@ def _turns(sid, args):
             "next_after_seq": last if more else None, "read_at": time.time()}
 
 
-async def node_call(method, args):
+async def node_call(method, args, source="", relayed=False):
+    """One session operation on this node: for a turn (``source``, its
+    session's reference) or relayed by a controller, which waits less."""
     if method in ("request", "request_status", "request_cancel", "notice"):
         from puppy import session_actions
         return await session_actions.node_call(method, args)
@@ -306,8 +312,13 @@ async def node_call(method, args):
             reader = _turns if view == "turns" else _events
             # the session's live state is read here; its history off the loop
             info = session_info(sessions[0])
-            body = await asyncio.get_running_loop().run_in_executor(
-                None, reader, sessions[0]["id"], args)
+            try:
+                body = await _reads.run(
+                    workers.history, reader, sessions[0]["id"], args,
+                    wait=search.RELAYED_WAIT if relayed else READS_WAIT)
+            except workers.Busy:
+                raise SessionLinkError("too many reads are waiting here; try again in a "
+                                       "moment, one read at a time")
             return dict(body, session=info)
         query = args.get("query")
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= search.MAX_QUERY_CHARS:
@@ -320,27 +331,32 @@ async def node_call(method, args):
         kinds = args.get("kinds", ["user", "assistant", "tool", "info", "title"])
         if not isinstance(kinds, list) or not kinds or any(x not in search.KINDS for x in kinds):
             raise SessionLinkError("invalid search kinds")
-        def run():
-            # Per-session queries enforce the selected boundary before search,
-            # retain pagination, and reuse the existing tolerant query parser.
-            found = []
-            for session in page:
-                payload = search.query_index(query, session_id=session["id"],
-                                             kinds=kinds, limit=limit, offset=offset)
-                for match in payload["matches"]:
-                    match["source"] = source_link(reference(session["id"]), match["seq"])
-                if payload["total"]:
-                    found.append({"session": session_info(session), **payload})
-            return {"node": db.node_uuid(), "results": found, "searched": len(page),
-                    "selected": len(sessions), "read_at": time.time(),
-                    "next_session_offset": session_offset + len(page) if session_offset + len(page) < len(sessions) else None}
-        return await asyncio.get_running_loop().run_in_executor(None, run)
+        # The selected sessions bound the search itself; each keeps its own
+        # total and its own pages, and one pass over the index serves them all.
+        try:
+            matched = await search.for_agent(
+                source or None, query, [session["id"] for session in page],
+                wait=search.RELAYED_WAIT if relayed else search.AGENTS_WAIT,
+                kinds=kinds, limit=limit, offset=offset)
+        except search.SearchError as exc:
+            raise SessionLinkError(str(exc))
+        found = []
+        for session in page:
+            payload = matched.get(session["id"])
+            if payload is None:
+                continue
+            for match in payload["matches"]:
+                match["source"] = source_link(reference(session["id"]), match["seq"])
+            found.append({"session": session_info(session), **payload})
+        return {"node": db.node_uuid(), "results": found, "searched": len(page),
+                "selected": len(sessions), "read_at": time.time(),
+                "next_session_offset": session_offset + len(page) if session_offset + len(page) < len(sessions) else None}
     raise SessionLinkError("unknown session operation")
 
 
-async def remote_call(bid, method, args):
+async def remote_call(bid, method, args, source=""):
     if bid == 0:
-        return await node_call(method, args)
+        return await node_call(method, args, source=source)
     channel = backends.node_channel(bid)
     if channel is None:
         raise SessionLinkError("node is offline")
@@ -351,8 +367,12 @@ async def remote_call(bid, method, args):
         raise SessionLinkError("node '{}' cannot read by turns yet - upgrade its Puppy backend, "
                                "or read its events".format(channel.get("name") or bid))
     from puppy.workspace_links import _request_json
-    return await asyncio.wait_for(_request_json(
-        channel, "POST", "session-links/node", {"method": method, "params": args}), 12)
+    try:
+        return await asyncio.wait_for(_request_json(
+            channel, "POST", "session-links/node", {"method": method, "params": args}), 12)
+    except asyncio.TimeoutError:
+        raise SessionLinkError("node '{}' did not answer within 12 seconds".format(
+            channel.get("name") or bid))
 
 
 async def durable_call(awaitable):
@@ -489,7 +509,7 @@ async def broker(source, method, args, scope=None):
             groups.setdefault(row["bid"], []).append(ref)
     if method == "read" and len(refs) != 1:
         raise SessionLinkError("read requires exactly one selected reference")
-    values = await asyncio.gather(*(remote_call(bid, method, dict(args, refs=items))
+    values = await asyncio.gather(*(remote_call(bid, method, dict(args, refs=items), source=source)
                                     for bid, items in groups.items()), return_exceptions=True)
     results = []
     for (bid, items), value in zip(groups.items(), values):
@@ -529,7 +549,7 @@ async def h_node(request):
         body = await request.json()
         if not isinstance(body, dict) or set(body) != {"method", "params"} or not isinstance(body["params"], dict):
             raise SessionLinkError("invalid session operation")
-        return web.json_response(await node_call(body["method"], body["params"]))
+        return web.json_response(await node_call(body["method"], body["params"], relayed=True))
     except (ValueError, TypeError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -664,8 +684,9 @@ def validate_persisted(connection):
 
 
 async def _lifecycle(app):
-    global _app, _catalog_task, _catalog_value, _catalog_until
+    global _app, _catalog_task, _catalog_value, _catalog_until, _reads
     _app = app
+    _reads = workers.Lane(2, waiting=128)
     _catalog_value, _catalog_until = None, 0.0
     validate_persisted(db.connect())
     from puppy import session_agent
