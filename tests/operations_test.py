@@ -45,6 +45,77 @@ async def control(client, key, method="DELETE"):
     return await response.json()
 
 
+async def progress():
+    """What an operation says it is doing, read beside its state."""
+    app = web.Application()
+    step, gates = asyncio.Event(), {name: threading.Event() for name in ("thread", "commit", "end")}
+    loop = asyncio.get_running_loop()
+
+    @operations.cancellable
+    async def job(request):
+        step.set()
+        await operations.wait(quiet.wait())
+        def worker():
+            # the operation's own thread speaks for it
+            operations.report("Copying Main's working files", "1,200 of 3,210 · 41.2 MiB")
+            loop.call_soon_threadsafe(step.set)
+            gates["thread"].wait(5)
+            operations.report("W" * 500, "d" * 500)
+            loop.call_soon_threadsafe(step.set)
+            gates["commit"].wait(5)
+        await operations.to_thread(worker)
+        operations.commit()
+        operations.report("Too late to be said")
+        step.set()
+        await operations.to_thread(gates["end"].wait, 5)
+        return web.json_response({"ok": True})
+
+    async def reached():
+        await asyncio.wait_for(step.wait(), 5)
+        step.clear()
+
+    quiet = asyncio.Event()
+    app.router.add_post("/work", job)
+    operations.register(app)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        operations.report("Nothing hears this")   # no operation here: said to nobody
+        key = identity()
+        request = asyncio.create_task(client.post("/work", headers={operations.HEADER: key}))
+        await reached()
+        # an operation that has said nothing reads as it always did
+        assert await control(client, key, "GET") == {"ok": True, "state": "running"}
+        quiet.set()
+        await reached()
+        assert await control(client, key, "GET") == {
+            "ok": True, "state": "running", "phase": "Copying Main's working files",
+            "detail": "1,200 of 3,210 · 41.2 MiB"}
+        gates["thread"].set()
+        await reached()
+        value = await control(client, key, "GET")
+        assert value["phase"] == "W" * operations.MAX_PROGRESS_CHARS and \
+            value["detail"] == "d" * operations.MAX_PROGRESS_CHARS, "bounded"
+        gates["commit"].set()
+        await reached()
+        # past its last cancellable step the state alone speaks
+        assert await control(client, key, "GET") == {"ok": True, "state": "finishing"}
+        assert await control(client, key) == {"ok": True, "state": "finishing"}
+        gates["end"].set()
+        assert (await request).status == 200
+        assert await control(client, key, "GET") == {"ok": True, "state": "finished"}
+    finally:
+        for gate in gates.values():
+            gate.set()
+        await client.close()
+    # a process is watched while it runs, and its result is the same
+    seen = []
+    result = operations.run_process([sys.executable, "-c", "import time; time.sleep(.45); print('done')"],
+                                    stdout=-1, stderr=-1, tick=lambda: seen.append(time.monotonic()))
+    assert result.returncode == 0 and result.stdout == b"done\n" and len(seen) >= 2, seen
+    print("PASS: an operation's step and figures, bounded, from its threads, only while it can be cancelled")
+
+
 async def core():
     app = web.Application()
     entered, cleanup, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -87,6 +158,8 @@ async def core():
         assert response.status == 200 and events == ["commit"]
     finally:
         await client.close()
+
+    await progress()
 
     # A thread cannot be interrupted by cancelling its asyncio Future. Its
     # owner must wait before releasing locks or reclaiming staging.
@@ -216,7 +289,7 @@ async def runtimes():
             session_tasks._git(str(project), "add", "file")
             session_tasks._git(str(project), "commit", "-m", "initial")
             sid = db.create_session("Main", "codex", str(project), "", "", "blue", "workspace-write")
-            driver = SimpleNamespace(refresh_model_options=AsyncMock())
+            driver = SimpleNamespace(label="Codex", refresh_model_options=AsyncMock())
             entered.clear()
             real_copy = session_tasks._copy_project
             def slow_project(*args):
@@ -240,6 +313,46 @@ async def runtimes():
             assert not session_tasks.children(sid) and not session_tasks.busy()
             assert set(workspaces.temporary_root().glob("session-*")) == before
             assert (project / "file").read_text() == "main stays untouched"
+
+            # While it prepares, a task says which step it is on and how far
+            # git has come, in git's own figures; Cancel still stops it there.
+            gates = ROOT / ("gates-" + identity()); gates.mkdir()
+            wrapper = gates / "git"
+            wrapper.write_text("""#!/bin/sh
+for word in "$@"; do
+  if [ "$word" = clone ]; then
+    printf "Cloning into 'x'...\\nremote: Enumerating objects: 6134, done.        \\n" >&2
+    printf 'remote: Compressing objects:  45%% (2760/6134)        \\rremote: Compressing obj' >&2
+    while [ ! -e {0}/receive ]; do sleep .02; done
+    printf '\\rReceiving objects:  30%% (1840/6134), 41.20 MiB | 10.50 MiB/s   \\r' >&2
+    while :; do sleep .02; done
+  fi
+done
+exec {1} "$@"
+""".format(gates, shutil.which("git")))
+            wrapper.chmod(0o755)
+            async def says(key, phase, detail):
+                deadline = time.monotonic() + 10
+                while True:
+                    value = await control(client, key, "GET")
+                    if (value.get("phase"), value.get("detail")) == (phase, detail):
+                        return
+                    assert time.monotonic() < deadline, value
+                    await asyncio.sleep(.02)
+            key = identity()
+            with patch("puppy.drivers.get_driver", return_value=driver), \
+                    patch.object(engine_defaults, "for_session", return_value={"model": "", "effort": "", "permission_mode": "workspace-write"}), \
+                    patch.dict(os.environ, {"PATH": "{}:{}".format(gates, os.environ["PATH"])}):
+                request = asyncio.create_task(client.post("/api/sessions/%s/tasks" % sid,
+                    json={"prompt": "A task", "request_id": identity()}, headers={operations.HEADER: key}))
+                await says(key, "Packing Main's Git history", "3,374 left of 6,134 objects")
+                (gates / "receive").touch()
+                await says(key, "Copying Main's Git history", "30% · 41.20 MiB")
+                assert await control(client, key) == {"ok": True, "state": "cancelling"}
+                response = await request
+                assert response.status == 409 and (await response.json())["cancelled"]
+            assert not session_tasks.children(sid) and not session_tasks.busy()
+            assert set(workspaces.temporary_root().glob("session-*")) == before
             db.delete_session(sid); runner.drop_hub(sid)
 
             # Browser startup cancels its async dial and closes its new identity.
@@ -285,7 +398,7 @@ async def runtimes():
             app["puppy_snapshot_busy"] = "export"
             assert (await control(client, identity()))["state"] == "cancelling"
             app["puppy_snapshot_busy"] = None
-            print("PASS: %s cancellation routes, copy cleanup, task/browser cleanup and snapshot gate" % app["puppy_role"])
+            print("PASS: %s cancellation routes, copy cleanup, task progress, task/browser cleanup and snapshot gate" % app["puppy_role"])
         finally:
             await client.close()
 

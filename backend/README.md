@@ -1431,7 +1431,9 @@ without automatic migrations. See the main README for tool behavior and limits.
 Both runtimes advertise `operation-cancel-v1`. Audited requests accept a fresh
 `X-Puppy-Operation` identity and expose authenticated
 `GET`/`DELETE /api/operations/{id}`. Cancellation stops preparation and drains
-cleanup before releasing ownership; an atomic commit refuses cancellation.
+cleanup before releasing ownership; an atomic commit refuses cancellation. While
+an operation runs, `GET` adds the `phase` and `detail` it last reported (a new
+task's clone and copy report theirs), in memory only.
 The controller forwards the header and cancellation through its ordinary
 pinned, authenticated proxy. No persisted state changes are involved.
 

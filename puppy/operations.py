@@ -23,6 +23,7 @@ CAPABILITY = "operation-cancel-v1"
 TTL = 600
 MAX_RECORDS = 256
 MAX_RUNNING = 16
+MAX_PROGRESS_CHARS = 120
 _current = contextvars.ContextVar("puppy_operation", default=None)
 
 
@@ -37,6 +38,7 @@ class Operation:
         self.committed = False
         self.done = False
         self.task = None
+        self.phase = self.detail = ""
         self.expires = time.monotonic() + TTL
 
     def cancel(self):
@@ -49,9 +51,30 @@ class Operation:
         return "finished" if self.done else "finishing" if self.committed else \
             "cancelling" if self.cancelled else "running"
 
+    def payload(self):
+        """The state, and while it is running what it last said it is doing."""
+        with self.lock:
+            value = {"ok": True, "state": self.state()}
+            if value["state"] == "running" and self.phase:
+                value.update(phase=self.phase, detail=self.detail)
+            return value
+
 
 def active():
     return _current.get() is not None
+
+
+def report(phase, detail=""):
+    """Say what the current operation is doing, for its progress dialog.
+
+    ``phase`` is the step in words and changes only with the step; ``detail``
+    is its running figures. Cheap enough to call often, from any thread the
+    operation owns, and nothing at all without one."""
+    operation = _current.get()
+    if operation:
+        with operation.lock:
+            operation.phase = str(phase)[:MAX_PROGRESS_CHARS]
+            operation.detail = str(detail)[:MAX_PROGRESS_CHARS]
 
 
 def checkpoint():
@@ -152,8 +175,11 @@ def copy2(source, destination, *, follow_symlinks=True):
     return destination
 
 
-def run_process(argv, *, input=None, timeout=60, **kwargs):
-    """Bounded Git/build preparation with process-group cleanup on Cancel."""
+def run_process(argv, *, input=None, timeout=60, tick=None, **kwargs):
+    """Bounded Git/build preparation with process-group cleanup on Cancel.
+
+    ``tick`` is called about ten times a second while the process runs, to
+    report how far it has come."""
     checkpoint()
     deadline = time.monotonic() + timeout
     with subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
@@ -171,6 +197,8 @@ def run_process(argv, *, input=None, timeout=60, **kwargs):
                     return subprocess.CompletedProcess(argv, process.returncode, out, err)
                 except subprocess.TimeoutExpired:
                     first = False
+                    if tick is not None:
+                        tick()
         finally:
             # Descendants may outlive their parent or hold its output pipes.
             try:
@@ -249,8 +277,9 @@ async def h_control(request):
         if len(records) >= MAX_RECORDS:
             return web.json_response({"error": "Too many operations; retry shortly"}, status=429)
         operation = records.setdefault(key, Operation())
-    state = operation.cancel() if request.method == "DELETE" else operation.state()
-    return web.json_response({"ok": True, "state": state})
+    if request.method == "DELETE":
+        return web.json_response({"ok": True, "state": operation.cancel()})
+    return web.json_response(operation.payload())
 
 
 def register(app):

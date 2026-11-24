@@ -418,5 +418,7 @@ instance's own ledger is in its backup.
 Cancellation is additive: `operation-cancel-v1` covers audited preparation
 requests and authenticated operation controls; `engine-upgrade-cancel`,
 `side-question-cancel` and `browser-navigation-stop` cover their native running
-operations. See [the cancellation contract](cancellation.md). Existing persisted
+operations. `GET /api/operations/{id}` may add `phase` and `detail`, the step a
+running operation last reported and its figures; a node that reports none omits
+both. See [the cancellation contract](cancellation.md). Existing persisted
 shapes are unchanged; a commit boundary is never presented as rolled back.

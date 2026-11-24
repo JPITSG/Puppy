@@ -4210,6 +4210,97 @@ async def vnc_connection_checks(instance):
     print("PASS: VNC Connect stays cancellable by button, Escape and backdrop on desktop and phone", flush=True)
 
 
+async def operation_progress_checks(instance):
+    """The progress dialog's one line in real layout. A single dialog stays
+    open while every step a new task's preparation can say passes through it
+    on a desktop and phones in both themes: always one line, the dialog never
+    changing height, the clock at its right end, whole and never under the
+    text, every step whole even where its figures are cut short, every line
+    whole on a desktop, and the clock counting by itself. OPERATION_SHOT
+    names a directory to save the dialog for a look."""
+    page = instance.page_session
+    shots = os.environ.get("OPERATION_SHOT")
+    history = list(dict.fromkeys(session_tasks.CLONE_PHASES.values()))
+    figures = {"Reading Main's Git history": "861,053 objects",
+               "Packing Main's Git history": "3,374 left of 6,134 objects",
+               "Copying Main's Git history": "45% · 341.20 MiB", "Checking the copied history": "80%",
+               "Checking out Main's last commit": "11,284 of 12,043 files"}
+    lines = [("Working…", "")] + [(step, "") for step in (
+        "Waiting for this session's other task work", "Checking Claude Code's models", "Checking Main's repository",
+        "Checking Main for uncommitted changes")] + [(step, figures[step]) for step in history] + [
+        ("Copying Main's working files", "11,284 of 12,043 · 412.6 MiB"), ("Recording the copy's starting point", ""),
+        ("Starting the task's conversation", ""), ("Finishing · can no longer be cancelled", "")]
+    await evaluate(instance, """(() => {
+        window.progressOriginalFetch = fetch; window.progressSaid = {state: 'running'};
+        fetch = (url, opts = {}) => {
+            if (url === '/api/progress-fixture') return new Promise(resolve => { window.progressFinish = () =>
+                resolve(new Response(JSON.stringify({ok: true}), {status: 200})); });
+            if (url.startsWith('/api/operations/')) return Promise.resolve(new Response(JSON.stringify(progressSaid)));
+            return progressOriginalFetch(url, opts);
+        };
+        window.progressDone = false;
+        api(0, 'progress-fixture', {method: 'POST', operation: 'Preparing task'}).then(() => { window.progressDone = true; });
+        return true;
+    })()""")
+    measure = """(() => {
+        const line = document.querySelector('.operation-line'), part = name => line.querySelector('.operation-' + name);
+        const r = node => node.getBoundingClientRect();
+        const text = part('text'), style = getComputedStyle(line), m = line.closest('.modal');
+        const content = r(m).right - parseFloat(getComputedStyle(m).paddingRight) - parseFloat(getComputedStyle(m).borderRightWidth);
+        return {step: part('step').textContent, figures: part('figures').textContent, time: part('time').textContent,
+            lines: r(line).height / parseFloat(style.lineHeight), modal: r(m).height,
+            whole: text.scrollWidth <= text.clientWidth + 0.5, stepWhole: r(part('step')).right <= r(text).right + 0.5,
+            timeEnd: content - r(part('time')).right, gap: r(part('time')).left - r(text).right,
+            wide: m.scrollWidth > m.clientWidth + 1 || document.documentElement.scrollWidth > innerWidth,
+            clip: [r(m).left, r(m).top, r(m).width, r(m).height]};
+    })()"""
+    try:
+        await until(instance, "!!document.querySelector('.operation-line')")
+        first = await evaluate(instance, measure)
+        assert first["step"] == "Working…" and re.fullmatch(r"0:0\d", first["time"]), first
+        await until(instance, "document.querySelector('.operation-time').textContent !== %s" % json.dumps(first["time"]))
+        for width, height, mobile in ((1440, 900, False), (390, 844, True), (360, 740, True)):
+            await instance.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
+                "deviceScaleFactor": 2 if mobile else 1, "mobile": mobile}, session=page)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                tall = set()
+                for step, detail in lines:
+                    # as the poll paints it, without waiting for one each
+                    await evaluate(instance, """((step, detail) => {
+                        progressSaid = {state: 'running', phase: step, detail};
+                        document.querySelector('.operation-step').textContent = step;
+                        document.querySelector('.operation-figures').textContent = detail ? ' · ' + detail : '';
+                        return true; })(%s, %s)""" % (json.dumps(step), json.dumps(detail)))
+                    g = await evaluate(instance, measure)
+                    where = (width, theme, g)
+                    assert abs(g["lines"] - 1) < 0.05, ("one line", where)
+                    assert g["stepWhole"], ("the step is never cut", where)
+                    assert mobile or g["whole"], ("a desktop shows the whole line", where)
+                    assert abs(g["timeEnd"]) < 0.6 and g["gap"] >= 8 and not g["wide"], ("the clock at the end", where)
+                    tall.add(round(g["modal"], 1))
+                    if shots and step.startswith("Packing"):
+                        x, y, w, h = g["clip"]
+                        data = await instance.call("Page.captureScreenshot", {"format": "png", "clip": {
+                            "x": x - 10, "y": y - 10, "width": w + 20, "height": h + 20, "scale": 2}}, session=page)
+                        Path(shots, "operation-%d-%s.png" % (width, theme)).write_bytes(base64.b64decode(data["data"]))
+                assert len(tall) == 1, ("the dialog never changes height", width, theme, tall)
+        # the real poll brings the next step by itself
+        await evaluate(instance, "progressSaid = {state: 'running', phase: \"Packing Main's Git history\", detail: '61%'}; true")
+        await until(instance, "document.querySelector('.operation-line').textContent.startsWith(\"Packing Main's Git history · 61%\")")
+        await evaluate(instance, "progressFinish(); true")
+        await until(instance, "progressDone && !document.querySelector('.operation-line')")
+    finally:
+        await evaluate(instance, """(() => { if (window.progressFinish) progressFinish();
+            if (window.progressOriginalFetch) fetch = progressOriginalFetch;
+            delete window.progressOriginalFetch; delete window.progressSaid; delete window.progressFinish;
+            applyTheme('dark'); return true; })()""")
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=page)
+    print("PASS: the progress dialog's one line never wraps or moves the dialog, every step whole and the running "
+          "clock at its end on a desktop and phones in both themes", flush=True)
+
+
 async def operation_cancellation_checks(instance):
     await evaluate(instance, """(() => {
         window.cancelOriginalFetch=fetch;
@@ -7935,6 +8026,7 @@ async def checks(a, b, hub, capture=False):
     await vnc_throughput_checks(a, capture)
     await vnc_connection_checks(a)
     await rdp_checks(a)
+    await operation_progress_checks(a)
     await operation_cancellation_checks(a)
     await timer_error_checks(a, capture)
     await usage_error_checks(a, capture)
@@ -11600,6 +11692,10 @@ async def main(args):
             if args.shared_files_only:
                 await shared_file_checks(instances[0])
                 return
+            if args.operations_only:
+                await operation_progress_checks(instances[0])
+                await operation_cancellation_checks(instances[0])
+                return
             if args.image_viewer_only:
                 await image_viewer_checks(instances[0], args.screenshots)
                 await image_mark_checks(instances[0])
@@ -11690,6 +11786,7 @@ if __name__ == "__main__":
     parser.add_argument("--question-scroll-only", action="store_true")
     parser.add_argument("--image-viewer-only", action="store_true")
     parser.add_argument("--shared-files-only", action="store_true")
+    parser.add_argument("--operations-only", action="store_true")
     parser.add_argument("--session-request-only", action="store_true")
     parser.add_argument("--schedules-only", action="store_true")
     parser.add_argument("--prompt-gutter-only", action="store_true")

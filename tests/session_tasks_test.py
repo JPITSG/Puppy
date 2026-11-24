@@ -5,6 +5,7 @@ from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import threading
@@ -592,6 +593,95 @@ def drop_tasks(ids):
         db.delete_session(tid)
 
 
+async def creation_progress():
+    """What a new task's preparation says, step by step, for the dialog that
+    waits for it: git's own clone progress read from its real output, then
+    the steps of a creation from working files and from the last commit."""
+    read = tasks._clone_progress
+    enumerated = "Cloning into 'x'...\nremote: Enumerating objects: 14554, done.        \n"
+    assert read("") is None and read("Cloning into 'x'...\n") is None
+    assert read(enumerated) == ("Reading Main's Git history", "14,554 objects")
+    assert read(enumerated + "remote: Counting objects:  12% (1747/14554)        \r") == \
+        ("Reading Main's Git history", "12%")
+    assert read("remote: Compressing objects:  45% (3495/7767)        \r") == \
+        ("Packing Main's Git history", "4,272 left of 7,767 objects")
+    # a line still being written leaves the one before it standing
+    assert read("remote: Compressing objects:  45% (3495/7767)        \rremote: Compressing objects:  46% (35") == \
+        ("Packing Main's Git history", "4,272 left of 7,767 objects")
+    packed = "remote: Total 14554 (delta 9942), reused 8412 (delta 5576), pack-reused 0 (from 0)        \n"
+    assert read("remote: Compressing objects: 100% (7767/7767), done.        \n" + packed) == \
+        ("Packing Main's Git history", "0 left of 7,767 objects")
+    assert read(packed + "Receiving objects:  70% (10188/14554), 76.05 MiB | 8.10 MiB/s   \r") == \
+        ("Copying Main's Git history", "70% · 76.05 MiB")
+    assert read("Receiving objects:   1% (2/150)\r") == ("Copying Main's Git history", "1%")
+    assert read("Resolving deltas:  80% (7953/9942)\r") == ("Checking the copied history", "80%")
+    assert read("Checking objects: 100% (32768/32768), done.\n") == ("Checking the copied history", "100%")
+    assert read("Updating files:  40% (1284/3210)\r") == \
+        ("Checking out Main's last commit", "1,284 of 3,210 files")
+    # a failure says what went wrong, without the progress made before it
+    assert tasks._clone_error(enumerated + "remote: Compressing objects:  45% (3495/7767)        \r" + packed +
+                              "error: file write error: No space left on device\nfatal: index-pack failed\n") == \
+        "error: file write error: No space left on device\nfatal: index-pack failed"
+
+    project = committed_project('progress-project')
+    parent = db.create_session('Progress', 'codex', str(project), '', '', '#e0784f', 'workspace-write')
+    said, created = [], []
+    real = tasks.operations.report
+
+    def listen(phase, detail=''):
+        said.append((phase, detail))
+        real(phase, detail)
+
+    def steps():
+        order = []
+        for phase, _detail in said:
+            if not order or order[-1] != phase:
+                order.append(phase)
+        said.clear()
+        return order
+
+    ahead = ["Waiting for this session's other task work", "Checking Codex's models", "Checking Main's repository"]
+    # however much of itself a tiny clone had time to say
+    cloning = set(tasks.CLONE_PHASES.values())
+    try:
+        with patch.object(runner.SessionHub, '_start_turn', start), patch.object(tasks.operations, 'report', listen):
+            created.append((await tasks.create(parent, {'prompt': 'Idle Main', 'request_id': 'idle'}))['id'])
+            counts = [detail for phase, detail in said if phase == "Copying Main's working files"]
+            assert counts[0] == '{:,} files'.format(len(tasks._git(project, 'ls-files').splitlines())) and \
+                re.fullmatch(r'0 of \d+ · 0\.0 MiB', counts[1]), counts
+            idle = steps()
+            assert idle[:4] == ahead + ["Reading Main's Git history"], idle
+            assert [phase for phase in idle[3:] if phase not in cloning] == [
+                "Copying Main's working files", "Recording the copy's starting point",
+                "Starting the task's conversation"], idle
+            runner.hub(parent).status = 'running'
+            created.append((await tasks.create(parent, {'prompt': 'Busy Main', 'request_id': 'busy'}))['id'])
+            busy = steps()
+            assert busy[:5] == ahead + ["Checking Main for uncommitted changes", "Reading Main's Git history"], busy
+            assert [phase for phase in busy[4:] if phase not in cloning] == [
+                "Recording the copy's starting point", "Starting the task's conversation"], busy
+    finally:
+        runner.hub(parent).status = 'idle'
+        for sid in created:
+            runner.hub(sid).status = 'idle'
+            workspaces.remove_temporary(db.get_session(sid))
+            runner.drop_hub(sid)
+            db.delete_session(sid)
+        runner.drop_hub(parent)
+        db.delete_session(parent)
+    # a real clone that cannot be made carries git's reason alone
+    taken = ROOT / 'taken'
+    taken.mkdir()
+    (taken / 'file').write_text('in the way')
+    try:
+        tasks._copy_project(str(project), str(taken))
+    except tasks.GitError as error:
+        assert str(error).startswith('fatal: destination path') and 'Cloning' not in str(error), str(error)
+    else:
+        raise AssertionError('a clone into a used folder must fail')
+    print("PASS: a new task's preparation says each step, git's clone in its own figures, and a failed clone its reason alone")
+
+
 async def busy_main_creation():
     """A turn working in the project, or waiting in its queue, no longer
     blocks a new task while git says the work tree has no uncommitted
@@ -929,6 +1019,7 @@ async def main():
     config.ensure_dirs()
     auto_titles()
     await conflict_resolution()
+    await creation_progress()
     await busy_main_creation()
     # Match developing Puppy through itself: its private data/workspaces and
     # independent task repositories are physically inside Main's project.

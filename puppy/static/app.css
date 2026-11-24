@@ -3368,6 +3368,13 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
    below it, so the button row must not add a second one: 14px between copy
    and buttons, the same step the title uses. */
 .modal-copy+.m-btns{margin-top:2px}
+/* the progress dialog's one line: what is being done and how far it has come,
+   cut short rather than wrapped so the dialog never changes height under the
+   pointer, with the time taken so far always in sight at its end */
+.operation-line{display:flex;align-items:baseline;gap:12px;white-space:nowrap}
+.operation-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.operation-figures,.operation-time{font-variant-numeric:tabular-nums}
+.operation-time{flex:none;color:var(--txt3)}
 /* the thing a confirm is about - a task or backend name - on its own line
    above the copy; a long automatic title wraps rather than overflowing */
 .modal-subject{color:var(--txt);font-weight:600;overflow-wrap:anywhere}

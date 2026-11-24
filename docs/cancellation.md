@@ -61,7 +61,20 @@ Waiting for session, project or sync ownership is also cancellable; a waiter
 never releases another operation's lock. Browser launch failure waits for its
 closed profile to be removed before completing cancellation.
 
-`operationRequest()` is the shared console progress surface. Cancel, Escape and
+`operations.report(phase, detail)` says what the current operation is doing, from
+the event loop or any thread it owns: the step in words, then its running
+figures, each at most 120 characters and held only in memory. `GET` adds both to
+an operation that is still `running`; past its commit, or once cancelled, the
+state alone answers. A handler that reports nothing reads as before.
+`run_process(tick=...)` calls back about ten times a second while a child runs,
+which is how a task's clone turns git's own progress into that line.
+
+`operationRequest()` is the shared console progress surface. Its one line shows
+the step and figures with the time since the request at its end, counted by the
+console each second so a step that says nothing new, or a backend that names
+none, still shows that work is going on. The line is cut short rather than
+wrapped - the figures first, never the clock - so the dialog keeps its height,
+and only a change of step is announced to assistive technology. Cancel, Escape and
 backdrop dismissal use the same handler. It is deferred: the dialog is built
 only if the request is still running `CANCEL_DIALOG_DELAY` (five seconds) later,
 so an operation that answers sooner neither interrupts nor takes the focus, and
@@ -98,7 +111,7 @@ runtimes, cookie-authenticated backup/restore staging cleanup, command child
 termination, updater output retention and side-question isolation.
 `tests/operation_ui_test.js` exercises real request and modal code against a
 hand-turned clock: the deferred dialog and the quick operation that never opens
-one, keyboard and backdrop cancellation, cleanup waits, failed cancellation,
+one, the step, its figures and the running clock, keyboard and backdrop cancellation, cleanup waits, failed cancellation,
 commit races, older nodes, abort deadlines and browser loading controls.
 Existing task, auth, UI, backend, browser, snapshot, workspace, notification and
 listener suites cover the surrounding behavior without paid engine turns. The

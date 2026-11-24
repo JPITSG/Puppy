@@ -582,12 +582,13 @@ def finished(sid, status, user_seq):
     wake_auto()
 
 
-def _git_run(cwd, *args, data=None, timeout=60, env=None):
+def _git_run(cwd, *args, data=None, timeout=60, env=None, stderr=subprocess.PIPE, tick=None):
     """One Git command, its exit status left to the caller."""
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **(env or {}))
     return operations.run_process(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false",
                                    "-c", "user.name=Puppy", "-c", "user.email=puppy@localhost", *args],
-                                  cwd=cwd, env=env, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+                                  cwd=cwd, env=env, input=data, stdout=subprocess.PIPE, stderr=stderr, timeout=timeout,
+                                  tick=tick)
 
 
 def _git(cwd, *args, data=None, timeout=60, env=None):
@@ -658,6 +659,7 @@ async def _from_commit(parent, root, exclude=0):
     nothing while the copy is read."""
     if not _project_busy(root, exclude):
         return False
+    operations.report("Checking Main for uncommitted changes")
     git = await session_git.refresh(parent, fresh=True) or {}
     if git.get("repo") is not True or git.get("error") or type(git.get("changes")) is not int:
         raise TaskError(BUSY_PROJECT + "; try again when it is idle · Git could not check it "
@@ -779,6 +781,83 @@ def _checkout_size(destination):
     return total
 
 
+# What git is doing during a clone, by its own untranslated progress titles in
+# the order it reaches them, as the progress dialog says it.
+CLONE_PHASES = {
+    "Enumerating objects": "Reading Main's Git history",
+    "Counting objects": "Reading Main's Git history",
+    "Compressing objects": "Packing Main's Git history",
+    "Receiving objects": "Copying Main's Git history",
+    "Unpacking objects": "Copying Main's Git history",
+    "Resolving deltas": "Checking the copied history",
+    "Checking objects": "Checking the copied history",
+    "Updating files": "Checking out Main's last commit",
+}
+_CLONE_LINE = re.compile(
+    r"(?:remote: )?({}):\s+(?:(\d+)% \((\d+)/(\d+)\)|(\d+))(?:, ([0-9.]+ [KMGT]?i?B|[0-9]+ bytes))?".format(
+        "|".join(CLONE_PHASES)))
+
+
+def _clone_progress(text):
+    """(phase, detail) of the last progress line in git's clone output, or
+    None. A line still being written matches nothing and leaves the one
+    before it standing."""
+    for line in reversed(re.split(r"[\r\n]", text)):
+        match = _CLONE_LINE.match(line)
+        # only enumerating counts without a total: a bare number on any other
+        # step is a percentage git has not finished writing
+        if match and (match.group(2) or match.group(1) == "Enumerating objects"):
+            break
+    else:
+        return None
+    title, percent, done, total, count, size = match.groups()
+    if percent is None:
+        detail = "{:,} objects".format(int(count))
+    elif title == "Compressing objects":
+        # git counts objects, not effort: a handful of large files take most
+        # of this step with the percentage standing at 99, so say what is left
+        detail = "{:,} left of {:,} objects".format(int(total) - int(done), int(total))
+    elif title == "Updating files":
+        detail = "{:,} of {:,} files".format(int(done), int(total))
+    else:
+        detail = percent + "%" + (" · " + size if size else "")
+    return CLONE_PHASES[title], detail
+
+
+def _clone_error(text):
+    """What a failed clone had to say, without the progress it made first."""
+    lines = [line.strip() for line in re.split(r"[\r\n]", text)]
+    return "\n".join(line for line in lines if line and not _CLONE_LINE.match(line) and
+                     not line.startswith(("Cloning into ", "remote: Total ", "done.")))
+
+
+def _clone(root, destination):
+    """Git's own transport of the project, saying how far it has come: on a
+    project with a long or unpacked history this is nearly all of a task's
+    preparation, spent packing and checking objects rather than on the disk."""
+    operations.report("Reading Main's Git history")
+    with tempfile.TemporaryFile() as output:
+        def read(limit):
+            size = os.fstat(output.fileno()).st_size
+            # positional: git writes through the very same file offset
+            return os.pread(output.fileno(), limit, max(0, size - limit)).decode("utf-8", "replace")
+
+        def tick():
+            progress = _clone_progress(read(1024))
+            if progress:
+                operations.report(*progress)
+
+        result = _git_run(root, "clone", "--progress", "--no-local", "--", root, destination, timeout=120,
+                          env={"LC_ALL": "C.UTF-8", "LANGUAGE": "", "GIT_PROGRESS_DELAY": "0"},
+                          stderr=output, tick=tick)
+        if result.returncode:
+            raise GitError(_clone_error(read(65536))[:3000] or "Git operation failed", result.returncode)
+
+
+def _mebibytes(count):
+    return "{:,.1f} MiB".format(count / 1048576)
+
+
 def _copy_project(root, destination, committed=False):
     """Clone the project into ``destination`` and give it Main's files: its
     working files as they stand, or with ``committed`` its last commit -
@@ -787,7 +866,7 @@ def _copy_project(root, destination, committed=False):
     stage = _git(root, "ls-files", "--stage", "-z")
     if any(entry.startswith(b"160000 ") for entry in stage.split(b"\0")):
         raise TaskError("Submodules need to be handled in their own session")
-    _git(root, "clone", "--quiet", "--no-local", "--", root, destination, timeout=120)
+    _clone(root, destination)
     _git(destination, "remote", "remove", "origin")
     if committed:
         total = _checkout_size(destination)
@@ -804,6 +883,7 @@ def _copy_project(root, destination, committed=False):
                 paths.append(name)
         if len(paths) > COPY_FILES:
             raise TaskError("Project has too many files for a task copy")
+        operations.report("Copying Main's working files", "{:,} files".format(len(paths)))
         # Start with an empty owned tree, retaining only Git's independent objects.
         # This handles deleted files and directory/file changes without ever writing
         # through a symlink checked out by clone.
@@ -816,8 +896,13 @@ def _copy_project(root, destination, committed=False):
                 shutil.rmtree(entry)
     from puppy.workspace_sync import _RootWalker, validate_relpath
     walker = _RootWalker(root)
-    for rel in paths:
+    due = 0.0
+    for index, rel in enumerate(paths):
         operations.checkpoint()
+        if not committed and time.monotonic() >= due:
+            operations.report("Copying Main's working files", "{:,} of {:,} · {}".format(
+                index, len(paths), _mebibytes(total)))
+            due = time.monotonic() + 0.1
         validate_relpath(rel)
         if rel.split("/")[0] == ".git":
             raise TaskError("Invalid project path")
@@ -868,6 +953,7 @@ def _copy_project(root, destination, committed=False):
     # Every copied path was selected above: tracked files, nonignored new
     # files and project notes. Keep all of them even when Main force-added a
     # new ignored file that its last commit (and therefore clone) never held.
+    operations.report("Recording the copy's starting point")
     _git(destination, "add", "--force", "-A")
     _git(destination, "commit", "--quiet", "--allow-empty", "-m", "Task starting point")
     base = _git(destination, "rev-parse", "HEAD").decode().strip()
@@ -1833,6 +1919,7 @@ async def create(parent_id, args, caller=0):
     # As written in Main's dialog: its attachment marker lines name files staged
     # under Main, which the task adopts into its own storage below.
     original = prompt.strip()
+    operations.report("Waiting for this session's other task work")
     async with session_operation(parent_id):
         parent = db.get_session(parent_id)
         if parent is None or record(parent_id):
@@ -1862,6 +1949,7 @@ async def create(parent_id, args, caller=0):
             driver = get_driver(engine)
         except KeyError:
             raise TaskError("Unknown task engine: " + engine)
+        operations.report("Checking {}'s models".format(driver.label))
         await operations.wait(driver.refresh_model_options())
         try:
             choices = engine_defaults.for_session(driver, args)
@@ -1873,6 +1961,7 @@ async def create(parent_id, args, caller=0):
             uploads.verify_attachments(parent_id, original)
         except uploads.AttachmentError as exc:
             raise TaskError(str(exc))
+        operations.report("Checking Main's repository")
         root = await operations.to_thread(_repo, parent)
         committed = await _from_commit(parent, root, caller)
         if overlaps_busy(root):
@@ -1882,6 +1971,7 @@ async def create(parent_id, args, caller=0):
         try:
             path = workspaces.create_temporary()
             base = await operations.to_thread(_copy_project, root, path, committed)
+            operations.report("Starting the task's conversation")
             rows = db.get_events(parent_id, limit=40)
             context = "\n\n".join("{}: {}".format(row["kind"], row["data"].get("text", ""))
                                     for row in rows if row["kind"] in ("user", "assistant"))[-22000:]

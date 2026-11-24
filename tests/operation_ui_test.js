@@ -20,7 +20,7 @@ const timers = new Map();
 const context = vm.createContext({
   navigation: { layer: () => () => {} }, navigationRemember: () => {}, navigationChanged: () => {},
   document, HTMLElement: FakeElement, console, el, $: id => document.getElementById(id),
-  esc: text => text, state: { backends: [] }, AbortController, Blob,
+  esc: text => text, state: { backends: [] }, AbortController, Blob, Date: { now: () => now },
   setTimeout: (fn, ms) => {
     const id = ++nextTimer;
     timers.set(id, { fn, at: now + Math.max(0, Number(ms) || 0) });
@@ -34,6 +34,7 @@ const context = vm.createContext({
   fetch: async (url, opts) => { calls.push({ url, opts }); return fetcher(url, opts); },
 });
 vm.runInContext(between("function xIcon(", "function bellIcon(") + "\n" +
+  between("function formatSessionActivity(", "function formatUptime(") + "\n" +
   between("async function api(", "function wsUrl(") + "\n" +
   between("const modalStack =", "/* ---- modal copy ----"), context);
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -130,6 +131,69 @@ const controlReads = () => calls.filter(call => !call.opts.method && call.url.in
   assert.equal((await committed).applied, true);
   assert.equal(root.children.length, 0);
 
+  // The dialog says what the backend is doing: the step, its figures, and the
+  // time since the request, which moves by itself every second.
+  reply = deferred(); calls = [];
+  let said = { state: "running" };
+  fetcher = (url, opts) => opts.method === "POST" ? reply.promise : response(200, said);
+  const talking = context.api(0, "work", { method: "POST", operation: "Preparing task" });
+  await waitOut();
+  const line = root.querySelector(".operation-line");
+  const part = name => line.querySelector(".operation-" + name);
+  const reads = () => [part("step").textContent, part("figures").textContent, part("time").textContent];
+  assert.deepEqual(reads(), ["Working…", "", "0:05"], "a backend that names no step still shows time passing");
+  assert.ok(line.classList.contains("modal-copy"), "in the dialog's own body voice");
+  assert.equal(part("step").getAttribute("role"), "status", "the step is announced");
+  assert.ok(["figures", "time"].every(name => part(name).getAttribute("aria-hidden") === "true"),
+    "its figures and the clock are not read out every second");
+  await advance(1000);
+  assert.equal(part("time").textContent, "0:06");
+  said = { state: "running", phase: "Packing Main's Git history", detail: "3,374 left of 6,134 objects" };
+  await advance(1000);
+  assert.deepEqual(reads(), ["Packing Main's Git history", " · 3,374 left of 6,134 objects", "0:07"]);
+  let announced = 0;
+  const stepNode = part("step"), text = Object.getOwnPropertyDescriptor(FakeElement.prototype, "textContent");
+  Object.defineProperty(stepNode, "textContent", { get: text.get, set(value) { announced++; text.set.call(this, value); } });
+  said = { ...said, detail: "2,392 left of 6,134 objects" };
+  await advance(1000);
+  assert.deepEqual(reads(), ["Packing Main's Git history", " · 2,392 left of 6,134 objects", "0:08"]);
+  assert.equal(announced, 0, "figures moving on say nothing again");
+  said = { state: "running", phase: "Recording the copy's starting point" };
+  await advance(1000);
+  assert.deepEqual(reads(), ["Recording the copy's starting point", "", "0:09"], "a step with no figures clears the last ones");
+  assert.equal(announced, 1);
+  // a read that fails keeps the line, and the clock goes on
+  fetcher = (url, opts) => opts.method === "POST" ? reply.promise : response(503, { error: "busy" });
+  await advance(2000);
+  assert.deepEqual(reads(), ["Recording the copy's starting point", "", "0:11"]);
+  fetcher = (url, opts) => opts.method === "POST" ? reply.promise : response(200, said);
+  said = { state: "finishing" };
+  await advance(1000);
+  assert.deepEqual(reads(), ["Finishing · can no longer be cancelled", "", "0:12"]);
+  await advance(60000);
+  assert.equal(part("time").textContent, "1:12", "still counting while it finishes");
+  reply.resolve(response(200, { ok: true }));
+  await talking;
+  assert.equal(root.children.length, 0);
+  const armed = timers.size;
+  await advance(5000);
+  assert.equal(timers.size, armed, "the clock stops with the dialog");
+
+  // once Cancel is accepted, a step reported late never takes its place
+  reply = deferred();
+  fetcher = (url, opts) => opts.method === "POST" ? reply.promise :
+    response(200, opts.method === "DELETE" ? { state: "cancelling" } :
+      { state: "running", phase: "Copying Main's Git history", detail: "30% · 41.20 MiB" });
+  const withdrawn = context.api(0, "work", { method: "POST", operation: "Preparing task" }).catch(error => error);
+  await waitOut();
+  assert.equal(root.querySelector(".operation-step").textContent, "Copying Main's Git history");
+  await root.querySelector(".operation-cancel").onclick();
+  await advance(3000);
+  assert.equal(root.querySelector(".operation-step").textContent, "Cancelling · waiting for cleanup…");
+  assert.equal(root.querySelector(".operation-figures").textContent, "");
+  reply.resolve(response(409, { error: "Operation cancelled", cancelled: true }));
+  assert.equal((await withdrawn).cancelled, true);
+
   // A failed cancellation stays visible and retryable; it never hides a job.
   reply = deferred(); let failCancel = true;
   fetcher = (url, opts) => opts.method === "DELETE" ? response(failCancel ? 503 : 200,
@@ -192,5 +256,5 @@ const controlReads = () => calls.filter(call => !call.opts.method && call.url.in
   assert.equal(view.canStopLoading(), false, "older nodes never receive unknown loading commands");
   view.setLoading(false);
 
-  console.log("PASS: deferred dialogs, Cancel/header close/Escape/backdrop, cleanup waits, commit race, retry, errors, capability gating and read aborts");
+  console.log("PASS: deferred dialogs, the step, its figures and a running clock, Cancel/header close/Escape/backdrop, cleanup waits, commit race, retry, errors, capability gating and read aborts");
 })().catch(error => { console.error(error); process.exitCode = 1; });

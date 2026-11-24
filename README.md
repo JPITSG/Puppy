@@ -718,7 +718,12 @@ permission defaults. Adjust these choices before starting.
 An unnamed task is named from its prompt's first line, or by a model when
 **Generate a title from the task** is on (offered while Session titles are
 configured; a typed name is kept). Attachments are locked while the task is
-preparing. On backends advertising
+preparing. On a project with a long or unpacked Git history, preparing can take
+a while - nearly all of it Git packing and copying that history - so the
+progress dialog says on one line which step it is on and how far it has come
+(for example **Packing Main's Git history · 7 left of 7,767 objects**, then
+copying the history, checking it and copying Main's working files), with the
+time taken so far counting beside it. On backends advertising
 `operation-cancel-v1`, **Cancel**, Escape and clicking outside the progress dialog
 stop preparation and clean up the task copy and staged attachments before any
 agent starts. An older backend may finish after the dialog closes; a late reply
@@ -1278,7 +1283,9 @@ with a window of history around it.
 Long operations use a shared progress dialog with **Cancel** during preparation,
 including task review/apply, scratch and project moves, backend add/edit/test, engine refresh,
 listener verification and workspace sync. It appears only once the work has run
-for five seconds, so anything that answers sooner never interrupts. Saves, file
+for five seconds, so anything that answers sooner never interrupts, and shows how
+long the work has taken, counting each second, beside the step it is on where the
+backend names one. Saves, file
 applies, remote-session creation and backend upgrade handoffs finish safely once
 their commit begins.
 **Stop update** can stop a running engine CLI updater and keeps its output and
@@ -1515,8 +1522,8 @@ node tests/task_config_ui_test.js    # the New task dialog
 python3 tests/task_agent_test.py     # apply when done, Git's merges into tasks, the task tools, both runtimes
 node tests/task_auto_apply_ui_test.js # apply when done in the console and Settings' Task guidance
 node tests/system_prompt_ui_test.js  # Settings' system prompt resets, offered only off the default
-node tests/operation_ui_test.js      # cancellation, commit races and cleanup feedback
-python3 tests/operations_test.py     # cancellation/rollback on both runtimes
+node tests/operation_ui_test.js      # the progress line and clock, cancellation, commit races and cleanup feedback
+python3 tests/operations_test.py     # progress, cancellation/rollback on both runtimes
 node tests/task_fold_ui_test.js      # task removal and the folded archive card
 node tests/status_bar_ui_test.js     # the status bar: one session setting, followed by every task tab
 node tests/tool_result_ui_test.js    # tool results folded into their call's card

@@ -33,6 +33,20 @@ through the shared progress dialog on backends advertising `operation-cancel-v1`
 Cancellation waits for copy/Git cleanup and never starts a task prompt. Once
 applying or refreshing files or dispatching conflict resolution begins, that
 step must finish; a running task has its own Stop control.
+
+That dialog says what the preparation is doing, on one line with the time taken
+so far: the session's other task work it waits for, the engine's model check,
+Main's repository and (beside a working turn) its uncommitted changes, then the
+copy - **Reading**, **Packing** and **Copying Main's Git history**, **Checking
+the copied history**, **Checking out Main's last commit**, **Copying Main's
+working files**, **Recording the copy's starting point** - with git's own figures
+for the clone (its `--progress`, read in an untranslated locale) and file counts
+for the copy. The clone is nearly all of the wait on a large project: git packs
+the history anew for each copy, so a repository holding thousands of loose
+objects, or large binary files, spends its time there rather than on the disk.
+Packing counts what is left instead of a percentage, because a handful of large
+files take most of that step while git's own figure stands at 99%. A refresh and
+a conflict snapshot copy Main the same way and say the same steps.
 The task opens in its own inner tab; create another to work on a second
 feature concurrently. Every device adds tasks beside Main when it receives the
 session list, including tasks created while that device was away and tasks that

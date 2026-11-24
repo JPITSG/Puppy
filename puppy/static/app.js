@@ -3129,25 +3129,42 @@ async function browserReadRequest(title, run) {
    authenticated request: aborting fetch alone does not stop a server or a
    worker thread. A commit changes the action to Close, never claims rollback.
    The dialog is deferred like every other cancel surface, so its state is read
-   from the moment it opens rather than from the moment the request started. */
+   from the moment it opens rather than from the moment the request started.
+   Its one line says what the backend last said it is doing - the step, then
+   the step's running figures, the first thing an ellipsis takes in a narrow
+   window - with the time since the request at its end: whatever the step, and
+   with a backend that names none, something on it moves every second. Only
+   the step is announced; figures and clock are not read out each second. */
 async function operationRequest(bid, path, opts, title, cancelClose) {
   const identity = newDraftClientId();
   const controlPath = `operations/${encodeURIComponent(identity)}`;
-  let done = false, finishing = false, cancelling = false, cancelAccepted = false, poll = null;
-  let m = null, button = null, note = null, errorLine = null, close = null;
+  const startedAt = Date.now();
+  let done = false, finishing = false, cancelling = false, cancelAccepted = false, poll = null, clock = null;
+  let m = null, button = null, step = null, figures = null, time = null, errorLine = null, close = null;
   const live = () => !done && m !== null && m.isConnected;
+  const say = (text, detail = "") => {
+    if (step.textContent !== text) step.textContent = text;
+    figures.textContent = detail ? ` · ${detail}` : "";
+  };
   const paint = value => {
     if (!live()) return;
     if (value.state === "finishing" || value.state === "finished") {
       finishing = true;
       button.disabled = false;
       button.textContent = "Close";
-      note.textContent = "Finishing · this step can no longer be cancelled";
+      say("Finishing · can no longer be cancelled");
     } else if (value.state === "cancelling") {
       cancelAccepted = true;
       button.disabled = true;
-      note.textContent = "Cancelling · waiting for cleanup…";
+      say("Cancelling · waiting for cleanup…");
+    } else if (value.state === "running" && value.phase && !cancelAccepted && !finishing) {
+      say(String(value.phase), String(value.detail || ""));
     }
+  };
+  const runClock = () => {
+    if (!live()) return;
+    time.textContent = formatSessionActivity(startedAt);
+    clock = setTimeout(runClock, 1000);
   };
   const cancel = async () => {
     if (done || cancelling || cancelAccepted) return;
@@ -3171,18 +3188,21 @@ async function operationRequest(bid, path, opts, title, cancelClose) {
   };
   const dialog = deferredDialog(() => {
     const record = modal(`<h2>${esc(title)}</h2>
-      <p class="modal-copy" role="status">Working…</p>
+      <p class="modal-copy operation-line"><span class="operation-text"><span class="operation-step" role="status">Working…</span><span class="operation-figures" aria-hidden="true"></span></span><span class="operation-time" aria-hidden="true"></span></p>
       <p class="hint">Cancel stops preparation and cleans up temporary work. Once changes are being saved, that step finishes safely.</p>
       <p class="form-error hidden" role="alert"></p>
       <div class="m-btns"><button type="button" class="btn operation-cancel">Cancel</button></div>`);
     m = record.m; close = record.close;
     button = m.querySelector(".operation-cancel");
-    note = m.querySelector(".modal-copy");
+    step = m.querySelector(".operation-step");
+    figures = m.querySelector(".operation-figures");
+    time = m.querySelector(".operation-time");
     errorLine = m.querySelector(".form-error");
     button.onclick = cancel;
     record.onDismiss(cancel);
     button.focus();
     /* it opens into an operation already under way, so read the state now */
+    runClock();
     check();
     return record;
   });
@@ -3203,6 +3223,7 @@ async function operationRequest(bid, path, opts, title, cancelClose) {
   } finally {
     done = true;
     if (poll !== null) clearTimeout(poll);
+    if (clock !== null) clearTimeout(clock);
     dialog.close();
   }
 }
