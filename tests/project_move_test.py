@@ -27,7 +27,7 @@ from tests.scratch import private_root
 ROOT = private_root('project-move-')
 os.environ['PUPPY_DATA'] = str(ROOT / 'data')
 from aiohttp.test_utils import TestClient, TestServer
-from puppy import (config, db, operations, project_move, runner, session_tasks, snapshots,
+from puppy import (config, db, operations, places, project_move, runner, session_tasks, snapshots,
                    workspace_sync, workspaces)
 from puppy.web import build_app
 sys.path.insert(0, str(BASE / 'backend'))
@@ -578,6 +578,7 @@ async def main():
     await ownership()
     await worktrees()
     await runtimes()
+    await places.close()
 
 
 if __name__ == '__main__':

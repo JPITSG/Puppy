@@ -257,7 +257,9 @@ How an apply goes:
    the switch off and says so in Main (**Task not applied automatically**), as
    it does for a missing copy, a refused patch or a failed merge.
 
-Several tasks set to apply when done settle one at a time per repository. Each
+Several tasks set to apply when done settle one at a time per repository, and
+every Main by itself: one whose apply is held up - by a drive that stopped
+answering, say - holds up no other. Each
 pass of the worker takes Main's finished tasks in the order they finished,
 applies every one that fits or merges cleanly first, and only then starts
 conflict rounds, each against Main as the others left it - so tasks touching

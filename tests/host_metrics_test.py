@@ -23,7 +23,7 @@ os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from puppy import auth, backends, config, db, host_metrics, protocol
+from puppy import auth, backends, config, db, host_metrics, place_scout, places, protocol
 from puppy import web as webui
 from backend.puppy_backend.app import build_app as backend_app
 
@@ -242,97 +242,101 @@ class _RouterlessApp:
         pass
 
 
-def disk_space():
-    """The filesystems a node's work lives on: the mount table read with its
-    escapes, every path put on the longest mount it lies under, projects
-    counted per mount with Puppy's own marked, a missing project left out,
-    and a mount whose stat blocks reported as not answering within the
-    deadline - never asked again while that thread is still out, and asked
-    again once it has come back."""
-    import threading
+async def disk_space():
+    """The filesystems a node's work lives on: every path put on the longest
+    mount it lies under, with its filesystem, projects counted per mount with
+    Puppy's own marked, a missing project left out, and a mount that does not
+    answer named within the deadline - and at once when that is known already -
+    while every other one is read."""
     root = TEST_ROOT / "disks"
     alpha, beta, gamma = root / "alpha", root / "beta two", root / "gamma"
     for folder in (alpha / "one", alpha / "two", beta / "three", gamma / "four"):
         folder.mkdir(parents=True, exist_ok=True)
-    escaped = lambda path: str(path).replace(" ", "\\040")
-    table = root / "mountinfo"
-    table.write_text("\n".join([
-        "1 0 8:1 / / rw - ext4 /dev/sda1 rw",
-        "2 1 0:5 / /proc rw - proc proc rw",
-        "3 1 8:2 / {} rw - xfs /dev/sdb1 rw".format(escaped(alpha)),
-        "4 1 8:3 / {} rw - btrfs /dev/sdc1 rw".format(escaped(beta)),
-        # the first mount at gamma is mounted over: the later one is the one in use
-        "5 1 8:4 / {} rw - ext3 /dev/sdd1 rw".format(escaped(gamma)),
-        "6 5 0:9 / {} rw shared:1 - nfs4 server:/export rw".format(escaped(gamma)),
-        "not a mount line",
-    ]) + "\n")
-    mounts = host_metrics._mounts(str(table))
-    assert (str(beta), "btrfs") in mounts, mounts
-    assert host_metrics._mount_of(str(alpha / "one"), mounts) == (str(alpha), "xfs")
-    assert host_metrics._mount_of(str(alpha) + "-sibling/x", mounts) == ("/", "ext4")
-    assert host_metrics._mount_of(str(gamma / "four"), mounts) == (str(gamma), "nfs4")
-    assert host_metrics._mount_of("/etc", mounts) == ("/", "ext4")
-    projects = [str(alpha / "one"), str(alpha / "two"), str(alpha / "one"),
-                str(beta / "three"), str(root / "gone"), 5, ""]
-    host_metrics.reset_for_tests()
-    payload = host_metrics.disks(projects, mountinfo=str(table))
-    rows = {row["mount"]: row for row in payload["mounts"]}
-    assert payload["stalled"] == [], payload
-    assert set(rows) == {"/", str(alpha), str(beta)}, rows
-    assert payload["mounts"][0]["mount"] == "/" and rows["/"]["puppy"] is True, \
-        "Puppy's own mount comes first"
-    assert rows[str(alpha)]["projects"] == 2 and rows[str(alpha)]["fs"] == "xfs"
-    assert rows[str(alpha)]["paths"] == [str(alpha / "one"), str(alpha / "two")]
-    assert rows[str(beta)]["projects"] == 1 and rows[str(beta)]["puppy"] is False
-    assert rows["/"]["projects"] == 0, "a project whose directory is gone lies nowhere"
-    for row in rows.values():
-        assert row["total"] > 0 and 0 <= row["available"] <= row["total"], row
-        assert 0 <= row["used"] <= row["total"], row
-    assert host_metrics.disks(projects, mountinfo=str(table)) is payload, "viewers share a reading"
+    (alpha / "link").symlink_to(gamma / "four")
+    real_table = place_scout.read_table
 
-    # a mount that hangs: reported, not waited for, not asked twice
-    original_statvfs, original_cache = os.statvfs, host_metrics.DISK_CACHE_SECONDS
-    release = threading.Event()
-    asked = []
+    def table(own=(), source="/proc/self/mountinfo"):
+        mounts = {os.sep: place_scout.Mount(1, os.sep, "ext4", own=True)}
+        for number, (point, kind) in enumerate(((alpha, "xfs"), (beta, "btrfs"), (gamma, "nfs4")), 901):
+            mounts[str(point)] = place_scout.Mount(number, str(point), kind)
+        return mounts
+    place_scout.read_table = table
+    places._table_at = None
+    real_visit, real_cache = places.visit, host_metrics.DISK_CACHE_SECONDS
+    visited, release, known = [], asyncio.Event(), []
 
-    def statvfs(path):
-        asked.append(str(path))
-        if str(path) == str(gamma):
-            release.wait(30)
-        return original_statvfs(path)
-
-    host_metrics.DISK_CACHE_SECONDS = 0
-    os.statvfs = statvfs
+    async def visit(path, within=None):
+        visited.append(str(path))
+        place = await real_visit(path, within)
+        if places.mount_of(place.real).point == str(gamma):
+            if known:
+                raise places.NotAnswering(path, point=str(gamma))
+            await release.wait()
+        return place
     try:
-        hung = projects + [str(gamma / "four")]
-        started = time.monotonic()
-        payload = host_metrics.disks(hung, mountinfo=str(table), timeout=0.3)
-        assert time.monotonic() - started < 2, "a hanging mount never holds the read"
-        assert payload["stalled"] == [str(gamma)], payload
-        assert str(gamma) not in {row["mount"] for row in payload["mounts"]}
-        assert {row["mount"] for row in payload["mounts"]} == {"/", str(alpha), str(beta)}
-        payload = host_metrics.disks(hung, mountinfo=str(table), timeout=0.3)
-        assert payload["stalled"] == [str(gamma)]
-        assert asked.count(str(gamma)) == 1, "a mount still being asked is not asked again"
-        release.set()
-        deadline = time.monotonic() + 5
-        while host_metrics._disk_probes.get(str(gamma), {}).get("thread") and \
-                host_metrics._disk_probes[str(gamma)]["thread"].is_alive():
-            assert time.monotonic() < deadline
-            time.sleep(0.02)
-        payload = host_metrics.disks(hung, mountinfo=str(table), timeout=2)
+        projects = [str(alpha / "one"), str(alpha / "two"), str(alpha / "one"),
+                    str(beta / "three"), str(root / "gone"), 5, ""]
+        host_metrics.reset_for_tests()
+        payload = await host_metrics.disks(projects)
+        rows = {row["mount"]: row for row in payload["mounts"]}
         assert payload["stalled"] == [], payload
-        assert {row["mount"] for row in payload["mounts"]} >= {str(gamma)}
-        assert asked.count(str(gamma)) == 2, "asked again once it came back"
+        assert set(rows) == {"/", str(alpha), str(beta)}, rows
+        assert payload["mounts"][0]["mount"] == "/" and rows["/"]["puppy"] is True, \
+            "Puppy's own mount comes first"
+        assert rows["/"]["fs"] == "ext4"
+        assert rows[str(alpha)]["projects"] == 2 and rows[str(alpha)]["fs"] == "xfs"
+        assert rows[str(alpha)]["paths"] == [str(alpha / "one"), str(alpha / "two")]
+        assert rows[str(beta)]["projects"] == 1 and rows[str(beta)]["puppy"] is False
+        assert rows["/"]["projects"] == 0, "a project whose directory is gone lies nowhere"
+        for row in rows.values():
+            assert row["total"] > 0 and 0 <= row["available"] <= row["total"], row
+            assert 0 <= row["used"] <= row["total"], row
+        assert await host_metrics.disks(projects) is payload, "viewers share a reading"
+        together = await asyncio.gather(*(host_metrics.disks(projects + [str(alpha)]) for _ in range(3)))
+        assert together[0] is together[1] is together[2] is not payload, "and one under way"
+
+        # a mount that hangs: reported, not waited for, the rest read
+        host_metrics.DISK_CACHE_SECONDS = 0
+        places.visit = visit
+        hung = projects + [str(gamma / "four"), str(alpha / "link")]
+        for found_out in (False, True):
+            known[:] = [1] if found_out else []
+            started = time.monotonic()
+            payload = await host_metrics.disks(hung, timeout=0.3)
+            took = time.monotonic() - started
+            assert took < (0.25 if found_out else 1.5), (found_out, took)
+            assert payload["stalled"] == [str(gamma)], (found_out, payload)
+            rows = {row["mount"]: row for row in payload["mounts"]}
+            assert set(rows) == {"/", str(alpha), str(beta)}, rows
+            assert rows[str(alpha)]["projects"] == 2, "what a link leads to lies where it leads"
+        known[:] = []
+        release.set()
+        payload = await host_metrics.disks(hung, timeout=2)
+        rows = {row["mount"]: row for row in payload["mounts"]}
+        assert payload["stalled"] == [] and rows[str(gamma)]["projects"] == 1, payload
+        assert rows[str(gamma)]["paths"] == [str(gamma / "four")]
+        # a mount whose space cannot be read says why
+        places.visit = real_visit
+        real_space = place_scout.space
+        place_scout.space = lambda path: "Input/output error"
+        try:
+            payload = await host_metrics.disks([str(alpha / "one")])
+        finally:
+            place_scout.space = real_space
+        assert payload["mounts"][0]["error"] == "Input/output error" and "total" not in payload["mounts"][0]
+        # an unreadable mount table still answers, with Puppy's own mount
+        place_scout.read_table = lambda own=(), source=None: {}
+        places._table_at = None
+        host_metrics.reset_for_tests()
+        payload = await host_metrics.disks([])
+        assert [row["mount"] for row in payload["mounts"]] == ["/"] and payload["mounts"][0]["puppy"]
     finally:
-        os.statvfs = original_statvfs
-        host_metrics.DISK_CACHE_SECONDS = original_cache
+        place_scout.read_table, places.visit = real_table, real_visit
+        places._table_at = None
+        host_metrics.DISK_CACHE_SECONDS = real_cache
         release.set()
         host_metrics.reset_for_tests()
-    # an unreadable mount table still answers, with Puppy's own mount
-    payload = host_metrics.disks([], mountinfo=str(root / "missing"))
-    assert [row["mount"] for row in payload["mounts"]] == ["/"] and payload["mounts"][0]["puppy"]
-    host_metrics.reset_for_tests()
+        await places.close()
 
 
 async def routes(factory, proc_root):
@@ -530,7 +534,7 @@ async def main():
         await concurrent_scans(proc_root)
         trimming()
         history_window()
-        disk_space()
+        await disk_space()
         # one session, so the routes' disks have a project to count
         db.create_session("disk space", "claude", str(TEST_ROOT), "", "", "#7aa2f7", "auto")
         host_metrics.reset_for_tests()

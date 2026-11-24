@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import threading
 import time
 from collections import deque
@@ -20,7 +19,7 @@ from typing import Optional, Tuple
 
 from aiohttp import web
 
-from puppy import browser, config, db, runner, workers
+from puppy import browser, config, db, place_scout, places, runner, session_directories, workers
 from puppy.drivers import engine_keys
 
 
@@ -43,17 +42,13 @@ CMD_CHARS = 160
 _STATE_KEY = "puppy_host_metrics"
 # Disk space is asked of every filesystem this node's work lives on: Puppy's
 # own program and data, and each session's project. A filesystem can stop
-# answering (a network mount whose server went away) and a stat of it then
-# blocks for as long as the kernel likes, so each mount is asked in a daemon
-# thread of its own under one short deadline. One that misses it is reported
-# as not answering, its thread left to finish by itself, and it is not asked
-# again while that thread is still out - the panel never waits on it.
+# answering (a network mount whose server went away), so each path is gone to
+# the way every project is (``places``) and under one short deadline: one that
+# misses it is reported as not answering, and the panel never waits on it.
 DISK_TIMEOUT_SECONDS = 1.0
 DISK_CACHE_SECONDS = 10.0
 DISK_MAX_PATHS = 400
-DISK_MAX_STUCK = 16
 DISK_SAMPLE_PATHS = 6
-MOUNTINFO_LIMIT = 4 * 1024 * 1024
 
 CpuTimes = Tuple[int, int]  # (all accounted CPU time, idle CPU time)
 
@@ -67,9 +62,7 @@ _INTERPRETERS = ("python", "python2", "python3", "node", "nodejs", "bun",
 _process_samples = {}
 _process_cache = {"at": 0.0, "payload": None, "key": None}
 _process_lock = threading.Lock()
-_disk_lock = threading.Lock()
-_disk_cache = {"at": 0.0, "payload": None, "key": None}
-_disk_probes = {}   # the mount a probe set out for -> that probe, while it is out
+_disk_cache = {"at": 0.0, "reading": None, "key": None}
 
 
 def _parse_cpu_stat(contents: str) -> Optional[CpuTimes]:
@@ -481,143 +474,106 @@ def _count(node: Optional[dict]) -> int:
     return int(node.get("count", 1)) + sum(_count(child) for child in node.get("children", ()))
 
 
-def _unescape_mount(text: str) -> str:
-    # mountinfo writes a space, tab, newline or backslash as \ooo
-    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), text)
-
-
-def _mounts(path: str = "/proc/self/mountinfo") -> list:
-    """(mount point, filesystem type) per mount, in mount order. Reading the
-    table asks the kernel, never the filesystems themselves."""
+async def _look(path: str):
+    """Where a path lies: its place and the mount there, the mount that does
+    not answer, or nothing when neither can be said."""
     try:
-        with open(path, "rb") as stream:
-            text = stream.read(MOUNTINFO_LIMIT).decode("utf-8", "replace")
-    except OSError:
-        return []
-    rows = []
-    for line in text.splitlines():
-        left, separator, right = line.partition(" - ")
-        fields = left.split()
-        kinds = right.split()
-        if not separator or len(fields) < 5 or not kinds:
+        place = await places.visit(path)
+    except places.NotAnswering as exc:
+        return None, exc.point
+    except Exception:
+        return None, None
+    mount = places.mount_of(place.real)
+    return place, (mount.point, mount.kind) if mount is not None else (os.sep, "")
+
+
+def _point_of(path: str) -> Optional[str]:
+    """The mount a look at a path is probably still on its way to: where the
+    path was last seen to lead."""
+    mount = places.mount_of(session_directories.real(path))
+    return mount.point if mount is not None and not mount.own else None
+
+
+def _fill(entry: dict, space) -> None:
+    """The space of one mount, as places and place_scout say it."""
+    if not isinstance(space, (list, tuple)):
+        entry["error"] = space or "could not read its space"
+        return
+    unit, blocks, unused, available = space
+    entry["total"] = blocks * unit
+    entry["used"] = max(0, blocks - unused) * unit
+    entry["available"] = available * unit
+
+
+async def _read_disks(paths: list, deadline: float, moment: float) -> dict:
+    found, stalled, spaces = {}, set(), {}
+    looks = {asyncio.ensure_future(_look(path)): (kind, path) for kind, path in paths}
+    await asyncio.wait(looks, timeout=max(0.05, deadline - time.monotonic()))
+    late = []
+    for look, (kind, path) in looks.items():
+        if not look.done():     # it is told in its own time
+            late.append(_point_of(path))
             continue
-        rows.append((_unescape_mount(fields[4]), kinds[0]))
-    return rows
-
-
-def _mount_of(path: str, mounts: list) -> Tuple[str, str]:
-    """The mount a path lies on: the longest mount point it starts with, the
-    later of two at one point (the one mounted over the other)."""
-    best = ("/", "")
-    for point, kind in mounts:
-        inside = path == point or point == "/" or \
-            path.startswith(point.rstrip("/") + "/")
-        if inside and len(point) >= len(best[0]):
-            best = (point, kind)
-    return best
-
-
-def _probe_disks(paths: list, mounts: list) -> dict:
-    """In a probe's own thread: where each path really lies (a symlink can
-    lead onto another mount), and the space of every mount they land on."""
-    found = {}
-    for kind, path in paths:
-        try:
-            real = os.path.realpath(path)
-        except (OSError, ValueError):
+        place, mount = look.result()
+        if place is None:
+            stalled.add(mount)
             continue
-        if kind != "puppy" and not os.path.isdir(real):
+        if kind != "puppy" and not place.directory:
             continue        # a project whose directory is gone lies nowhere
-        point, fs = _mount_of(real, mounts)
+        point, fs = mount
         entry = found.setdefault(point, {"mount": point, "fs": fs, "puppy": False,
                                          "projects": set()})
+        spaces[point] = spaces.get(point) or place.space
         if kind == "puppy":
             entry["puppy"] = True
         else:
-            entry["projects"].add(real)
+            entry["projects"].add(place.real)
+    # One that answered somebody else meanwhile is not what is being waited for.
+    stalled.update(point for point in late if point not in found)
+    stalled.discard(None)
+    # Puppy's own mounts are not asked on the way.
+    own = {asyncio.ensure_future(places.ask(point, place_scout.space, point)): point
+           for point in found if point not in stalled and not spaces.get(point)}
+    if own:
+        await asyncio.wait(own, timeout=max(0.05, deadline - time.monotonic()))
+    for ask, point in own.items():
+        if not ask.done() or isinstance(ask.exception(), places.NotAnswering):
+            stalled.add(point)
+            ask.add_done_callback(lambda done: done.cancelled() or done.exception())
+        elif ask.exception() is None:
+            spaces[point] = ask.result()
+    rows = []
     for point, entry in found.items():
-        try:
-            info = os.statvfs(point)
-        except OSError as exc:
-            entry["error"] = exc.strerror or "could not read its space"
+        if point in stalled:
             continue
-        size = info.f_frsize or info.f_bsize
-        entry["total"] = info.f_blocks * size
-        entry["used"] = max(0, info.f_blocks - info.f_bfree) * size
-        entry["available"] = info.f_bavail * size
-    return found
+        _fill(entry, spaces.get(point))
+        projects_here = sorted(entry.pop("projects"))
+        entry["projects"] = len(projects_here)
+        entry["paths"] = projects_here[:DISK_SAMPLE_PATHS]
+        rows.append(entry)
+    rows.sort(key=lambda row: (not row["puppy"], row["mount"]))
+    return {"mounts": rows, "stalled": sorted(stalled), "sampled_at": moment}
 
 
-def disks(projects=(), mountinfo: str = "/proc/self/mountinfo",
-          timeout: float = DISK_TIMEOUT_SECONDS, now: Optional[float] = None) -> dict:
+async def disks(projects=(), timeout: float = DISK_TIMEOUT_SECONDS,
+                now: Optional[float] = None) -> dict:
     """The free space of every filesystem holding Puppy (its program and its
     data) or one of the given project directories, best effort and bounded:
-    a mount that does not answer within ``timeout`` is named in ``stalled``
-    instead, and a mount still being asked from an earlier read is not asked
-    again. Cached briefly, so viewers share one reading."""
-    puppy_paths = [("puppy", config.BASE_DIR), ("puppy", config.DATA_DIR)]
+    one that has not answered within ``timeout``, or is known not to, is named
+    in ``stalled`` instead. Cached briefly, so viewers share one reading."""
     project_paths = sorted({os.path.abspath(str(path)) for path in projects
                             if isinstance(path, str) and path})[:DISK_MAX_PATHS]
-    key = (mountinfo, tuple(project_paths))
-    with _disk_lock:
-        moment = time.time() if now is None else now
-        monotonic = time.monotonic()
-        cached = _disk_cache["payload"]
-        if cached is not None and _disk_cache["key"] == key and \
-                0 <= monotonic - _disk_cache["at"] < DISK_CACHE_SECONDS:
-            return cached
-        mounts = _mounts(mountinfo)
-        # Grouped by the mount each path names on its face, which takes no
-        # filesystem access: a mount that hangs holds up one thread only.
-        groups = {}
-        for kind, path in puppy_paths + [("project", path) for path in project_paths]:
-            groups.setdefault(_mount_of(os.path.abspath(path), mounts)[0], []).append((kind, path))
-        stalled = []
-        started = []
-        for point, paths in groups.items():
-            probe = _disk_probes.get(point)
-            if probe is not None and probe["thread"].is_alive():
-                stalled.append(point)
-                continue
-            if sum(1 for item in _disk_probes.values() if item["thread"].is_alive()) >= DISK_MAX_STUCK:
-                stalled.append(point)
-                continue
-            probe = {"result": None}
-
-            def run(probe=probe, paths=paths):
-                try:
-                    probe["result"] = _probe_disks(paths, mounts)
-                except Exception:
-                    probe["result"] = {}
-
-            probe["thread"] = threading.Thread(target=run, name="puppy-disk-space", daemon=True)
-            _disk_probes[point] = probe
-            probe["thread"].start()
-            started.append((point, probe))
-        deadline = time.monotonic() + max(0.0, timeout)
-        found = {}
-        for point, probe in started:
-            probe["thread"].join(max(0.0, deadline - time.monotonic()))
-            if probe["thread"].is_alive():
-                stalled.append(point)
-                continue
-            _disk_probes.pop(point, None)
-            for mount, entry in (probe["result"] or {}).items():
-                merged = found.setdefault(mount, dict(entry, projects=set()))
-                merged["puppy"] = merged["puppy"] or entry["puppy"]
-                merged["projects"] |= entry["projects"]
-        rows = []
-        for mount, entry in found.items():
-            if mount in stalled:
-                continue
-            projects_here = sorted(entry.pop("projects"))
-            entry["projects"] = len(projects_here)
-            entry["paths"] = projects_here[:DISK_SAMPLE_PATHS]
-            rows.append(entry)
-        rows.sort(key=lambda row: (not row["puppy"], row["mount"]))
-        payload = {"mounts": rows, "stalled": sorted(set(stalled)), "sampled_at": moment}
-        _disk_cache.update({"at": monotonic, "payload": payload, "key": key})
-        return payload
+    key = tuple(project_paths)
+    reading = _disk_cache["reading"]
+    if reading is None or _disk_cache["key"] != key or reading.get_loop().is_closed() or \
+            (reading.done() and (reading.cancelled() or reading.exception() is not None or
+                                 not 0 <= time.monotonic() - _disk_cache["at"] < DISK_CACHE_SECONDS)):
+        paths = [("puppy", config.BASE_DIR), ("puppy", config.DATA_DIR)] + \
+            [("project", path) for path in project_paths]
+        reading = asyncio.ensure_future(_read_disks(
+            paths, time.monotonic() + max(0.0, timeout), time.time() if now is None else now))
+        _disk_cache.update({"at": time.monotonic(), "reading": reading, "key": key})
+    return await asyncio.shield(reading)
 
 
 def project_directories() -> list:
@@ -630,8 +586,9 @@ def project_directories() -> list:
 
 
 def snapshot(app, window_seconds: float = DEFAULT_WINDOW_SECONDS,
-             proc: str = "/proc", projects=()) -> dict:
-    """Everything the console's CPU panel shows for one node."""
+             proc: str = "/proc", disk_space=None) -> dict:
+    """Everything the console's CPU panel shows for one node, its disks read
+    beforehand."""
     sample = latest(app) or {}
     now = time.time()
     return {
@@ -648,7 +605,7 @@ def snapshot(app, window_seconds: float = DEFAULT_WINDOW_SECONDS,
         "memory": _memory(proc),
         "load": _load_average(),
         "uptime": _host_uptime(proc),
-        "disks": disks(projects, now=now),
+        "disks": disk_space,
         "processes": processes(proc, now=now),
     }
 
@@ -661,8 +618,8 @@ async def h_metrics(request: web.Request):
     if not 0 < window <= MAX_WINDOW_SECONDS:
         window = DEFAULT_WINDOW_SECONDS
     app = request.app
-    projects = project_directories()
-    payload = await workers.host.run(lambda: snapshot(app, window, projects=projects))
+    disk_space = await disks(project_directories())
+    payload = await workers.host.run(lambda: snapshot(app, window, disk_space=disk_space))
     return web.json_response(payload)
 
 
@@ -718,5 +675,4 @@ def register(app) -> None:
 def reset_for_tests() -> None:
     _process_samples.clear()
     _process_cache.update({"at": 0.0, "payload": None, "key": None})
-    _disk_cache.update({"at": 0.0, "payload": None, "key": None})
-    _disk_probes.clear()
+    _disk_cache.update({"at": 0.0, "reading": None, "key": None})

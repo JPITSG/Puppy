@@ -17,7 +17,7 @@ from aiohttp import WSMsgType, web
 from puppy import (__version__, agent_notes, auth, backends, backup_schedule, bind_verify, browser, compression,
                    cli_auto_upgrade, cli_releases,
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
-                   project_move, prompt_index, spelling, token_usage,
+                   places, project_move, prompt_index, spelling, token_usage,
                    live_websockets, localization, protocol, runner, schedules, search, session_git,
                    shared_files,
                    snapshots, session_titles, spawn_exec,
@@ -606,7 +606,6 @@ async def create_session(body) -> tuple:
     except KeyError:
         return {"error": f"unknown engine '{engine}'"}, 400
     await operations.wait(driver.refresh_model_options())
-    operations.commit()
     try:
         choices = engine_defaults.for_session(driver, body)
     except ValueError as exc:
@@ -614,6 +613,18 @@ async def create_session(body) -> tuple:
     workspace_kind = str(body.get("workspace_kind") or workspaces.KIND_DIRECTORY)
     if workspace_kind not in workspaces.KINDS:
         return {"error": "unknown workspace kind"}, 400
+    link = body.get("workspace")
+    folder = None
+    if link is None and workspace_kind == workspaces.KIND_DIRECTORY:
+        cwd = os.path.abspath(
+            str(body.get("cwd") or "").strip() or config.get("sessions.default_cwd", "/"))
+        try:
+            folder = await operations.wait(places.visit(cwd))
+        except places.NotAnswering as exc:
+            return {"error": str(exc)}, 409
+        if not folder.directory and not body.get("mkdir"):
+            return {"error": f"directory does not exist: {cwd}", "mkdir_possible": True}, 400
+    operations.commit()
     # a schedule's run says which schedule and run it is
     run_marker = None
     if body.get("schedule") is not None:
@@ -621,10 +632,9 @@ async def create_session(body) -> tuple:
             run_marker = schedules.validate_run_marker(body["schedule"])
         except schedules.ScheduleError as exc:
             return {"error": str(exc)}, 400
-    cwd = ""
+    cwd = folder.path if folder is not None else ""
     workspace_json = ""
     mirror_uid = ""
-    link = body.get("workspace")
     if link is not None:
         # controller-brokered remote workspace: the engine works in a private
         # stable mirror here while the project lives on the descriptor's node
@@ -647,17 +657,13 @@ async def create_session(body) -> tuple:
         workspace_json = json.dumps(
             {"uid": uid, "root": root, "node": node, "label": label},
             separators=(",", ":"))
-    elif workspace_kind == workspaces.KIND_DIRECTORY:
-        cwd = os.path.abspath(
-            str(body.get("cwd") or "").strip() or config.get("sessions.default_cwd", "/"))
-        if not os.path.isdir(cwd):
-            if body.get("mkdir"):
-                try:
-                    os.makedirs(cwd, exist_ok=True)
-                except OSError as e:
-                    return {"error": f"mkdir failed: {e}"}, 400
-            else:
-                return {"error": f"directory does not exist: {cwd}", "mkdir_possible": True}, 400
+    elif folder is not None and not folder.directory:
+        try:
+            await places.ask(cwd, _make_folder, cwd)
+        except places.NotAnswering as exc:
+            return {"error": str(exc)}, 409
+        except OSError as e:
+            return {"error": f"mkdir failed: {e}"}, 400
     perm, model, effort = choices["permission_mode"], choices["model"], choices["effort"]
     color = body.get("color") if body.get("color") in db.SESSION_COLORS else random.choice(db.SESSION_COLORS)
     name = str(body.get("name") or "").strip()[:80]
@@ -1253,9 +1259,8 @@ async def h_session_prompts(request: web.Request):
 
 # ---- fs helpers (cwd picker) ----
 
-async def h_fs(request: web.Request):
-    path = os.path.abspath(request.query.get("path") or "/")
-    show_hidden = request.query.get("hidden") == "1"
+def _subfolders(path, show_hidden):
+    """What the folder picker shows of a path, with the status it answers."""
     prefix = ""
     if not os.path.isdir(path):
         # partially typed name: list the parent filtered by the last segment
@@ -1264,12 +1269,13 @@ async def h_fs(request: web.Request):
             prefix = os.path.basename(path).lower()
             path = parent
         else:
-            return web.json_response({"error": "not a directory", "path": path}, status=400)
+            return {"error": "not a directory", "path": path}, 400
     dirs = []
     try:
         with os.scandir(path) as it:
             for e in it:
-                if not e.is_dir(follow_symlinks=False):
+                # a drive mounted here may not answer, and is a folder anyway
+                if not places.mounted(os.path.join(path, e.name)) and not e.is_dir(follow_symlinks=False):
                     continue
                 if prefix:
                     if e.name.lower().startswith(prefix):
@@ -1277,10 +1283,24 @@ async def h_fs(request: web.Request):
                 elif show_hidden or not e.name.startswith("."):
                     dirs.append(e.name)
     except OSError as e:
-        return web.json_response({"error": str(e), "path": path}, status=400)
+        return {"error": str(e), "path": path}, 400
     dirs.sort()
-    return web.json_response({"path": path, "parent": os.path.dirname(path) if path != "/" else None,
-                              "dirs": dirs[:500], "filter": prefix})
+    return {"path": path, "parent": os.path.dirname(path) if path != "/" else None,
+            "dirs": dirs[:500], "filter": prefix}, 200
+
+
+def _make_folder(path):
+    os.makedirs(path, exist_ok=True)
+
+
+async def h_fs(request: web.Request):
+    path = os.path.abspath(request.query.get("path") or "/")
+    try:
+        payload, status = await places.ask(path, _subfolders, path,
+                                           request.query.get("hidden") == "1")
+    except places.NotAnswering as exc:
+        payload, status = {"error": str(exc), "path": path}, 409
+    return web.json_response(payload, status=status)
 
 
 async def h_fs_mkdir(request: web.Request):
@@ -1289,7 +1309,9 @@ async def h_fs_mkdir(request: web.Request):
     if not path or path == "/":
         return web.json_response({"error": "bad path"}, status=400)
     try:
-        os.makedirs(path, exist_ok=True)
+        await places.ask(path, _make_folder, path)
+    except places.NotAnswering as exc:
+        return web.json_response({"error": str(exc)}, status=409)
     except OSError as e:
         return web.json_response({"error": str(e)}, status=400)
     return web.json_response({"ok": True, "path": path})
@@ -2228,6 +2250,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     """
     # the threads every startup hook below may already use
     workers.register(app)
+    places.register(app)
 
     async def validate_records(_app):
         runner.validate_persisted_queues(db.connect())

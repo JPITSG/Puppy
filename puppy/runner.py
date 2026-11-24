@@ -15,7 +15,7 @@ import time
 import uuid
 
 from puppy import (agent_notes, browser_agent, config, db, engine_defaults, files_agent, handoff, notify,
-                   spawn_agent,
+                   places, spawn_agent,
                    system_prompts, task_agent, terminal_agent, vnc_agent,
                    session_agent, session_directories, session_git, session_links, uploads, workspace_sync,
                    workers, workspaces, schedules, session_tasks, session_titles, timeouts,
@@ -3652,15 +3652,24 @@ class SessionHub:
             self._driver_ctx = ctx
             self._publish_steering_state(session)
 
-            cwd = session["cwd"]
-            if not os.path.isdir(cwd):
-                self._emit("error", {"text": f"Working directory missing: {cwd}"})
+            try:
+                folder = await places.visit(session["cwd"])
+            except places.NotAnswering as exc:
+                if self.interrupted:    # while it waited for the drive
+                    self._emit("info", {"subtype": "interrupted", "text": "Turn interrupted by user"})
+                else:
+                    self._emit("error", {"text": f"Working directory unavailable: {exc}"})
                 return
+            if not folder.directory:
+                self._emit("error", {"text": f"Working directory missing: {folder.path}"})
+                return
+            session_directories.reached(session["cwd"], folder.real)
 
             log.info("session %s turn: %s", self.id,
                      "{} {}".format(driver.label, tool) if transport is not None
                      else " ".join(argv[:8]) + " ...")
             turn_started = time.monotonic()
+            argv, cwd = places.launch(folder, argv)
             self.proc = await asyncio.create_subprocess_exec(
                 *argv, cwd=cwd, env=env,
                 stdin=asyncio.subprocess.PIPE if driver.uses_stdin_stream else asyncio.subprocess.DEVNULL,
@@ -4495,8 +4504,12 @@ async def shutdown() -> None:
                  grace, running)
     while time.time() < deadline and any(h.status == "running" for h in _hubs.values()):
         await asyncio.sleep(0.5)
-    for h in list(_hubs.values()):
-        await h.kill()
+    # together: an engine that waits for a drive, past any signal, is not
+    # waited for by the others
+    for outcome in await asyncio.gather(*(h.kill() for h in list(_hubs.values())),
+                                        return_exceptions=True):
+        if isinstance(outcome, Exception):
+            log.error("stopping a turn failed", exc_info=outcome)
     # Spawned delegates go with their turns: local ones are killed and relayed
     # ones told to stop while the controller's backend channels are still open
     # (both runtimes close those only after this returns).

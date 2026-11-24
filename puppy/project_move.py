@@ -21,7 +21,6 @@ transcript records a ``workspace_move`` info event, as a scratch promotion does.
 """
 from __future__ import annotations
 
-import asyncio
 import errno
 import logging
 import os
@@ -31,7 +30,7 @@ import stat
 import subprocess
 import sys
 
-from puppy import config, db, operations, workers, workspaces
+from puppy import config, db, operations, places, session_directories, workers, workspaces
 from puppy.workspaces import WorkspaceError
 
 log = logging.getLogger("puppy.project_move")
@@ -175,12 +174,22 @@ def _resolve_target(target: str, real: str) -> str:
     return target
 
 
+def _resolved(path: str, base: str) -> tuple:
+    """(where a path leads, whether a folder may be there), without going to a
+    drive other than ``base``'s: what leads to another is where the folder
+    monitor last saw it, and may well be there."""
+    found = places.nearby(path, base) if path else None
+    return found if found is not None else (session_directories.real(path), bool(path))
+
+
 def _check_links(real: str, target: str) -> None:
     """A folder another backend's linked session works on stays where its
     lease names it: moving it would cut that session off."""
     from puppy import workspace_sync
     for lease in workspace_sync.list_leases():
-        root = os.path.realpath(str(lease.get("root") or ""))
+        root, there = _resolved(str(lease.get("root") or ""), real)
+        if not there:
+            continue    # gone, and in nobody's way
         if _within(real, root) is not None or _within(root, real) is not None:
             raise WorkspaceError("A linked session on another backend works on {}, "
                                  "so it cannot move".format(root))
@@ -210,7 +219,7 @@ def _followers(path: str, real: str) -> dict:
         if relative is None:
             relative = _within(real, cwd)
         if relative is None:
-            relative = _within(real, os.path.realpath(cwd))
+            relative = _within(real, _resolved(cwd, real)[0])
         if relative is not None:
             found[session["id"]] = (session, relative)
     return found
@@ -417,9 +426,9 @@ def _repair_worktrees(sources, target: str, folders) -> None:
                 continue
         else:
             continue
-        argv = ["git", "-c", "core.fsmonitor=false", "worktree", "repair", *paths]
+        argv = ["git", "-C", folder, "-c", "core.fsmonitor=false", "worktree", "repair", *paths]
         try:
-            result = operations.run_process(argv, cwd=folder, timeout=REPAIR_TIMEOUT,
+            result = operations.run_process(argv, timeout=REPAIR_TIMEOUT,
                                             env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -444,7 +453,7 @@ async def _relocate(sid: int, path: str, real: str, target: str) -> dict:
         raise
     # Found again now the folder is owned and still in place: a session made
     # during a long copy follows too.
-    followers = _followers(path, real)
+    followers = await operations.to_thread(_followers, path, real)
     moves = {fid: os.path.normpath(os.path.join(target, relative))
              for fid, (_session, relative) in followers.items()}
     renamed = False
@@ -506,6 +515,21 @@ async def _relocate(sid: int, path: str, real: str, target: str) -> dict:
             "retained": real if leftover else ""}
 
 
+def _prepare(session, requested: str) -> tuple:
+    """Everything a move asks of the disk before it owns the project."""
+    path, real = _source(session)
+    target = _resolve_target(requested, real)
+    _check_links(real, target)
+    return path, real, target, _followers(path, real)
+
+
+async def _answers(path: str) -> None:
+    try:
+        await operations.wait(places.visit(path))
+    except places.NotAnswering as exc:
+        raise WorkspaceError(str(exc)) from exc
+
+
 async def move(sid: int, destination, expected_cwd=None) -> dict:
     """Move session ``sid``'s project folder to ``destination`` and point every
     session working in it at the new place. ``expected_cwd``, when given, is
@@ -525,10 +549,10 @@ async def move(sid: int, destination, expected_cwd=None) -> dict:
         if expected_cwd is not None and session["cwd"] != expected_cwd:
             raise WorkspaceError("The project is no longer in {}; open Move project "
                                  "again".format(expected_cwd))
-        path, real = _source(session)
-        target = _resolve_target(requested, real)
-        _check_links(real, target)
-        _check_idle(sid, _followers(path, real))
+        await _answers(str(session.get("cwd") or os.sep))
+        await _answers(os.path.dirname(requested))
+        path, real, target, followers = await operations.to_thread(_prepare, session, requested)
+        _check_idle(sid, followers)
         if session_tasks.overlaps_busy(real) or session_tasks.overlaps_busy(target):
             raise WorkspaceError("Another workspace operation is using this project; "
                                  "try again when it finishes")
@@ -539,8 +563,6 @@ async def move(sid: int, destination, expected_cwd=None) -> dict:
                 if current is None or current["cwd"] != session["cwd"] or \
                         current["workspace_kind"] != workspaces.KIND_DIRECTORY:
                     raise WorkspaceError("The project changed while waiting; try again")
-                if os.path.lexists(target):
-                    raise WorkspaceError("{} already exists; choose a new folder name".format(target))
                 return await _relocate(sid, path, real, target)
 
     async def run():

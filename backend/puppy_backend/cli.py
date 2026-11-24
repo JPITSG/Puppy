@@ -266,7 +266,7 @@ def main() -> None:
         print(json.dumps(_self_test(), sort_keys=True))
         return
 
-    from aiohttp import web as aioweb
+    from puppy import workers
     from puppy.main import initialize_runtime
 
     from .app import build_app
@@ -298,12 +298,14 @@ def main() -> None:
     transport = {"encrypted": identity.enabled}
     if identity.enabled:
         transport["certificate_sha256"] = identity.fingerprint
-    aioweb.run_app(build_app(include_terminal=terminal_enabled, transport=transport,
+    app = build_app(include_terminal=terminal_enabled, transport=transport,
                     upgrade_health={
                         "host": host, "port": port, "tls": identity.enabled,
                         "certificate_sha256": identity.fingerprint,
-                    }), host=host, port=port,
-                    print=None, shutdown_timeout=5, ssl_context=identity.context)
+                    })
+    workers.run_app(app, grace=float(config.get("sessions.shutdown_grace", 60)),
+                    host=host, port=port, print=None, shutdown_timeout=5,
+                    ssl_context=identity.context)
 
 
 if __name__ == "__main__":

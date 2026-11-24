@@ -19,7 +19,7 @@ from urllib.parse import unquote
 
 from aiohttp import web
 
-from puppy import config, db, operations, workers
+from puppy import config, db, operations, places, workers
 
 log = logging.getLogger("puppy.uploads")
 
@@ -705,7 +705,7 @@ async def h_session_upload_preview(request: web.Request):
     })
 
 
-def _tool_image_file(session_id: int, seq: int, head: bool = False):
+def _tool_image_path(session_id: int, seq: int) -> Path:
     """Resolve a successful image-view result through its recorded call.
 
     The URL contains only event identity, never a client-supplied filesystem
@@ -738,6 +738,10 @@ def _tool_image_file(session_id: int, seq: int, head: bool = False):
     target = Path(path)
     if not target.is_absolute():
         target = Path(session["cwd"]) / target
+    return target
+
+
+def _read_tool_image(target: Path, head: bool = False):
     # Open once and serve these same bounded bytes: a replaced path cannot
     # swap a checked raster for a different file during FileResponse's read.
     from puppy.drivers.base import TOOL_IMAGE_MAX_BYTES
@@ -756,10 +760,14 @@ def _tool_image_file(session_id: int, seq: int, head: bool = False):
 
 async def h_session_tool_image(request: web.Request):
     try:
-        # a path the tool named, which may be on a mount that has gone
-        raw, content_type, size = await workers.files.run(
-            _tool_image_file, int(request.match_info["sid"]),
-            int(request.match_info["seq"]), request.method == "HEAD")
+        target = await workers.history.run(
+            _tool_image_path, int(request.match_info["sid"]), int(request.match_info["seq"]))
+        raw, content_type, size = await places.ask(
+            target, _read_tool_image, target, request.method == "HEAD")
+    except places.NotAnswering as exc:
+        # a drive that does not answer is no proof that the picture is gone
+        return web.json_response({"error": str(exc)}, status=503,
+                                 headers={"Cache-Control": "no-store"})
     except (OSError, ValueError, TypeError):
         return web.json_response({"error": "tool image not available"}, status=404,
                                  headers={"Cache-Control": "no-store"})

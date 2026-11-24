@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import functools
 import hashlib
 import json
 import logging
@@ -23,7 +24,8 @@ import time
 
 from aiohttp import web
 
-from puppy import db, operations, session_directories, session_git, session_titles, uploads, workspaces
+from puppy import (db, operations, places, session_directories, session_git, session_titles, uploads, workers,
+                   workspaces)
 
 log = logging.getLogger("puppy.session_tasks")
 
@@ -69,6 +71,9 @@ AUTO_PREFIX = "session_task_auto_apply."
 AUTO_KEYS = {"format", "armed_at", "rounds", "resolving"}
 AUTO_ROUNDS = 8
 AUTO_POLL = 15.0
+# How long one look waits for the Mains it is applying to before it goes on
+# without those still at work.
+AUTO_PATIENCE = 15.0
 # How long a waiting agent's tool call holds its return for an apply that
 # began while it waited: the wait and this stay inside an engine's 70 s
 # MCP tool timeout.
@@ -585,9 +590,11 @@ def finished(sid, status, user_seq):
 def _git_run(cwd, *args, data=None, timeout=60, env=None, stderr=subprocess.PIPE, tick=None):
     """One Git command, its exit status left to the caller."""
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", **(env or {}))
-    return operations.run_process(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false",
+    # git goes to the folder itself: a child that enters it before it becomes
+    # git still holds Puppy's own sockets, for as long as a drive keeps it
+    return operations.run_process(["git", "-C", cwd, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false",
                                    "-c", "user.name=Puppy", "-c", "user.email=puppy@localhost", *args],
-                                  cwd=cwd, env=env, input=data, stdout=subprocess.PIPE, stderr=stderr, timeout=timeout,
+                                  env=env, input=data, stdout=subprocess.PIPE, stderr=stderr, timeout=timeout,
                                   tick=tick)
 
 
@@ -597,6 +604,16 @@ def _git(cwd, *args, data=None, timeout=60, env=None):
         raise GitError(result.stderr.decode("utf-8", "replace")[:3000].strip() or "Git operation failed",
                        result.returncode)
     return result.stdout
+
+
+async def _main_root(session):
+    """Main's repository - asked by a worker only once Main's folder has shown
+    that it answers, because a drive that does not would keep the worker."""
+    try:
+        await operations.wait(places.visit(session["cwd"]))
+    except places.NotAnswering as exc:
+        raise TaskError("Main's working folder is unavailable · {}".format(exc)) from exc
+    return await operations.to_thread(_repo, session)
 
 
 def _repo(session):
@@ -623,6 +640,16 @@ def _project_contains(root, path):
                 os.path.commonpath([managed, root]) != managed)
 
 
+def _real(session):
+    """Where a session's files are with every link followed, without going to
+    a drive that may not answer: one of Puppy's own copies is looked up, and
+    a project folder is where the folder monitor last saw it."""
+    from puppy import workspace_sync
+    if workspaces.is_temporary(session) or workspace_sync.session_workspace(session):
+        return os.path.realpath(session["cwd"])
+    return session_directories.real(session["cwd"])
+
+
 def _project_busy(root, exclude=0, relied=None):
     """Whether a turn is running, or waiting in a queue, anywhere in the
     project: the engine may be writing its files. With ``relied``, a turn
@@ -633,7 +660,7 @@ def _project_busy(root, exclude=0, relied=None):
     for sid, hub in runner._hubs.items():
         if sid != exclude and (hub.status == "running" or hub.queue):
             session = db.get_session(sid)
-            if session and _project_contains(root, os.path.realpath(session["cwd"])):
+            if session and _project_contains(root, _real(session)):
                 if relied is not None and hub.status == "running" and _parked.get(sid):
                     relied.add(sid)
                     continue
@@ -724,7 +751,9 @@ def busy_sessions():
 
 def _root_busy(session):
     """Whether a copy, review or apply currently owns this session's files."""
-    path = os.path.realpath(session["cwd"])
+    if not _busy_roots:
+        return False
+    path = _real(session)
     return any(_project_contains(root, path) for root in _busy_roots)
 
 
@@ -931,8 +960,10 @@ def _copy_project(root, destination, committed=False):
             if stat.S_ISLNK(info.st_mode):
                 target.unlink(missing_ok=True)
                 link = os.readlink(leaf, dir_fd=fd)
-                resolved = os.path.realpath(os.path.join(root, os.path.dirname(rel), link))
-                if os.path.isabs(link) or os.path.commonpath([root, resolved]) != root:
+                # where it leads, without going to another drive
+                found = None if os.path.isabs(link) else \
+                    places.nearby(os.path.join(root, os.path.dirname(rel), link), root)
+                if found is None or os.path.commonpath([root, found[0]]) != root:
                     raise TaskError("Task copies require relative symlinks within the project: " + rel)
                 target.symlink_to(link)
             elif stat.S_ISREG(info.st_mode):
@@ -1193,7 +1224,7 @@ async def refresh(parent_id, sid, caller=0):
         _review_idle(hub, "refreshing")
         task_root = os.path.realpath(task["cwd"])
         async with workspace_operation(task_root):
-            root = await operations.to_thread(_repo, parent)
+            root = await _main_root(parent)
             if _project_contains(task_root, root):
                 raise TaskError("Main and the task must use independent working copies")
             async with workspace_operation(root, exclude=caller):
@@ -1456,7 +1487,7 @@ async def sync_main(parent_id, sid):
         if not workspaces.is_available(task):
             raise TaskError("This task's working copy is unavailable")
         task_root = os.path.realpath(task["cwd"])
-        root = await operations.to_thread(_repo, parent)
+        root = await _main_root(parent)
         if _project_contains(task_root, root):
             raise TaskError("Main and the task must use independent working copies")
         async with _own_copy(task_root):
@@ -1523,7 +1554,7 @@ async def changes(parent_id, sid, check=True):
             _busy_roots.discard(task_root)
         applies, reason = None, ""
         if check and patch:
-            root = await operations.to_thread(_repo, parent)
+            root = await _main_root(parent)
             # git apply --check reads Main's files and writes nothing
             run = await operations.to_thread(_git_run, root, "apply", "--check", "--binary", "-", data=patch)
             applies = run.returncode == 0
@@ -1543,6 +1574,8 @@ _auto_wake = None
 _auto_worker_task = None
 _auto_notes = {}       # sid -> why an apply is waiting, for the console
 _auto_active = set()   # tasks the worker is applying right now
+_auto_parents = {}     # Main's sid -> the worker's present look at its tasks
+_auto_late = set()     # those of them it has stopped waiting for
 _parked = {}           # sid -> task tool waits its running turn is blocked in
 _holds = {}            # sid -> [count, Event set once nothing relies on its wait]
 
@@ -1652,6 +1685,9 @@ async def set_auto_apply(parent_id, sid, enabled):
 
 
 async def _auto_pass(app):
+    """Look at every Main with tasks that are ready. One that is kept at it -
+    by a drive that stopped answering halfway - keeps none of the others: it
+    is left to finish by itself, and has the worker look again when it does."""
     from puppy import runner
     if runner._draining or app.get("puppy_snapshot_busy"):
         return
@@ -1669,19 +1705,38 @@ async def _auto_pass(app):
         elif _auto_notes.get(sid):
             _note(sid, "")
     for parent_id, ready in parents.items():
-        conflicted, busy = [], False
-        for _, sid in sorted(ready):
-            outcome = await _auto_step(app, parent_id, sid, False)
-            if outcome == "busy":
-                busy = True
-                break
-            if outcome == "conflict":
-                conflicted.append(sid)
-        # conflict rounds only once every task that fits has applied: each
-        # round then merges Main as it stands after them
-        for sid in [] if busy else conflicted:
-            if await _auto_step(app, parent_id, sid, True) == "busy":
-                break
+        if parent_id not in _auto_parents:
+            task = _auto_parents[parent_id] = asyncio.ensure_future(_auto_parent(app, parent_id, ready))
+            task.add_done_callback(functools.partial(_auto_over, parent_id))
+    looking = {parent_id: _auto_parents[parent_id] for parent_id in parents if parent_id in _auto_parents}
+    if looking:
+        await asyncio.wait(looking.values(), timeout=AUTO_PATIENCE)
+        _auto_late.update(parent_id for parent_id, task in looking.items() if not task.done())
+
+
+def _auto_over(parent_id, task):
+    _auto_parents.pop(parent_id, None)
+    if not task.cancelled() and task.exception() is not None:
+        log.error("applying finished tasks failed", exc_info=task.exception())
+    if parent_id in _auto_late:     # nobody has waited for it
+        _auto_late.discard(parent_id)
+        wake_auto()
+
+
+async def _auto_parent(app, parent_id, ready):
+    conflicted, busy = [], False
+    for _, sid in sorted(ready):
+        outcome = await _auto_step(app, parent_id, sid, False)
+        if outcome == "busy":
+            busy = True
+            break
+        if outcome == "conflict":
+            conflicted.append(sid)
+    # conflict rounds only once every task that fits has applied: each
+    # round then merges Main as it stands after them
+    for sid in [] if busy else conflicted:
+        if await _auto_step(app, parent_id, sid, True) == "busy":
+            break
 
 
 async def _auto_step(app, parent_id, sid, resolve):
@@ -1704,12 +1759,31 @@ async def _auto_step(app, parent_id, sid, resolve):
     return outcome
 
 
+async def _main_there(parent):
+    """Whether Main's working folder is there to be worked in."""
+    cwd = str(parent.get("cwd") or "")
+    try:
+        return await places.ask(cwd, session_directories.inspect, cwd)
+    except places.NotAnswering:
+        return False
+
+
 async def _auto_apply(app, parent_id, sid, resolve):
     """Apply one finished task to Main like the review sheet's Apply: the
     plain patch when it fits Main as it stands, else Git's merge of Main's
     newer files with the task's; with ``resolve``, a real conflict starts a
     resolution round in the task instead of being left for the next pass."""
     from puppy import runner
+
+    def wait_for_folder():
+        # Main's folder gone is a wait, never a reason to give up: the task
+        # applies once the folder is back, like after a busy Main.
+        _note(sid, "waiting for Main's working folder")
+        return "busy"
+
+    async def failed(exc):
+        # nor is whatever fails because it went halfway
+        return _give_up(parent_id, sid, task, str(exc)) if await _main_there(parent) else wait_for_folder()
     async with session_operation(parent_id):
         value, auto = record(sid), auto_record(sid)
         if value is None or auto is None or value["parent"] != parent_id:
@@ -1727,15 +1801,12 @@ async def _auto_apply(app, parent_id, sid, resolve):
         if auto["resolving"]:
             auto = dict(auto, resolving=False)
             _save_auto(sid, auto)
-        # Main's folder gone is a wait, never a reason to give up: the task
-        # applies once the folder is back, like after a busy Main.
-        if not await operations.to_thread(session_directories.inspect, str(parent.get("cwd") or "")):
-            _note(sid, "waiting for Main's working folder")
-            return "busy"
+        if not await _main_there(parent):
+            return wait_for_folder()
         try:
             root = await operations.to_thread(_repo, parent)
         except TaskError as exc:
-            return _give_up(parent_id, sid, task, str(exc))
+            return await failed(exc)
         if _project_contains(task_root, root):
             return _give_up(parent_id, sid, task, "Main and the task must use independent working copies")
         _busy_roots.add(task_root)
@@ -1748,7 +1819,7 @@ async def _auto_apply(app, parent_id, sid, resolve):
             _note(sid, "waiting for Main to be idle")
             return "busy"
         except (TaskError, OSError, subprocess.SubprocessError) as exc:
-            return _give_up(parent_id, sid, task, str(exc))
+            return await failed(exc)
         finally:
             _busy_roots.discard(task_root)
             _auto_active.discard(sid)
@@ -1962,7 +2033,7 @@ async def create(parent_id, args, caller=0):
         except uploads.AttachmentError as exc:
             raise TaskError(str(exc))
         operations.report("Checking Main's repository")
-        root = await operations.to_thread(_repo, parent)
+        root = await _main_root(parent)
         committed = await _from_commit(parent, root, caller)
         if overlaps_busy(root):
             raise TaskError("The project is preparing or applying another task")
@@ -2053,7 +2124,7 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
             if expected is not None:
                 if expected != token:
                     raise TaskError("Task changes have changed; review them again")
-                root = await operations.to_thread(_repo, parent)
+                root = await _main_root(parent)
                 async with workspace_operation(root):
                     _review_idle(hub)
                     if patch:
@@ -2154,6 +2225,18 @@ async def h_tasks(request):
         return web.json_response({"error": str(exc)}, status=409)
 
 
+async def _kept(sids):
+    """Whether a drive that these sessions work on does not answer."""
+    for sid in sids:
+        session = db.get_session(sid) if sid else None
+        try:
+            if session is not None:
+                await places.visit(session["cwd"])
+        except places.NotAnswering:
+            return True
+    return places.anything_silent()
+
+
 async def lifecycle(app):
     global _auto_wake, _auto_worker_task
     validate_persisted(db.connect())
@@ -2163,12 +2246,19 @@ async def lifecycle(app):
     _auto_wake.set()    # tasks a restart left finished are looked at once
     _auto_worker_task = asyncio.create_task(_auto_worker(app))
     yield
-    _auto_worker_task.cancel()
-    await asyncio.gather(_auto_worker_task, return_exceptions=True)
+    looking = [_auto_worker_task, *_auto_parents.values()]
+    for task in looking:
+        task.cancel()
+    await asyncio.gather(*looking, return_exceptions=True)
     _auto_worker_task = _auto_wake = None
     await task_agent.stop(app)
-    # Accepted copy/apply operations retain ownership through shutdown.
-    await asyncio.gather(*list(_operations), return_exceptions=True)
+    # Accepted copy/apply operations retain ownership through shutdown, unless
+    # a drive that does not answer keeps them: they may never end.
+    while _operations:
+        _done, left = await asyncio.wait(list(_operations), timeout=workers.LEAVE_SECONDS)
+        if left and await _kept({_operation_sessions.get(task) for task in left}):
+            log.warning("leaving %d workspace operation(s) in a drive that does not answer", len(left))
+            break
     _locks.clear()
     _project_locks.clear()
     _auto_notes.clear()

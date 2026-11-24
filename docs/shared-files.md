@@ -95,7 +95,11 @@ random and is never an upload id, so:
 
 While a copy is being made it counts as an active upload, so a backup never
 starts beside a half-written file; the count belongs to the copy until its
-thread ends, even if the tool call stopped waiting for it.
+thread ends, even if the tool call stopped waiting for it. A session's shares are
+made one at a time; one that has waited twenty seconds for the one before it
+fails and says so. The session's folder and the file's own are asked first
+whether they [answer](silent-drives.md), so a drive that does not fails the tool
+call with the reason.
 
 There is no persisted record beyond the files themselves, so no database,
 config or snapshot shape changed.

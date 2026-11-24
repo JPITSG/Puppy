@@ -5,10 +5,8 @@ import logging.handlers
 import os
 import sys
 
-from aiohttp import web as aioweb
-
 from puppy import (__version__, auth, config, db, localization, tool_calls, uploads,
-                   web_tls, workspaces)
+                   web_tls, workers, workspaces)
 
 
 def setup_logging() -> None:
@@ -66,9 +64,10 @@ def main() -> None:
     auth.announce_initial_setup(host)
 
     from puppy.web import build_app
-    aioweb.run_app(
+    workers.run_app(
         build_app(runtime_web=transport.listener(host, port),
                   runtime_ssl_context=transport.context),
+        grace=float(config.get("sessions.shutdown_grace", 60)),
         host=host, port=port, print=None, shutdown_timeout=5,
         ssl_context=transport.context)
 

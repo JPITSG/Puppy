@@ -60,8 +60,10 @@ IO_WORK = {
 }
 # Threads made by hand: each has a reason that a pool would not serve.
 OWN_THREADS = {
-    ("puppy/host_metrics.py", "threading.Thread"),  # one per mount, abandoned when it hangs
-    ("puppy/workers.py", "threading.Thread"),     # the watchdog speaks while the pools are stuck
+    ("puppy/places.py", "threading.Thread"),      # one per touch of somebody else's folder
+    ("puppy/place_scout.py", "threading.Thread"),  # in a process of its own
+    ("puppy/workers.py", "threading.Thread"),     # the watchdog speaks while the pools are stuck,
+                                                  # and the last word when Puppy stops
 }
 
 
@@ -118,7 +120,7 @@ async def pools():
     loop = asyncio.get_running_loop()
     name = lambda: threading.current_thread().name
     assert (await workers.jobs.run(name)).startswith("puppy-jobs")
-    assert (await workers.git.run(name)).startswith("puppy-git")
+    assert (await workers.host.run(name)).startswith("puppy-host")
     # the caller's context goes along only where it is asked to: an operation
     # can be cancelled by its steps, and never its own cleanup
     _marker.set("operation")

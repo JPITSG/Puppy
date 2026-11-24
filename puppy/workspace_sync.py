@@ -39,7 +39,7 @@ import time
 
 from aiohttp import web
 
-from puppy import config, db, workers
+from puppy import config, db, operations, places, workers
 
 log = logging.getLogger("puppy.wsync")
 
@@ -741,7 +741,7 @@ _store_locks = {}
 
 
 def get_store(root: str, meta_dir: str) -> Store:
-    key = os.path.realpath(root)
+    key = os.path.abspath(root)
     store = _stores.get(key)
     if store is None or store.meta != meta_dir:
         store = Store(root, meta_dir)
@@ -758,9 +758,13 @@ def store_lock(store: Store) -> asyncio.Lock:
 
 
 def forget_store(root: str) -> None:
-    key = os.path.realpath(root)
-    _stores.pop(key, None)
-    _store_locks.pop(key, None)
+    """By the path it was asked for or the one it has: forgetting a store goes
+    nowhere near its tree."""
+    path = os.path.abspath(root)
+    for key, store in list(_stores.items()):
+        if path in (key, store.root):
+            _stores.pop(key, None)
+            _store_locks.pop(store.root, None)
 
 
 # ---- wire framing ----
@@ -836,14 +840,20 @@ def validate_lease_root(root) -> str:
 
 
 def create_lease(root, reuse: bool = False) -> dict:
+    """Blocking: the root is looked at, so it has been visited just before."""
     resolved = validate_lease_root(root)
     for existing in list_leases():
         other = str(existing.get("root") or "")
         if reuse and other == resolved:
             touch_lease(str(existing["id"]))
-            return get_lease(str(existing["id"]))
-        if other == resolved or other.startswith(resolved + os.sep) or \
-                resolved.startswith(other + os.sep):
+            return read_lease(str(existing["id"]))
+        inside = other.startswith(resolved + os.sep)
+        if inside:
+            # one that is gone is in nobody's way; one on a drive of its own
+            # may be, and is not asked
+            found = places.nearby(other, resolved)
+            inside = found is None or found[1]
+        if inside or other == resolved or resolved.startswith(other + os.sep):
             raise SyncError(
                 "another linked session already uses {}".format(other), 409)
     lease_id = secrets.token_hex(12)
@@ -862,7 +872,8 @@ def _write_lease(lease_path: str, record: dict) -> None:
     os.chmod(path, 0o600)
 
 
-def get_lease(lease_id) -> dict:
+def read_lease(lease_id) -> dict:
+    """One lease as Puppy recorded it; its root is not looked at."""
     lease_path = _lease_dir(lease_id)
     try:
         with open(os.path.join(lease_path, "lease.json"), "r",
@@ -874,15 +885,12 @@ def get_lease(lease_id) -> dict:
         raise SyncError("unreadable workspace lease", 500) from exc
     if not isinstance(record, dict) or record.get("id") != lease_id:
         raise SyncError("unknown workspace lease", 404)
-    root = str(record.get("root") or "")
-    if not os.path.isdir(root):
-        raise SyncError("workspace directory is missing: {}".format(root), 409)
     return record
 
 
 def touch_lease(lease_id: str) -> None:
     try:
-        record = get_lease(lease_id)
+        record = read_lease(lease_id)
         record["used_at"] = time.time()
         _write_lease(_lease_dir(lease_id), record)
     except (SyncError, OSError):
@@ -895,7 +903,7 @@ def release_lease(lease_id) -> bool:
         return False
     root = None
     try:
-        root = get_lease(lease_id).get("root")
+        root = read_lease(lease_id).get("root")
     except SyncError:
         pass
     shutil.rmtree(lease_path, ignore_errors=True)
@@ -912,7 +920,7 @@ def list_leases() -> list:
         return out
     for name in names:
         try:
-            out.append(get_lease(name))
+            out.append(read_lease(name))
         except SyncError:
             continue
     return out
@@ -1109,6 +1117,24 @@ async def _stream_manifest(request: web.Request, store: Store,
     return response
 
 
+def _open_block(store: Store, path: str, size: int) -> tuple:
+    """A file's descriptor and its first block; no descriptor once that is all
+    of it, and no block when it cannot be read. Blocking, like every step of a
+    file here: opening, reading and closing may each wait for its disk."""
+    fd = store.open_for_read(path)
+    if fd is None:
+        return None, None
+    try:
+        block = os.read(fd, min(CHUNK, size))
+    except BaseException:
+        os.close(fd)
+        raise
+    if len(block) >= size:
+        os.close(fd)
+        fd = None
+    return fd, block
+
+
 async def _stream_fetch(request: web.Request, store: Store) -> web.StreamResponse:
     try:
         body = await request.json()
@@ -1126,26 +1152,28 @@ async def _stream_fetch(request: web.Request, store: Store) -> web.StreamRespons
         if entry is None or entry.get("t") != "f":
             await response.write(encode_frame({"p": path, "missing": True}))
             continue
-        fd = store.open_for_read(path)
-        if fd is None:
+        declared = int(entry["s"])
+        fd, block = await workers.jobs.run(_open_block, store, path, declared)
+        if block is None:
             await response.write(encode_frame({"p": path, "missing": True}))
             continue
-        declared = int(entry["s"])
         await response.write(encode_frame(
             {"p": path, "s": declared, "h": entry["h"], "m": entry["m"],
              "mt": entry.get("mt")}))
         digest = hashlib.sha256()
         sent = 0
         try:
-            while sent < declared:
-                block = os.read(fd, min(CHUNK, declared - sent))
-                if not block:
-                    break
+            while block:
                 digest.update(block)
                 sent += len(block)
                 await response.write(block)
+                if fd is None or sent >= declared:
+                    break
+                # never closed under a read that is still on its way
+                block = await operations.to_thread(os.read, fd, min(CHUNK, declared - sent))
         finally:
-            os.close(fd)
+            if fd is not None:
+                await workers.jobs.run(os.close, fd)
         if sent < declared:
             # keep the framing intact, then disown the item in its trailer
             await response.write(b"\x00" * (declared - sent))
@@ -1186,6 +1214,43 @@ async def _handle_apply(request: web.Request, store: Store) -> web.Response:
                               "results": results})
 
 
+def _open_staged(batch: ApplyBatch, path: str, temp_name: str) -> tuple:
+    """(the parent's descriptor, the staged file's, why there is none)."""
+    try:
+        batch.ensure_parents(path)
+        fd, _leaf = batch.store.walker.open_parent(path)
+    except (OSError, SyncError) as exc:
+        return None, None, "parent directory unavailable: {}".format(exc)
+    try:
+        return fd, os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                           mode=0o600, dir_fd=fd), ""
+    except OSError as exc:
+        os.close(fd)
+        return None, None, "cannot stage: {}".format(exc)
+
+
+def _close_staged(fd: int, temp_fd: int, temp_name: str, keep: bool, mode=None) -> None:
+    """The staged file is complete and on the disk, or it was never there."""
+    try:
+        try:
+            if keep:
+                if isinstance(mode, int):
+                    os.fchmod(temp_fd, mode & _MODE_MASK)
+                os.fsync(temp_fd)
+        except BaseException:
+            keep = False
+            raise
+        finally:
+            os.close(temp_fd)
+            if not keep:
+                try:
+                    os.unlink(temp_name, dir_fd=fd)
+                except OSError:
+                    pass
+    finally:
+        os.close(fd)
+
+
 async def _stage_write(batch: ApplyBatch, op: dict, stream) -> bool:
     """Stage one write item from the request stream, or drain it cleanly."""
     declared = op.get("s")
@@ -1202,57 +1267,32 @@ async def _stage_write(batch: ApplyBatch, op: dict, stream) -> bool:
     if not ok:
         await _drain_item(stream, declared)
         return False
-    try:
-        await workers.jobs.run(batch.ensure_parents, path)
-        fd, _leaf = batch.store.walker.open_parent(path)
-    except (OSError, SyncError) as exc:
-        batch.fail(op, "parent directory unavailable: {}".format(exc))
+    temp_name = _TMP_PREFIX + secrets.token_hex(8)
+    fd, temp_fd, failed = await workers.jobs.run(_open_staged, batch, path, temp_name)
+    if fd is None:
+        batch.fail(op, failed)
         await _drain_item(stream, declared)
         return False
-    temp_name = _TMP_PREFIX + secrets.token_hex(8)
     digest = hashlib.sha256()
+    keep = False
     try:
-        try:
-            temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                              mode=0o600, dir_fd=fd)
-        except OSError as exc:
-            batch.fail(op, "cannot stage: {}".format(exc))
-            await _drain_item(stream, declared)
-            return False
-        failed = ""
-        try:
-            async for block in read_exact(stream, declared):
-                digest.update(block)
-                _write_all(temp_fd, block)
-            trailer = await read_frame(stream)
-            if not isinstance(trailer, dict) or trailer.get("p") != path:
-                failed = "missing content trailer"
-            elif trailer.get("ok") is not True:
-                failed = "the sender abandoned this file mid-stream"
-            elif digest.hexdigest() != op.get("h"):
-                failed = "content hash mismatch"
-            else:
-                mode = op.get("m")
-                if isinstance(mode, int):
-                    os.fchmod(temp_fd, mode & _MODE_MASK)
-                await workers.jobs.run(os.fsync, temp_fd)
-        except SyncError:
-            os.close(temp_fd)
-            try:
-                os.unlink(temp_name, dir_fd=fd)
-            except OSError:
-                pass
-            raise
-        os.close(temp_fd)
-        if failed:
-            try:
-                os.unlink(temp_name, dir_fd=fd)
-            except OSError:
-                pass
-            batch.fail(op, failed)
-            return False
+        async for block in read_exact(stream, declared):
+            digest.update(block)
+            await operations.to_thread(_write_all, temp_fd, block)
+        trailer = await read_frame(stream)
+        if not isinstance(trailer, dict) or trailer.get("p") != path:
+            failed = "missing content trailer"
+        elif trailer.get("ok") is not True:
+            failed = "the sender abandoned this file mid-stream"
+        elif digest.hexdigest() != op.get("h"):
+            failed = "content hash mismatch"
+        else:
+            keep = True
     finally:
-        os.close(fd)
+        await workers.jobs.run(_close_staged, fd, temp_fd, temp_name, keep, op.get("m"))
+    if failed:
+        batch.fail(op, failed)
+        return False
     batch.stage_rename({"p": path, "tmp": temp_name, "mt": op.get("mt")})
     return True
 
@@ -1270,9 +1310,10 @@ async def h_lease_create(request: web.Request):
         return web.json_response({"error": "invalid lease request"}, status=400)
     if not isinstance(body, dict):
         return web.json_response({"error": "invalid lease request"}, status=400)
+    root = str(body.get("root") or "")
     try:
-        record = await workers.jobs.run(
-            create_lease, str(body.get("root") or ""), body.get("reuse") is True)
+        await _answers(root)
+        record = await workers.jobs.run(create_lease, root, body.get("reuse") is True)
     except SyncError as exc:
         return _sync_error_response(exc)
     log.info("workspace lease %s created for %s", record["id"], record["root"])
@@ -1287,10 +1328,22 @@ async def h_lease_delete(request: web.Request):
     return web.json_response({"ok": True, "removed": removed})
 
 
+async def _answers(root: str):
+    """The workspace, seen from outside: a drive that does not answer would
+    keep every worker sent there."""
+    try:
+        return await places.visit(root.strip() or os.sep)
+    except places.NotAnswering as exc:
+        raise SyncError("workspace directory is unavailable: {}".format(exc), 409)
+
+
 async def _lease_store(request: web.Request) -> Store:
-    lease = get_lease(request.match_info["lease"])
+    lease = read_lease(request.match_info["lease"])
+    root = str(lease.get("root") or "")
+    if not root or not (await _answers(root)).directory:
+        raise SyncError("workspace directory is missing: {}".format(root), 409)
     touch_lease(lease["id"])
-    return await workers.jobs.run(get_store, lease["root"], _lease_dir(lease["id"]))
+    return await workers.jobs.run(get_store, root, _lease_dir(lease["id"]))
 
 
 async def h_lease_manifest(request: web.Request):

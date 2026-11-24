@@ -13,6 +13,7 @@ import ipaddress
 import json
 import logging
 import math
+import os
 import secrets
 import time
 from typing import Dict, Optional, Tuple
@@ -20,7 +21,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from puppy import config, listener_handoff, operations, web_tls
+from puppy import config, listener_handoff, operations, places, web_tls
 
 VERIFY_TTL = 60
 VERIFY_PREFIX = "/api/settings/bind/verify/"
@@ -303,6 +304,12 @@ async def prepare(app: web.Application, user: str, bind_ip, origin: str,
     parsed_ip = ipaddress.ip_address(host)
     probe_host = _wildcard_probe_host(
         parsed_ip, origin_host, connected_host) if parsed_ip.is_unspecified else host
+    try:
+        for path in (certificate_path, private_key_path):
+            if str(path or "").strip():
+                await operations.wait(places.visit(os.path.expanduser(str(path).strip())))
+    except places.NotAnswering as exc:
+        raise BindVerificationError(str(exc)) from exc
     try:
         current_transport = web_tls.load_state()
         transport = await operations.to_thread(web_tls.prepare_change,

@@ -9947,10 +9947,13 @@ async def host_panel_checks(instance, capture=False):
     # The node's disks answer with one nearly full filesystem while the box
     # opens, so its Disk section is not green; everything green stays shut.
     real_disks = host_metrics.disks
-    host_metrics.disks = lambda projects=(), now=None, **_: {
-        "mounts": [{"mount": "/", "fs": "ext4", "puppy": True, "total": 100 << 30,
-                    "used": 96 << 30, "available": 4 << 30, "projects": 1, "paths": []}],
-        "stalled": [], "sampled_at": time.time()}
+
+    async def demo_disks(projects=(), now=None, **_):
+        return {
+            "mounts": [{"mount": "/", "fs": "ext4", "puppy": True, "total": 100 << 30,
+                        "used": 96 << 30, "available": 4 << 30, "projects": 1, "paths": []}],
+            "stalled": [], "sampled_at": time.time()}
+    host_metrics.disks = demo_disks
     for kind in ("mousePressed", "mouseReleased"):
         await instance.call("Input.dispatchMouseEvent", {
             "type": kind, "x": point["x"], "y": point["y"], "button": "left",

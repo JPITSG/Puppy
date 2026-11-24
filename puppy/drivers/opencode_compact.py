@@ -305,11 +305,21 @@ class NativeCompaction(TurnTransport):
             cursor = next_cursor
         raise CompactionError("OpenCode's compaction could not be matched to the original history")
 
+    async def _same_folder(self, directory):
+        if os.path.normpath(directory) == os.path.normpath(self.cwd):
+            return True
+        from puppy import places    # which needs the data path: never at import
+        try:
+            here, there = await places.visit(self.cwd), await places.visit(directory)
+        except places.NotAnswering as exc:
+            raise CompactionError(str(exc))
+        return here.real == there.real
+
     async def _compact(self):
         native, _ = await self._cancellable(self._request("GET", self._path()))
         if not isinstance(native, dict) or native.get("id") != self.sid or \
                 not isinstance(native.get("directory"), str) or \
-                os.path.realpath(native["directory"]) != os.path.realpath(self.cwd):
+                not await self._cancellable(self._same_folder(native["directory"])):
             raise CompactionError("OpenCode's session does not match this working directory")
         if native.get("revert") is not None:
             raise CompactionError("Finish the pending native undo in OpenCode before compacting")

@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import collections
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 import contextvars
 import functools
 import itertools
@@ -51,6 +52,13 @@ STALL_SECONDS = 10.0
 REPEAT_SECONDS = 300.0
 MAX_REPORTS = 6         # stack dumps per stall: the first, then the repeats
 STACK_FRAMES = 16
+# Puppy's own end: what each part of it waits for work that is still under way
+# before it asks whether that is kept by a drive that does not answer, what all
+# parts together have besides the grace of running turns, and what is left of
+# the process once every one of them has had its turn.
+LEAVE_SECONDS = 20.0
+ORDER_SECONDS = 600.0
+EXIT_SECONDS = 15.0
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
 
 
@@ -162,19 +170,15 @@ io = _IoPool("io", IO_THREADS)
 # copies and moves, archives, workspace sync, removing trees. One thread each,
 # mostly waiting on Git or on the disk.
 jobs = Pool("jobs", 16)
-# Looking at repositories: every look runs Git, bounded by GIT_TIMEOUT.
-git = Pool("git", 8)
 # Reading conversations and the token ledger out of the main database.
 history = Pool("history", 4)
-# Readings of this host and of whether the sessions' folders are there.
+# Readings of this host.
 host = Pool("host", 4)
-# Files outside Puppy's own storage: they may be on a mount that is gone.
-files = Pool("files", 4)
 # Full-history searches (two lanes, see search) and the index's one writer.
 search = Pool("search", 4)
 index = Pool("index", 1)
 
-POOLS = (jobs, git, history, host, files, search, index)
+POOLS = (jobs, history, host, search, index)
 
 
 class Busy(RuntimeError):
@@ -246,6 +250,16 @@ class Lane:
         self._line.remove(entry)
         entry[1].cancel()
         return True
+
+    @asynccontextmanager
+    async def hold(self, key=None, wait: float = 0.0):
+        """A place for as long as the caller keeps it. ``run`` gives it to the
+        work instead, which may outlast whoever asked for it."""
+        await self._enter(key, wait)
+        try:
+            yield
+        finally:
+            self._leave(key)
 
     async def run(self, pool: Pool, function, *args, key=None, wait: float = 0.0,
                   abandoned=None):
@@ -494,6 +508,52 @@ async def _lifecycle(app):
         yield
     finally:
         watchdog.stop()
+
+
+class _Exit:
+    """The last word when Puppy stops. An orderly end takes as long as it
+    takes, but work that waits for a drive cannot be called back, and Python
+    itself waits for every worker thread before it ends: whatever is still
+    under way when its time is over is left behind."""
+
+    def __init__(self, grace: float):
+        self.grace = grace
+        self._by = None
+        self._changed = threading.Event()
+
+    def allow(self, seconds: float) -> None:
+        self._by = time.monotonic() + seconds
+        self._changed.set()
+
+    async def begin(self, _app) -> None:
+        self.allow(self.grace + ORDER_SECONDS)
+        threading.Thread(target=self._run, name="puppy-exit", daemon=True).start()
+
+    async def over(self, _app) -> None:
+        self.allow(EXIT_SECONDS)
+
+    def _run(self) -> None:
+        while True:
+            self._changed.clear()
+            left = self._by - time.monotonic()
+            if left <= 0:
+                break
+            self._changed.wait(left)
+        log.error("leaving with work still under way\n%s\n%s",
+                  pool_lines(pool.state() for pool in POOLS),
+                  stacks(skip=(threading.get_ident(),)))
+        logging.shutdown()
+        os._exit(0)
+
+
+def run_app(app, grace: float, **kwargs) -> None:
+    """aiohttp's ``run_app`` for a whole process, with an end that always
+    comes: ``grace`` is what running turns are given before it."""
+    from aiohttp import web
+    end = _Exit(grace)
+    app.on_shutdown.insert(0, end.begin)
+    app.on_cleanup.append(end.over)
+    web.run_app(app, **kwargs)
 
 
 def register(app) -> None:

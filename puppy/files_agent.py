@@ -193,9 +193,15 @@ async def _dispatch(request: dict) -> dict:
     if unknown:
         raise FilesAgentError("unknown share_file field: " + sorted(unknown)[0])
 
-    from puppy import db, runner, shared_files, uploads
-    if db.get_session(session_id) is None:
+    from puppy import db, places, runner, shared_files, uploads
+    session = db.get_session(session_id)
+    if session is None:
         raise FilesAgentError("the originating session no longer exists")
+    try:
+        for place in shared_files.named(session, params.get("path")):
+            await places.visit(place)
+    except places.NotAnswering as exc:
+        raise FilesAgentError(str(exc))
     if not runner.hub(session_id).tool_turn_active(turn_id):
         raise FilesAgentError("this tool belongs to a turn that is no longer running")
     if _app is not None and _app.get("puppy_snapshot_busy"):

@@ -489,8 +489,13 @@ async def subprocesses():
         pass
     else:
         raise AssertionError("browser probe was not cancelled")
-    await until(lambda: not Path('/proc/%s/stat' % pid).exists() or
-                Path('/proc/%s/stat' % pid).read_text().split()[2] == 'Z')
+
+    def ended():
+        try:
+            return Path('/proc/%s/stat' % pid).read_text().split()[2] == 'Z'
+        except (FileNotFoundError, ProcessLookupError):
+            return True
+    await until(ended)
     # Stop compares the exact run and no longer paints Stopping after completion.
     driver = SimpleNamespace(key="cancel-fixture")
     record = {"state": "running", "started_at": 123.5, "stop": asyncio.Event()}

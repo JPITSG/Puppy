@@ -57,8 +57,11 @@ irreversible step. A refused cancellation is presented as Finishing with Close,
 not as success. Accepted cancellation keeps the dialog visible until the owner
 reports cleanup complete. Failed cancellation remains visible and retryable.
 A lost HTTP reply triggers best-effort cancellation without claiming rollback.
-Waiting for session, project or sync ownership is also cancellable; a waiter
-never releases another operation's lock. Browser launch failure waits for its
+Waiting for session, project or sync ownership is also cancellable, as is waiting
+to hear whether a [drive answers](silent-drives.md); a waiter
+never releases another operation's lock. When Puppy stops it waits for accepted
+copies, applies and moves as long as their drives answer, and twenty seconds for
+other operations still under way. Browser launch failure waits for its
 closed profile to be removed before completing cancellation.
 
 `operations.report(phase, detail)` says what the current operation is doing, from

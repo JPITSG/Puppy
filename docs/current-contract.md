@@ -125,7 +125,8 @@ still contain a value written before that release.
   `/api/sessions/{sid}/tool-image/{seq}` for a successful recorded native
   `imageView`, `image_view` or `view_image` result. Its matching call owns the
   path; no caller-supplied path is accepted. The original file must still be a
-  readable, regular non-symlink raster image within the tool-image byte limit.
+  readable, regular non-symlink raster image within the tool-image byte limit; a
+  drive that does not answer is 503, which retires no preview.
   File and upload previews use `private, no-store`. Consoles check visible
   previews periodically and on viewer opening, retiring missing images from
   every entry point. No event, database or snapshot shape changes.
@@ -149,6 +150,10 @@ still contain a value written before that release.
   restores the normal color through the existing sessions state topic. Linked
   workspaces report the private execution copy. No new capability, route,
   persisted shape or protocol version; an omitted field remains unknown.
+  A directory on a drive that has not answered for ten seconds is `false`, and
+  `agent_notes` beside it is what the same check last saw there. Routes that need
+  such a directory answer 409 with the reason instead of waiting. See
+  [drives that stop answering](silent-drives.md).
 - Remote spawned jobs always use controller-chosen IDs and ownership leases.
   Use `idle_timeout_s` and `max_runtime_s`; the old `timeout_s` field is rejected.
   With `timeout-settings`, omitted limits use the executing node's settings;
@@ -400,8 +405,8 @@ process and the additive `disks` object: `mounts` (one row per filesystem
 holding Puppy's program or data directory or a session's working directory -
 `mount`, `fs`, `total`/`used`/`available` bytes from `statvfs`, `puppy`,
 `projects` and up to six sample `paths`; or `error` in place of the sizes),
-`stalled` (mount points whose probe did not answer within a second; each is
-probed in its own thread and not again while that probe is out) and
+`stalled` (mount points that did not answer within a second, or are known
+[not to](silent-drives.md), which are not asked) and
 `sampled_at`, cached ten seconds. A console reads a node without `disks` as
 one that does not report disk space. The controller samples already-online backends every four seconds,
 independently of viewers. Its `GET /api/backends/latency` returns cached readings

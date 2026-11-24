@@ -422,11 +422,13 @@ def prepare_change(scheme, https_source, certificate_path, private_key_path,
 
     certificate = private_key = None
     sans = subject_alt_names(hosts)
+    if source == "custom" and cert_raw:
+        # files somebody named, read before anybody has to wait for this
+        certificate = _source_file(cert_raw, "certificate chain")
+        private_key = _source_file(key_raw, "private key")
     with _lock:
         expected = load_state()
-        if source == "custom" and cert_raw:
-            certificate = _source_file(cert_raw, "certificate chain")
-            private_key = _source_file(key_raw, "private key")
+        if certificate is not None:
             _validate_pair_bytes(certificate, private_key)
         elif scheme == "https" and source == "custom":
             if _load_manifest("custom") is None:

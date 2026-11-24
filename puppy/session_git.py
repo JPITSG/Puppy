@@ -60,7 +60,7 @@ from typing import Dict, Optional, Set
 
 from aiohttp import web
 
-from puppy import config, db, operations, workers
+from puppy import config, db, operations, places, workers
 
 log = logging.getLogger("puppy.session_git")
 
@@ -77,6 +77,12 @@ GITFILE_BYTES = 4096
 # Reading the work state runs git; every command is bounded by this, so a
 # repository on a stalled network mount cannot hold the worker for ever.
 GIT_TIMEOUT = 30.0
+# What a command that was killed is given to be gone. One that waits for a
+# drive past any signal is left to end by itself.
+KILL_SECONDS = 5.0
+# Repositories looked at together, and how long one look may take in all.
+LOOKS = 8
+LOOK_SECONDS = 180.0
 # The sheet's actions are bounded by this instead: a push crosses the
 # network, and a reset of a large tree is longer than a status of it.
 ACTION_TIMEOUT = 300.0
@@ -114,12 +120,25 @@ _wake: Optional[asyncio.Event] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _missing = False
 _last_full: Optional[float] = None
+_looks = workers.Lane(LOOKS, waiting=100000)
 
 
 # ---- discovery ----
 
-def _git_dir_at(marker: str) -> bool:
-    """Is ``marker`` (a ``<dir>/.git`` path) a git dir or a gitfile naming one?"""
+class _LeadsTo(Exception):
+    """A repository is kept on another drive, which has to answer first."""
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.path = path
+
+
+def _git_dir_at(marker: str, reached=()) -> bool:
+    """Is ``marker`` (a ``<dir>/.git`` path) a git dir or a gitfile naming one?
+    One that leads to another drive is not followed there unless it is among
+    those that have been ``reached``."""
+    if places.nearby(marker, os.path.dirname(marker)) is None and marker not in reached:
+        raise _LeadsTo(marker)
     try:
         info = os.stat(marker)       # a symlinked .git is followed, as git does
     except OSError:
@@ -140,6 +159,8 @@ def _git_dir_at(marker: str) -> bool:
         return False
     if not os.path.isabs(target):
         target = os.path.join(os.path.dirname(marker), target)
+    if places.nearby(target, os.path.dirname(marker)) is None and target not in reached:
+        raise _LeadsTo(target)
     return os.path.isfile(os.path.join(target, "HEAD"))
 
 
@@ -167,42 +188,49 @@ def _reason(stderr: bytes, returncode: int) -> str:
     return "git exited with status {}".format(returncode)
 
 
-def _git_command(args) -> tuple:
+def _git_command(cwd: str, args) -> tuple:
     """The argv and environment of every git command here: non-interactive
     (no prompt on a terminal there is none of), no optional lock on the
     index (a session's engine may be using it), no file monitor daemon left
     behind, English messages for the record. The process's own git
     environment is not inherited: the session's directory is the
-    repository, whatever this process was started with."""
+    repository, whatever this process was started with. Git goes there
+    itself: a child that enters the directory before it becomes git still
+    holds Puppy's own sockets, for as long as a drive keeps it."""
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", LC_ALL="C")
     for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
                  "GIT_NAMESPACE", "GIT_COMMON_DIR"):
         env.pop(name, None)
-    return ["git", "--no-optional-locks", "-c", "core.fsmonitor=false"] + list(args), env
+    return ["git", "-C", cwd, "--no-optional-locks", "-c", "core.fsmonitor=false"] + list(args), env
 
 
 def _run_git(cwd: str, *args: str) -> "subprocess.CompletedProcess":
     """One read-only git command in ``cwd`` (see _git_command), its whole
     process group ended when GIT_TIMEOUT runs out."""
-    argv, env = _git_command(args)
+    argv, env = _git_command(cwd, args)
     try:
-        process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+        process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    start_new_session=True)
     except FileNotFoundError:
         raise GitRefused("git is not installed on this backend")
     except OSError as exc:
         raise GitRefused("git could not be run: {}".format(exc.strerror or exc)[:REASON_CHARS])
-    with process:
+    try:
+        out, err = process.communicate(timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
         try:
-            out, err = process.communicate(timeout=GIT_TIMEOUT)
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=KILL_SECONDS)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.communicate()
-            raise GitRefused("git did not answer within {:.0f} seconds".format(GIT_TIMEOUT))
+            pass
+        raise GitRefused("git did not answer within {:.0f} seconds".format(GIT_TIMEOUT))
+    finally:
+        for pipe in (process.stdout, process.stderr):
+            pipe.close()
     return subprocess.CompletedProcess(argv, process.returncode, out, err)
 
 
@@ -419,7 +447,7 @@ def _work_fields(cwd: str, listing: bool = False) -> dict:
                 "error": "check failed: {}".format(exc)[:REASON_CHARS]}
 
 
-def inspect(cwd, listing: bool = False) -> dict:
+def inspect(cwd, listing: bool = False, reached=()) -> dict:
     """One check of one directory, run in a thread by the worker and the
     refresh route. The record it returns is what the payload carries: the
     discovery's answer, and for a repository the work state git reports.
@@ -439,7 +467,7 @@ def inspect(cwd, listing: bool = False) -> dict:
     ceilings = _ceilings()
     path = os.path.realpath(root)
     while True:
-        if _git_dir_at(os.path.join(path, ".git")):
+        if _git_dir_at(os.path.join(path, ".git"), reached):
             entry = dict({"repo": True, "checked_at": now}, **_work_fields(root, listing))
             if listing:
                 entry["root"] = path
@@ -498,6 +526,34 @@ def _store(cwd: str, entry: dict) -> bool:
         for key in ("repo", "error", "changes", "unpushed") + DETAIL_KEYS)
 
 
+async def _there(cwd: str, function, *args):
+    """``function(*args)``, which runs git in ``cwd``: a few of these at a
+    time, and none for a drive that does not answer - which a look is told
+    before it takes a place from the others."""
+    await places.visit(cwd)
+    try:
+        async with _looks.hold(wait=LOOK_SECONDS):
+            return await places.ask(cwd, function, *args, limit=LOOK_SECONDS)
+    except workers.Busy:
+        raise places.NotAnswering(cwd, places.SLOW, queued=True) from None
+
+
+async def _look(cwd: str, listing: bool) -> dict:
+    reached = ()
+    try:
+        while True:
+            try:
+                return await _there(cwd, inspect, cwd, listing, *((reached,) if reached else ()))
+            except _LeadsTo as exc:     # a worktree of a repository elsewhere
+                if len(reached) >= 4:
+                    raise
+                await places.visit(exc.path)
+                reached += (exc.path,)
+    except places.NotAnswering as exc:
+        return {"repo": None, "checked_at": time.time(), "error": str(exc)[:REASON_CHARS],
+                "silent": True}
+
+
 async def _check(cwd: str, fresh: bool = False, listing: bool = False) -> dict:
     """One inspection per directory at a time: a pass and a focus refresh
     that meet on the same directory share the thread rather than racing. An
@@ -525,7 +581,7 @@ async def _check(cwd: str, fresh: bool = False, listing: bool = False) -> dict:
         # fresh asks for; whether it lists is judged again
         fresh = False
     if future is None:
-        future = workers.git.run(inspect, cwd, listing)
+        future = asyncio.ensure_future(_look(cwd, listing))
         _inflight[cwd] = future
         if listing:
             _listing.add(cwd)
@@ -614,7 +670,10 @@ async def history(session: dict, skip: int = 0, limit: int = LOG_PAGE) -> dict:
         raise GitRefused("the session has no working directory")
     skip = max(0, int(skip))
     limit = max(1, min(int(limit), LOG_PAGE))
-    return await workers.git.run(_log_page, cwd, skip, limit)
+    try:
+        return await _there(cwd, _log_page, cwd, skip, limit)
+    except places.NotAnswering as exc:
+        raise GitRefused(str(exc)[:REASON_CHARS])
 
 
 # ---- the actions ----
@@ -627,9 +686,9 @@ def _action_git(cwd: str, *args: str) -> "subprocess.CompletedProcess":
     """One git command of the sheet's actions - the reads' environment and
     prefix, ACTION_TIMEOUT, and the process group ended when the console
     cancels the operation as well as at the deadline."""
-    argv, env = _git_command(args)
+    argv, env = _git_command(cwd, args)
     try:
-        return operations.run_process(argv, timeout=ACTION_TIMEOUT, cwd=cwd, env=env,
+        return operations.run_process(argv, timeout=ACTION_TIMEOUT, env=env,
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except FileNotFoundError:
         raise GitRefused("git is not installed on this backend")
@@ -802,6 +861,14 @@ def request(cwd) -> None:
     wake()
 
 
+def _drive_returned() -> None:
+    """A drive answers again, said in some thread: what could not be looked at
+    is looked at now, rather than at the next scheduled pass."""
+    for cwd, entry in list(_records.items()):
+        if entry.get("silent"):
+            request(cwd)
+
+
 def turn_finished(session) -> None:
     """A prompt ended in this session's directory. The turn may have edited,
     committed or pushed, so the mark is looked at again now. A task's
@@ -878,9 +945,11 @@ async def _lifecycle(app):
     _loop = asyncio.get_running_loop()
     _wake = asyncio.Event()
     _task = asyncio.create_task(_run(app), name="puppy-session-git")
+    places.on_return(_drive_returned)
     try:
         yield
     finally:
+        places.off_return(_drive_returned)
         task, _task = _task, None
         _wake = None
         _loop = None

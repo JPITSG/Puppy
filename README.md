@@ -288,6 +288,13 @@ reading anywhere further up is never pulled away from it.
   consoles through the existing session stream, without browser polling.
   An offline backend alone does not mark its paths missing. Linked workspaces
   report availability of the executing backend's synchronized copy.
+  A network drive, removable disk or FUSE mount that stops answering counts as
+  unavailable after ten seconds and holds up nothing but its own sessions: the
+  rest of Puppy never waits for it, and Puppy starts and restarts without it.
+  Whatever needs the drive - the folder picker, agent notes, the Git sheet, a
+  terminal, a task, a move or a backup there - says that it is not answering,
+  and what was refused is never done later. See
+  [drives that stop answering](docs/silent-drives.md).
   While the directory is unavailable the session is paused: its chat box
   keeps the draft but takes no typing or files and says why, Send, Queue
   and the session tools are greyed, **New loop** leaves the `@` list, and
@@ -1428,7 +1435,7 @@ styles, HTML and the initial state use gzip when supported. Compressed scripts
 and styles are reused in server memory until their source changes; authentication
 and the browser's `no-store` policy still apply to every load.
 Long work never takes the threads the pages need: task copies, moves, backups,
-workspace sync, Git checks and searches run in pools of their own. If
+workspace sync, Git checks and searches run in threads of their own. If
 Puppy's event loop or the pages' threads stop answering for ten seconds, it
 writes what every thread is doing to its log and shows a notice. See
 [worker threads](docs/worker-pools.md).

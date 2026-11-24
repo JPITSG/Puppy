@@ -146,10 +146,81 @@ async def main_folder_gone_waits():
                        "Main's working folder is unavailable")
     finally:
         (ROOT / "gone-away").rename(path)
+    # gone halfway, the failure that follows is a wait as well
+    real = tasks._git_run
+
+    def goes(cwd, *args, **options):
+        if str(cwd) == str(path) and args[:2] == ("apply", "--check"):
+            path.rename(ROOT / "gone-away")
+        return real(cwd, *args, **options)
+    try:
+        with patch.object(tasks, "_git_run", goes):
+            await worker_pass()
+        assert tasks.auto_record(sid) is not None, "the switch stays on"
+        assert tasks.public(sid)["auto_apply"]["note"] == "waiting for Main's working folder"
+        assert not any("not applied automatically" in text for text in texts(parent))
+    finally:
+        (ROOT / "gone-away").rename(path)
     await worker_pass()
     assert (path / "b.txt").read_text() == "b from the task\n"
     assert db.get_session(sid) is None and tasks.auto_record(sid) is None
     print("PASS: a task set to apply when done waits for Main's working folder, and applies once it is back")
+
+
+async def one_main_keeps_itself():
+    """One Main kept at its apply - its drive stopped answering halfway - is
+    left to it: the other Mains' tasks apply, it is not begun twice, and it is
+    looked at again once it is over. A Main whose apply fails outright keeps
+    nobody either."""
+    _kept_path, kept = project("kept")
+    path, other = project("unkept")
+    kept_task, _copy = await new_task(kept, "kept")
+    finish(kept_task)
+    first, copy = await new_task(other, "unkept-1")
+    (copy / "first.txt").write_text("first\n")
+    finish(first)
+    real, gate, begun = tasks._auto_apply, asyncio.Event(), []
+
+    async def apply(app, parent_id, sid, resolve):
+        if parent_id != kept:
+            return await real(app, parent_id, sid, resolve)
+        begun.append(sid)
+        await gate.wait()
+        return "skip"
+    with patch.object(tasks, "_auto_apply", apply), patch.object(tasks, "AUTO_PATIENCE", 0.3), \
+            patch.object(tasks, "_auto_wake", asyncio.Event()):
+        await asyncio.wait_for(worker_pass(), 10)
+        await asyncio.wait_for(until(lambda: db.get_session(first) is None), 10)
+        assert (path / "first.txt").exists() and begun == [kept_task]
+        second, copy = await new_task(other, "unkept-2")
+        (copy / "second.txt").write_text("second\n")
+        finish(second)
+        await asyncio.wait_for(worker_pass(), 10)
+        await asyncio.wait_for(until(lambda: db.get_session(second) is None), 10)
+        assert (path / "second.txt").exists() and begun == [kept_task], "it was begun twice"
+        tasks._auto_wake.clear()
+        gate.set()
+        await asyncio.wait_for(tasks._auto_wake.wait(), 5)
+        assert not tasks._auto_parents and not tasks._auto_late
+
+    async def fails(app, parent_id, sid, resolve):
+        if parent_id == kept:
+            raise RuntimeError("the Main that fails")
+        return await real(app, parent_id, sid, resolve)
+    third, copy = await new_task(other, "unkept-3")
+    (copy / "third.txt").write_text("third\n")
+    finish(third)
+    with patch.object(tasks, "_auto_apply", fails):
+        await worker_pass()
+    assert db.get_session(third) is None and not tasks._auto_parents
+    with patch.object(runner.SessionHub, "_start_turn", start):
+        await tasks.remove(kept, kept_task, False)
+    print("PASS: a Main kept at its apply, or failing it, keeps no other Main's tasks")
+
+
+async def until(condition):
+    while not condition():
+        await asyncio.sleep(0.02)
 
 
 async def merged_with_main_drift():
@@ -653,6 +724,7 @@ async def main():
     with patch.object(Driver, "refresh_model_options", AsyncMock()):
         await clean_apply_and_fold()
         await main_folder_gone_waits()
+        await one_main_keeps_itself()
         await merged_with_main_drift()
         await conflict_rounds()
         await rounds_bound_and_switch_off()

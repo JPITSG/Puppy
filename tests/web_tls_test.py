@@ -22,7 +22,7 @@ TEST_ROOT = private_root("web-tls-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 os.environ["PUPPY_SETUP_CODE"] = "web-tls-bootstrap-code"
 
-from puppy import auth, config, db, web_tls  # noqa: E402
+from puppy import auth, bind_verify, config, db, places, web_tls  # noqa: E402
 from puppy.web import build_app  # noqa: E402
 
 assert "PUPPY_SETUP_CODE" not in os.environ
@@ -159,6 +159,33 @@ async def exercise_https(runtime: web_tls.Runtime) -> None:
         await runner.cleanup()
 
 
+async def exercise_silent_pair(identity) -> None:
+    """A certificate on a drive that does not answer is never sent a worker."""
+    visited = []
+
+    async def visit(path, within=None):
+        visited.append(path)
+        if path == identity.private_key:
+            raise places.NotAnswering(path)
+
+    def worker(*_args):
+        raise AssertionError("a worker was sent there")
+    real = places.visit, web_tls.prepare_change
+    places.visit, web_tls.prepare_change = visit, worker
+    try:
+        await bind_verify.prepare(
+            web.Application(), "user", "127.0.0.1", "http://127.0.0.1:10888", 10999,
+            target_scheme="https", https_source="custom",
+            certificate_path=identity.certificate, private_key_path=identity.private_key)
+    except bind_verify.BindVerificationError as exc:
+        assert "not answering" in str(exc)
+    else:
+        raise AssertionError("a drive that does not answer was accepted")
+    finally:
+        places.visit, web_tls.prepare_change = real
+    assert visited == [identity.certificate, identity.private_key]
+
+
 async def main() -> None:
     try:
         config.load()
@@ -197,10 +224,24 @@ async def main() -> None:
 
         # Importing a server-side pair copies it beneath Puppy's private TLS
         # directory; the source paths never become persisted listener state.
-        imported = web_tls.prepare_change(
-            "https", "custom", runtime.identity.certificate,
-            runtime.identity.private_key, ("console.example.test",))
+        # The pair may be on a drive that stops answering: it is read before the
+        # lock that a commit takes on the event loop.
+        source_file, read = web_tls._source_file, []
+
+        def unlocked(value, label):
+            assert not web_tls._lock._is_owned(), "a named file is read under the lock"
+            read.append(label)
+            return source_file(value, label)
+        web_tls._source_file = unlocked
+        try:
+            imported = web_tls.prepare_change(
+                "https", "custom", runtime.identity.certificate,
+                runtime.identity.private_key, ("console.example.test",))
+        finally:
+            web_tls._source_file = source_file
+        assert len(read) == 2
         web_tls.commit_change(imported)
+        await exercise_silent_pair(runtime.identity)
         custom_runtime = web_tls.load_runtime()
         assert custom_runtime.identity.source == "custom"
         assert custom_runtime.identity.fingerprint == runtime.identity.fingerprint

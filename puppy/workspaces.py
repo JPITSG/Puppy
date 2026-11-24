@@ -7,7 +7,6 @@ private workspace namespace, never an ordinary project directory.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from pathlib import Path
@@ -15,7 +14,7 @@ import shutil
 import stat
 import tempfile
 
-from puppy import config, db, operations, workers
+from puppy import config, db, operations, places, workers
 
 log = logging.getLogger("puppy.workspaces")
 
@@ -207,11 +206,19 @@ async def move_session(sid: int, destination) -> dict:
     target = Path(destination).expanduser()
     if not target.is_absolute():
         raise WorkspaceError("Choose an absolute destination path")
-    target = target.parent.resolve() / target.name
+    named = target
+
+    def resolve():
+        real = named.parent.resolve() / named.name
+        return real, real.parent.is_dir()
+    try:
+        target, there = await operations.wait(places.ask(str(named.parent), resolve))
+    except places.NotAnswering as exc:
+        raise WorkspaceError(str(exc)) from exc
     data = Path(config.DATA_DIR).resolve()
     if target == data or data in target.parents or target in data.parents:
         raise WorkspaceError("Choose a destination outside Puppy's data directory")
-    if not target.parent.is_dir():
+    if not there:
         raise WorkspaceError("The destination's parent directory must already exist")
 
     async def move_locked():

@@ -63,7 +63,11 @@ persisted and outside every backup:
   `git_check_minutes` timer (15 minutes by default, Settings → Timers).
 - A directory no session payload has an answer for yet - a new session, a
   moved workspace, a fresh start - wakes the worker, so it is answered within
-  moments rather than at the next scheduled pass.
+  moments rather than at the next scheduled pass. So does one that was
+  unavailable and is back.
+- Each look runs in a thread of its own, eight at a time, once the directory has
+  shown that it answers; one on a [drive that does not](silent-drives.md) records
+  that as its `error`, and a look that outlasts its drive ends with the same.
 - Bringing a session into focus re-checks it at once: the console posts
   `POST /api/sessions/{sid}/git/refresh` when a session other than the one
   focused before is selected in the sidebar, activated as a tab, focused as a

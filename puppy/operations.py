@@ -5,7 +5,7 @@ protocol. Cancellation is cooperative, including in worker threads. Ownership
 and the handler's locks live until cleanup finishes, even if HTTP disconnects.
 """
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import contextvars
 import functools
 import os
@@ -66,6 +66,17 @@ def active():
     return _current.get() is not None
 
 
+@contextmanager
+def owned_by(operation):
+    """What this thread does now belongs to that operation: cancelling it ends
+    the work at its next checkpoint."""
+    token = _current.set(operation)
+    try:
+        yield
+    finally:
+        _current.reset(token)
+
+
 def report(phase, detail=""):
     """Say what the current operation is doing, for its progress dialog.
 
@@ -115,7 +126,8 @@ async def to_thread(function, *args, **kwargs):
     """Never release a lock or delete staging while its worker still writes.
 
     The worker is one of the ``jobs`` pool's: a clone, a copy or an archive
-    takes as long as it takes, and never a thread the pages wait for."""
+    takes as long as it takes, and never a thread the pages wait for. What it
+    does outside Puppy's own storage comes after a ``places.visit`` there."""
     task = workers.jobs.run_in_context(function, *args, **kwargs)
     try:
         return await asyncio.shield(task)
@@ -292,6 +304,7 @@ def register(app):
     app.router.add_delete("/api/operations/{operation_id}", h_control)
 
     async def cleanup(_app):
-        await asyncio.gather(*(row.task for row in _records(app).values()
-                               if row.task is not None), return_exceptions=True)
+        pending = [row.task for row in _records(app).values() if row.task is not None]
+        if pending:     # whatever a drive that does not answer keeps is left to it
+            await asyncio.wait(pending, timeout=workers.LEAVE_SECONDS)
     app.on_cleanup.append(cleanup)

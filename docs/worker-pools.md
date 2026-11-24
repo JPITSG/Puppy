@@ -11,16 +11,14 @@ runtimes, and the default pool is kept for short work.
 ## The pools
 
 `puppy/workers.py` owns every thread pool. A call names the one it runs in:
-`await workers.git.run(inspect, cwd)`.
+`await workers.history.run(report, since, until)`.
 
 | Pool | Threads | What runs there |
 | --- | --- | --- |
 | `io` | 32 | The loop's default pool: aiohttp's own file serving, compression and name lookups, and short reads and writes of Puppy's own storage |
 | `jobs` | 16 | Work that takes as long as it takes: task copies and their Git, project and scratch moves, backups and restores, workspace sync, shared files, storage removal, remote screen pictures |
-| `git` | 8 | Looking at repositories for the sidebar's mark, the Git sheet and its history |
 | `history` | 4 | Reading conversations and the token ledger out of the database |
-| `host` | 4 | CPU, disks, processes, and whether the sessions' folders are there |
-| `files` | 4 | Files outside Puppy's storage, such as a picture a tool named |
+| `host` | 4 | CPU, memory and processes |
 | `search` | 4 | Full-history searches |
 | `index` | 1 | The search index's one writer |
 
@@ -32,9 +30,19 @@ threads as it needs them, and one that is full delays only its own kind of work.
 and takes the caller's context along, so a step can report to its operation
 and be cancelled by it. `Pool.run` does not, which cleanup relies on.
 
+Files and folders outside Puppy's own storage belong to no pool: they may be on a
+drive that stops answering, and a thread that waits for one cannot be taken
+back. Each such touch is a call of `places.ask`, which sends a process of its own
+ahead and then works in a thread of its own - the folder picker, agent notes,
+whether the sessions' folders are there, a look at a repository (eight of those
+at a time), a picture a tool named. Long work in such a folder runs in `jobs`
+once the folder has shown that it answers. See
+[drives that stop answering](silent-drives.md).
+
 Waiting for a process to end takes no thread at all: `workers.child_exit` looks
 every little while. A terminal's process that closes its terminal and lives on
-therefore costs nothing, and Close still ends it.
+therefore costs nothing, and Close still ends it - or, if it waits in the kernel
+past any signal, leaves it to end by itself.
 
 ### What may run in `io`
 
@@ -129,9 +137,11 @@ capability or wire contract changes. Pools and lanes are per process; a
 restart starts with empty ones. The watchdog reports and never acts: it neither
 stops work nor restarts Puppy.
 
-A thread that is inside the operating system - reading a mount that has gone,
-say - cannot be interrupted. The pools confine it to its own kind of work. A few
-short filesystem calls still run on the event loop itself: looking for agent
-notes in a session's folder, and the folder picker. A mount that stops answering
-under one of those holds the loop for as long as it does, and the watchdog's log
-says where.
+A thread that is inside the operating system cannot be interrupted; the pools
+confine it to its own kind of work. Nothing in a pool is the first to find out
+that a drive has stopped answering; only work in `jobs` that was already inside
+the drive is kept by it. Puppy's own storage is read and written on the event loop
+and in `io` as well, and is expected to answer.
+
+When Puppy stops, whatever is still under way fifteen seconds after its last part
+has ended is logged and left behind.

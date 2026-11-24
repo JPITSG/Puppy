@@ -28,7 +28,7 @@ import stat
 import time
 
 from aiohttp import web
-from puppy import config, db, operations, snapshots, workspaces
+from puppy import config, db, operations, places, snapshots, workers, workspaces
 
 log = logging.getLogger("puppy.backup_schedule")
 META_KEY = "backup_schedule"
@@ -47,6 +47,10 @@ LIMIT_DEFAULT_MIB = 512
 LIMIT_MIN_MIB = 16
 LIMIT_MAX_MIB = 16384
 MIB = 1024 * 1024
+# A copy to a network drive takes as long as it takes, and may keep the drive
+# from answering anything else for minutes; neither is a reason to give it up.
+COPY_LIMIT = 24 * 3600.0
+COPY_PATIENCE = 600.0
 
 
 class BackupError(ValueError):
@@ -259,6 +263,7 @@ def stage_saved_archive(result, pending, directory):
                 ARCHIVE_WRITERS["none"](source, output)
                 output.flush()
                 os.fsync(output.fileno())
+                operations.checkpoint()     # given up while the disk was busy
                 info = os.fstat(output.fileno())
             return {"id": pending["id"], "at": time.time(), "directory": directory,
                     "filename": filename, "size": info.st_size, "device": info.st_dev,
@@ -310,9 +315,10 @@ def discard_staged_archive(entry):
         os.close(fd)
 
 
-def rotate(files, keep):
-    retained, errors = list(files), []
-    for entry in files[:-keep]:
+def _remove_older(entries):
+    """One directory's older copies: those that are still there, and why."""
+    retained, errors = list(entries), []
+    for entry in entries:
         try:
             fd = _open_directory(entry["directory"])
             try:
@@ -359,6 +365,54 @@ def remove_saved(entry):
         os.close(fd)
 
 
+def _available(entries):
+    """Which of one directory's saved copies are there to be downloaded."""
+    found = set()
+    for entry in entries:
+        try:
+            os.close(_open_owned(entry))
+            found.add(entry["id"])
+        except (OSError, BackupError):
+            pass
+    return found
+
+
+def _by_directory(entries):
+    directories = {}
+    for entry in entries:
+        directories.setdefault(entry["directory"], []).append(entry)
+    return directories
+
+
+async def _save_copy(result, pending, directory):
+    """Copy the archive into the backup directory, which may be on a drive
+    that stops answering: the copy is given up then, and the thread it keeps
+    removes what it wrote as soon as it can."""
+    attempt = operations.Operation()
+
+    def copy():
+        with operations.owned_by(attempt):
+            return stage_saved_archive(result, pending, directory)
+    try:
+        return await places.ask(directory, copy, limit=COPY_LIMIT, patience=COPY_PATIENCE)
+    finally:
+        attempt.cancel()
+
+
+async def rotate(files, keep):
+    """Every copy but the newest ``keep``, one directory at a time: older ones
+    may be in another, on a drive that does not answer."""
+    older, errors = files[:-keep], []
+    for directory, entries in _by_directory(older).items():
+        try:
+            left, failed = await places.ask(directory, _remove_older, entries)
+        except OSError as exc:
+            left, failed = entries, [str(exc)]
+        errors.extend(failed)
+        older = [entry for entry in older if entry["directory"] != directory or entry in left]
+    return older + files[-keep:], errors
+
+
 class Scheduler:
     def __init__(self, app, exporter, conflict):
         self.app, self.exporter, self.conflict = app, exporter, conflict
@@ -371,17 +425,17 @@ class Scheduler:
         # the deletion finished would write the deleted copy back
         self.deleting = False
 
-    def settings(self, value):
-        if self.running or self.app.get("puppy_snapshot_busy"):
-            raise BackupError("Wait for the current backup or restore to finish")
-        current = _load()
+    async def settings(self, value):
         if not isinstance(value, dict) or "archive_limit_mib" not in value:
             raise BackupError("Use a daily time, an absolute directory, 1–{} copies and an archive limit".format(
                 KEEP_MAX))
         value = dict(value)
         limit = validate_limit(value.pop("archive_limit_mib"))
         cfg = validate_settings(value)
-        validate_destination(cfg["directory"])
+        await places.ask(cfg["directory"], validate_destination, cfg["directory"])
+        if self.running or self.app.get("puppy_snapshot_busy"):
+            raise BackupError("Wait for the current backup or restore to finish")
+        current = _load()
         if current["pending"] and current["pending"]["file"]:
             raise BackupError("Wait for backup publication to finish before changing its settings")
         if cfg["enabled"] and (not current["settings"]["enabled"] or cfg["at"] != current["settings"]["at"]):
@@ -420,7 +474,7 @@ class Scheduler:
             raise LookupError(identity)
         self.deleting = True
         try:
-            outcome = await operations.to_thread(remove_saved, entry)
+            outcome = await places.ask(entry["directory"], remove_saved, entry)
             current = _load()
             current["files"] = [item for item in current["files"] if item["id"] != identity]
             current["history"] = [item for item in current["history"] if item["id"] != identity]
@@ -452,13 +506,12 @@ class Scheduler:
     async def payload(self):
         current = _load()
         files = []
+        found = await asyncio.gather(*(
+            places.ask(directory, _available, entries)
+            for directory, entries in _by_directory(current["files"]).items()), return_exceptions=True)
+        there = set().union(*(ids for ids in found if isinstance(ids, set)))
         for entry in reversed(current["files"]):
-            try:
-                descriptor = await operations.to_thread(_open_owned, entry)
-                os.close(descriptor)
-                available = True
-            except (OSError, BackupError):
-                available = False
+            available = entry["id"] in there
             files.append({"id": entry["id"], "at": entry["at"], "filename": entry["filename"],
                           "directory": entry["directory"], "size": entry["size"], "available": available,
                           "download": "/api/snapshot/saved/" + entry["id"] if available else None})
@@ -495,12 +548,14 @@ class Scheduler:
             if not pending["file"]:
                 if len(current["files"]) >= FILES_MAX:
                     raise BackupError("Resolve the backup rotation failures before saving more copies")
+                await places.visit(cfg["directory"])    # before an archive is made for nothing
                 result = await self.exporter(self.app, {})
-                pending["file"] = await operations.to_thread(stage_saved_archive, result, pending, cfg["directory"])
+                pending["file"] = await _save_copy(result, pending, cfg["directory"])
                 _save(current)
-            await operations.to_thread(publish_archive, pending["file"])
+            await places.ask(pending["file"]["directory"], publish_archive, pending["file"],
+                             patience=COPY_PATIENCE, limit=COPY_PATIENCE)
             current["files"].append(pending["file"])
-            current["files"], errors = await operations.to_thread(rotate, current["files"], cfg["keep"])
+            current["files"], errors = await rotate(current["files"], cfg["keep"])
             if errors:
                 tone, message = "warn", "Backup saved · could not rotate older copies: " + "; ".join(errors)
         except snapshots.SnapshotBusy as exc:
@@ -515,16 +570,15 @@ class Scheduler:
                 # directory fsync failed. Keep that copy discoverable, without
                 # rotating the last known good copies on a partial success.
                 try:
-                    descriptor = await operations.to_thread(_open_owned, entry)
-                    os.close(descriptor)
-                except (OSError, BackupError):
-                    pass
-                else:
+                    published = await places.ask(entry["directory"], _available, [entry])
+                except OSError:
+                    published = ()
+                if published:
                     if entry not in current["files"]:
                         current["files"].append(entry)
                     tone, message = "warn", "Backup saved · could not finish publication: " + str(exc)
                 try:
-                    await operations.to_thread(discard_staged_archive, entry)
+                    await places.ask(entry["directory"], discard_staged_archive, entry)
                 except (OSError, BackupError):
                     log.exception("could not remove backup staging file")
         finally:
@@ -559,10 +613,17 @@ class Scheduler:
         if task:
             # This runs first among the shutdown handlers: a worker that died
             # must be reported here, never end the shutdown of everything else.
-            try:
-                await task  # finish publication before releasing the process
-            except Exception:
-                log.exception("backup scheduler had stopped with an error")
+            # A publication is finished before the process is released, unless
+            # its drive no longer answers: the next start makes it again.
+            while not task.done():
+                await asyncio.wait({task}, timeout=1.0)
+                if not task.done() and places.silent(_load()["settings"]["directory"]):
+                    log.warning("leaving a backup whose directory does not answer")
+                    task.cancel()
+                    await asyncio.wait({task}, timeout=workers.LEAVE_SECONDS)
+                    break
+            if task.done() and not task.cancelled() and task.exception() is not None:
+                log.error("backup scheduler had stopped with an error", exc_info=task.exception())
 
     async def loop(self):
         while not self.stopping:
@@ -587,7 +648,7 @@ async def h_get(request):
 
 async def h_settings(request):
     try:
-        request.app["puppy_backups"].settings(await request.json())
+        await request.app["puppy_backups"].settings(await request.json())
     except (ValueError, OSError) as exc:
         return web.json_response({"error": str(exc)}, status=400, headers=HEADERS)
     return await h_get(request)
@@ -608,12 +669,14 @@ async def h_download(request):
     if entry is None:
         raise web.HTTPNotFound()
     try:
+        await places.visit(entry["directory"])
         descriptor = await operations.to_thread(_open_owned, entry)
     except (OSError, BackupError):
         return web.json_response({"error": "Saved backup is unavailable"}, status=404, headers=HEADERS)
     # Keep the verified descriptor open: rotation may unlink a file while a
     # download is in progress, but can never swap the bytes under this reader.
-    with os.fdopen(descriptor, "rb") as source:
+    source = os.fdopen(descriptor, "rb")
+    try:
         response = web.StreamResponse(headers={**HEADERS, "Content-Type": "application/gzip",
             "Content-Length": str(entry["size"]), "X-Content-Type-Options": "nosniff",
             "Content-Disposition": 'attachment; filename="{}"'.format(entry["filename"])})
@@ -624,6 +687,9 @@ async def h_download(request):
                 break
             await response.write(chunk)
         await response.write_eof()
+    finally:
+        # closing a file may wait for its drive as reading it may
+        await workers.jobs.run(source.close)
     return response
 
 
@@ -638,7 +704,8 @@ async def h_delete(request):
     except BackupError as exc:
         return web.json_response({"error": str(exc)}, status=409, headers=HEADERS)
     except OSError as exc:
-        return web.json_response({"error": "Could not delete the backup · " + (exc.strerror or str(exc))},
+        reason = str(exc) if isinstance(exc, places.NotAnswering) else exc.strerror or str(exc)
+        return web.json_response({"error": "Could not delete the backup · " + reason},
                                  status=409, headers=HEADERS)
     payload = await scheduler.payload()
     payload["deleted"] = outcome

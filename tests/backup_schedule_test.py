@@ -296,7 +296,7 @@ async def main():
                   "line refused, and a clear refused during a backup, export, restore or delete", flush=True)
 
             settings["enabled"] = True
-            scheduler.settings(body())
+            await scheduler.settings(body())
             now = time.time()
             current = backups._load()
             current["next_at"] = now - 3 * 86400
@@ -333,7 +333,7 @@ async def main():
             with patch.object(snapshots, "blockers", return_value=["busy"]):
                 await scheduler.tick(now)
             settings["enabled"] = False
-            scheduler.settings(body())
+            await scheduler.settings(body())
             assert backups._load()["pending"] is None and backups._load()["next_at"] == 0
             print("PASS: daily scheduling, missed-day coalescing, DST/calendar boundaries, disable and restart-safe attempts", flush=True)
 

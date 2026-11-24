@@ -18,15 +18,17 @@ import logging
 import os
 import stat
 import tempfile
+import threading
 
 from aiohttp import web
 
-from puppy import db, session_git, workspace_sync
+from puppy import db, places, session_directories, session_git, workspace_sync
 
 log = logging.getLogger("puppy.agent_notes")
 
 NOTE_FILES = ("AGENTS.md", "CLAUDE.md")
 MAX_NOTE_BYTES = 256 * 1024
+_writing = {}   # folder -> the lock of whoever is writing its notes
 
 
 class NotesError(Exception):
@@ -36,20 +38,43 @@ class NotesError(Exception):
 
 
 def present(cwd) -> list:
-    """Names of the note files that exist as regular files in ``cwd``. Used
-    by every session payload, so it is two stat calls and nothing more."""
+    """Names of the note files a session's folder holds, for every session
+    payload: what the folder monitor last saw there, none before it has
+    looked. Building a payload never waits for a folder."""
+    return session_directories.notes(cwd)
+
+
+def names(cwd, elsewhere=None) -> list:
+    """Names of the note files that exist as regular files in ``cwd``. This
+    goes there, so it is for a thread that has arrived (places). A note that
+    is a link to another drive is not gone to: it is added to ``elsewhere``,
+    or taken for one that is there when nobody goes on to find out."""
     out = []
-    root = str(cwd or "")
-    if not root:
+    if not cwd:
+        return out
+    try:
+        root = os.path.realpath(str(cwd))
+    except ValueError:      # no name a folder could have
         return out
     for name in NOTE_FILES:
+        path = os.path.join(root, name)
         try:
-            info = os.stat(os.path.join(root, name))
-        except OSError:
+            info = os.lstat(path)
+            if stat.S_ISLNK(info.st_mode):
+                found = places.nearby(path, root)
+                if found is None:
+                    (out if elsewhere is None else elsewhere).append(name)
+                    continue
+                info = os.stat(found[0])
+        except (OSError, ValueError):
             continue
         if stat.S_ISREG(info.st_mode):
             out.append(name)
     return out
+
+
+def is_note(path) -> bool:
+    return os.path.isfile(path)
 
 
 def _validated_name(value) -> str:
@@ -116,7 +141,7 @@ def describe(session: dict) -> dict:
         "cwd": workspace_sync.public_cwd(session),
         "max_bytes": MAX_NOTE_BYTES,
         "files": files,
-        "present": present(root),
+        "present": names(root),
         # This additive response object also advertises the shared-file editor
         # to consoles talking to a backend with the original notes API.
         "shared": _shared_state(root, files),
@@ -308,10 +333,36 @@ def _touch_linked(session: dict) -> None:
                         session.get("id"))
 
 
+def _save(session: dict, body: dict) -> None:
+    """One whole change, in the place's own thread."""
+    root = os.path.realpath(_root(session))
+    with _writing.setdefault(root, threading.Lock()):
+        if "shared" in body:
+            write_shared(session, body)
+        else:
+            name = _validated_name(body.get("name"))
+            if body.get("delete") is True:
+                remove(session, name)
+            else:
+                write(session, name, body.get("text"))
+
+
+async def _there(session: dict, function, *args):
+    """The session's folder may be on a drive that does not answer, and so may
+    a note that is a link."""
+    root = session.get("cwd") or ""
+    try:
+        for name in NOTE_FILES:
+            await places.visit(os.path.join(root, name))
+        return await places.ask(root, function, session, *args)
+    except places.NotAnswering as exc:
+        raise NotesError(str(exc), 409)
+
+
 async def h_get(request: web.Request):
     session = _session_or_404(request)
     try:
-        return web.json_response(describe(session))
+        return web.json_response(await _there(session, describe))
     except NotesError as exc:
         return web.json_response({"error": str(exc)}, status=exc.status)
 
@@ -327,18 +378,12 @@ async def h_put(request: web.Request):
         return web.json_response({"error": "invalid agent notes request"},
                                  status=400)
     try:
-        if "shared" in body:
-            write_shared(session, body)
-        else:
-            name = _validated_name(body.get("name"))
-            if body.get("delete") is True:
-                remove(session, name)
-            else:
-                write(session, name, body.get("text"))
+        await _there(session, _save, body)
         _touch_linked(session)
-        payload = describe(session)
+        payload = await _there(session, describe)
     except NotesError as exc:
         return web.json_response({"error": str(exc)}, status=exc.status)
+    session_directories.noted(session["cwd"], payload["present"])
     # a written or removed note is uncommitted work in the directory's repository
     session_git.request(session["cwd"])
     runner.broadcast_sessions()

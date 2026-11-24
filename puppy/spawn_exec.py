@@ -39,7 +39,7 @@ import signal
 import time
 import uuid
 
-from puppy import config, protocol, system_prompts
+from puppy import config, places, protocol, system_prompts
 from puppy.drivers import engine_keys, get_driver
 from puppy.drivers.base import clean_env
 
@@ -299,7 +299,12 @@ async def prepare_request(body: dict) -> dict:
     if not cwd:
         raise SpawnError("spawn requires a working directory")
     cwd = os.path.abspath(cwd)
-    if not os.path.isdir(cwd):
+    try:
+        folder = await places.visit(cwd)
+    except places.NotAnswering as exc:
+        raise SpawnError("working directory unavailable on this node: {}".format(
+            exc)[:400], 409)
+    if not folder.directory:
         raise SpawnError("working directory does not exist on this node: "
                          + cwd[:300])
 
@@ -758,8 +763,9 @@ class SpawnJob:
                                       system_prompt=prompt_text)
             if not isinstance(ctx, dict):
                 ctx = {}
+            argv, cwd = places.launch(await places.visit(self.cwd), argv)
             self.proc = await asyncio.create_subprocess_exec(
-                *argv, cwd=self.cwd, env=env,
+                *argv, cwd=cwd, env=env,
                 stdin=asyncio.subprocess.PIPE if driver.uses_stdin_stream
                 else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
@@ -827,6 +833,8 @@ class SpawnJob:
         except asyncio.CancelledError:
             self._finish(self.cancel_status or "cancelled",
                          self.error or "the spawned agent was cancelled")
+        except places.NotAnswering as exc:
+            self._finish("failed", "working directory unavailable: {}".format(exc))
         except Exception as exc:
             log.exception("spawn %s failed", self.id)
             self._finish("failed", "spawned agent error: {}".format(exc))

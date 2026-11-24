@@ -16,13 +16,13 @@ ROOT = private_root("session-directories-")
 os.environ["PUPPY_DATA"] = str(ROOT / "data")
 
 from aiohttp.test_utils import TestClient, TestServer
-from puppy import config, db, runner, session_directories as directories
+from puppy import agent_notes, config, db, runner, session_directories as directories, session_git
 from puppy.web import build_app
 from backend.puppy_backend.app import build_app as backend_app
 
 
 async def until(predicate):
-    for _ in range(200):
+    for _ in range(1000):
         if predicate():
             return
         await asyncio.sleep(.01)
@@ -85,8 +85,10 @@ async def contract(factory, fallback=False):
 
                 # Unrelated files and content edits generate no events we
                 # care about. Payload reads never stat these directories.
-                await asyncio.sleep(.05)
-                before = len(calls)
+                before = None
+                while not fallback and before != len(calls):    # every pass asked for so far is over
+                    before = len(calls)
+                    await asyncio.sleep(.15)
                 (project / "file").write_text("first")
                 (project / "file").write_text("second")
                 (root / "unrelated").mkdir()
@@ -133,7 +135,7 @@ async def contract(factory, fallback=False):
                 # Cache and watches forget removed sessions on the next pass.
                 for sid in ids:
                     db.delete_session(sid)
-                monitor.wake.set()
+                monitor.again()
                 await until(lambda: not directories._records)
                 assert not monitor.watch.names
         finally:
@@ -142,6 +144,119 @@ async def contract(factory, fallback=False):
             for sid in ids:
                 db.delete_session(sid)
     print("PASS: {} {}".format(factory.__module__, "periodic fallback" if fallback else "filesystem events"))
+
+
+async def seen_there(factory):
+    """What else the list says of a folder is what was last seen there: its
+    agent notes, live, and where it really is. A folder whose check does not
+    come back keeps nobody else's answer, and its own is taken in whenever it
+    comes; a check that outlasts the monitor keeps the watches' descriptor to
+    itself."""
+    root = ROOT / ("seen-" + factory.__module__.replace(".", "-"))
+    project, slow = root / "project", root / "slow"
+    project.mkdir(parents=True)
+    slow.mkdir()
+    (project / "AGENTS.md").write_text("notes")
+    link = root / "alias"
+    link.symlink_to(project, target_is_directory=True)
+    ids = [db.create_session("Seen", "codex", str(p), "", "", "", "default") for p in (project, slow, link)]
+    app = factory()
+    app.on_startup.clear()
+    app.on_shutdown.clear()
+    app.on_cleanup.clear()
+    gate, held, sent, fd = threading.Event(), threading.Event(), [], None
+    original = directories.inspect
+
+    def inspect(cwd):
+        if cwd == str(slow):
+            held.set()
+            gate.wait(20)
+        return original(cwd)
+    # nobody has looked: nothing is known, and asking goes nowhere
+    with patch.object(os, "stat", side_effect=AssertionError("a payload went there")):
+        assert agent_notes.present(str(project)) == []
+        assert directories.real(str(link)) == str(link)
+    directories.noted(str(project), ["CLAUDE.md"])
+    directories.reached(str(link), "/elsewhere")
+    assert agent_notes.present(str(project)) == [] and directories.real(str(link)) == str(link)
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(directories, "CHECK_SECONDS", 3600))
+        stack.enter_context(patch.object(directories, "DEBOUNCE_SECONDS", .01))
+        stack.enter_context(patch.object(directories, "PROMPT_SECONDS", .1))
+        stack.enter_context(patch.object(directories, "inspect", inspect))
+        stack.enter_context(patch.object(runner, "publish_state", side_effect=sent.append))
+        worker = directories._lifecycle(app)
+        await worker.__anext__()
+        monitor = directories._monitor
+        try:
+            await until(lambda: directories.record(str(project)) is True)
+            assert held.is_set() and directories.record(str(slow)) is None
+            row = lambda: {s["id"]: s for s in runner.sessions_payload()["sessions"]}
+            assert row()[ids[0]]["agent_notes"] == row()[ids[2]]["agent_notes"] == ["AGENTS.md"]
+            assert row()[ids[1]]["agent_notes"] == []
+            assert directories.real(str(link)) == str(project)
+            # its notes come and go on the list by themselves, through a link too
+            before = len(sent)
+            (project / "CLAUDE.md").symlink_to("AGENTS.md")
+            await until(lambda: agent_notes.present(str(link)) == ["AGENTS.md", "CLAUDE.md"])
+            assert len(sent) > before
+            (project / "AGENTS.md").unlink()
+            await until(lambda: agent_notes.present(str(project)) == [])
+            # so do other folders, all that time
+            project.rename(root / "moved")
+            await until(lambda: directories.record(str(project)) is False)
+            (root / "moved").rename(project)
+            await until(lambda: directories.record(str(project)) is True)
+            link.unlink()
+            (root / "other").mkdir()
+            link.symlink_to(root / "other")
+            await until(lambda: directories.real(str(link)) == str(root / "other"))
+            assert directories.record(str(slow)) is None and list(monitor.checking) == [str(slow)]
+            # what somebody has just seen there needs no look of its own
+            directories.noted(str(slow), ["AGENTS.md"])
+            directories.reached(str(slow), "/elsewhere")
+            assert agent_notes.present(str(slow)) == ["AGENTS.md"] and directories.real(str(slow)) == "/elsewhere"
+            # it is taken in whenever it comes, and asks nobody anything anew
+            # (nor does anything else now: a suite beside this one may touch
+            # the folders they share)
+            changed, calm, looked = monitor.watch.changed, 0, []
+            monitor.watch.changed = lambda: changed() and False
+            while calm < 20:    # every pass that was asked for is over
+                await asyncio.sleep(.02)
+                calm = 0 if monitor.wanted or monitor.wake.is_set() or len(monitor.checking) > 1 else calm + 1
+            with patch.object(directories, "inspect", lambda cwd: looked.append(cwd) or original(cwd)):
+                gate.set()
+                await until(lambda: directories.record(str(slow)) is True)
+                await asyncio.sleep(.2)
+            assert not looked, looked
+            monitor.watch.changed = changed
+            assert agent_notes.present(str(slow)) == [] and directories.real(str(slow)) == str(slow)
+            # one more that does not come back, across the end
+            gate.clear()
+            held.clear()
+            slow.rename(root / "gone")
+            await until(held.is_set)
+            monitor.watch._borrow()
+            fd = monitor.watch.fd
+        finally:
+            gate.set() if fd is None else None
+            await asyncio.wait_for(worker.aclose(), 5)
+            if fd is not None:
+                assert monitor.watch.fd == -1 and monitor.watch.leftover == fd
+                os.fstat(fd)    # still theirs
+                monitor.watch._return()
+                assert monitor.watch.leftover == -1
+                try:
+                    os.fstat(fd)
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("the watches' descriptor was left open")
+            gate.set()
+            for sid in ids:
+                db.delete_session(sid)
+    print("PASS: {} shows notes and real places as last seen, live, and a check that hangs keeps nobody".format(
+        factory.__module__))
 
 
 async def paused_sessions(factory):
@@ -177,6 +292,8 @@ async def paused_sessions(factory):
         stack.enter_context(patch.object(runner, "publish_state"))
         stack.enter_context(patch.object(session_tasks, "record",
                                          lambda key: {"parent": sid} if key == tid else real_record(key)))
+        looked = []
+        stack.enter_context(patch.object(session_git, "request", looked.append))
         worker = directories._lifecycle(app)
         await worker.__anext__()
         try:
@@ -212,10 +329,13 @@ async def paused_sessions(factory):
             assert hubs[scratch].send_message("make me a folder") == {"queued": False}
             assert started == [(scratch, "make me a folder")]
 
-            # the folder back: the waiting queue moves on by itself
+            # the folder back: the waiting queue moves on by itself, and its
+            # Git mark, which said that it could not be checked, is looked at
+            assert not looked
             (root / "elsewhere").rename(project)
             await until(lambda: (sid, "first") in started)
             assert h.queue == ["second"] and h.status == "running"
+            assert str(project) in looked, looked
             assert runner.folder_paused(db.get_session(sid)) == ""
         finally:
             await worker.aclose()
@@ -237,6 +357,8 @@ async def main():
         await contract(build_app)
         await contract(backend_app)
         await contract(backend_app, fallback=True)
+        await seen_there(build_app)
+        await seen_there(backend_app)
         await paused_sessions(build_app)
         await paused_sessions(backend_app)
     finally:

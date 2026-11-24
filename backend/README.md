@@ -929,9 +929,18 @@ field; that is unknown, not unavailable.
 One in-memory answer per directory is shared by its sessions. Linux inotify
 events on paths, ancestors and symlink targets trigger a debounced check;
 ordinary file edits do not. A 15-second fallback covers network filesystems,
-watch limits and systems without inotify. Filesystem work runs in threads,
-and changed answers publish the existing sessions state topic. There is no
+watch limits and systems without inotify. Each directory is checked on its own
+and off the event loop, so one on a drive that has stopped answering reads
+`false` after ten seconds and delays no other. Changed answers publish the
+existing sessions state topic. There is no
 new route, browser poll, configuration key or persisted state.
+
+A route that needs a directory whose drive does not answer says so instead of
+waiting: `409` with `{"error": "<path> is not answering; its disk or network
+drive may be disconnected"}` from the folder picker, session creation, agent
+notes, the Git history and actions, terminals, spawns, tasks, project moves and
+workspace leases, `503` from tool images, and the same reason in the `error` of
+a Git record. See [drives that stop answering](../docs/silent-drives.md).
 
 ## Agent notes
 
@@ -942,7 +951,8 @@ returns both (existence, text up to 256 KiB, symlink target) and
 atomically - through a symlink to its target, so a `CLAUDE.md -> AGENTS.md`
 layout survives - or removes it with `{"name", "delete": true}`. Only those
 two names are accepted. Every session payload carries the additive
-`agent_notes` list naming which of them exist; the console shows it as the
+`agent_notes` list naming which of them exist, as last seen by the directory
+check above (empty before the first look); the console shows it as the
 mark at the bottom right of each sidebar row, which opens the editor. A note
 edited inside a linked workspace's mirror marks the session dirty so the
 controller carries the change to the authoritative project at its next
@@ -1217,9 +1227,11 @@ and offers Load newer / Jump to latest to return.
 ## Worker threads
 
 Both runtimes keep the event loop's default pool - 32 threads, whatever the
-host - for serving and other short work, and run searches, indexing, Git checks,
-history reads, host readings, foreign files and long jobs in pools of their
-own. A watchdog thread logs what every thread is doing when the event loop or
+host - for serving and other short work, and run searches, indexing, history
+reads, host readings and long jobs in pools of their own. Files and folders
+outside Puppy's own storage are in no pool: a small process of their own (the
+scout) goes ahead, and the work follows in a thread of its own once they have
+answered. A watchdog thread logs what every thread is doing when the event loop or
 the default pool has not answered for ten seconds. A headless node only logs;
 the console's own instance also shows a notice. Nothing is persisted and no
 capability is involved. See [worker threads](../docs/worker-pools.md).
@@ -1327,7 +1339,8 @@ session directory when needed; the URL never takes a filesystem path. It serves
 only regular, non-symlink PNG/JPEG/WebP/GIF files, verified by their bytes and
 bounded by the same 20 MiB limit as returned tool images. These previews read
 the original file, including for old history, and disappear when it is removed
-or becomes unreadable. Work runs off the event loop; no copy or new durable
+or becomes unreadable; a drive that does not answer is `503`, not a missing
+file. Work runs off the event loop; no copy or new durable
 record is created.
 
 The additive `session-shared-files` capability covers files an agent shares

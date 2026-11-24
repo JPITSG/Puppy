@@ -33,6 +33,7 @@ orphan sweep never takes one, because its id is not an upload id.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import errno
 import hashlib
 import logging
@@ -61,6 +62,7 @@ MAX_TURN_SHARES = 20
 MAX_PATH_CHARS = 4096
 MAX_LISTED = 500
 COPY_CHUNK = 1024 * 1024
+LOCK_SECONDS = 20.0
 # Never shared even from a session working there: the kernel's views and the
 # system's own secrets.
 SYSTEM_LOCATIONS = ("/proc", "/sys", "/dev", "/run", "/etc/shadow", "/etc/gshadow",
@@ -165,6 +167,16 @@ def _cli_homes() -> str:
 
 def temp_root() -> str:
     return os.path.realpath(tempfile.gettempdir())
+
+
+def named(session: dict, path) -> list:
+    """What a share is about to touch, as it is named: the session's folder,
+    and the file when it is named at all. Nothing is looked at yet."""
+    cwd = str(session.get("cwd") or "") or "/"
+    if not isinstance(path, str) or not path.strip() or "\x00" in path or \
+            len(path) > MAX_PATH_CHARS:
+        return [cwd]
+    return [cwd, os.path.join(cwd, os.path.expanduser(path.strip()))]
 
 
 def resolve_source(session: dict, path) -> tuple:
@@ -313,13 +325,22 @@ def _digest_fd(fd: int) -> str:
         digest.update(block)
 
 
-def _session_lock(session_id: int) -> threading.Lock:
-    """One share at a time per session, so its caps and reuse hold."""
+@contextmanager
+def _session_lock(session_id: int):
+    """One share at a time per session, so its caps and reuse hold. Those
+    behind one that takes long - its drive may have stopped answering - are
+    told so, rather than each keeping a worker."""
     with _session_locks_guard:
         lock = _session_locks.get(int(session_id))
         if lock is None:
             lock = _session_locks[int(session_id)] = threading.Lock()
-        return lock
+    if not lock.acquire(timeout=LOCK_SECONDS):
+        raise ShareError("another file of this conversation is still being shared; "
+                         "try again in a moment")
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _count_turn(turn: str) -> None:
@@ -340,7 +361,8 @@ def _uncount_turn(turn: str) -> None:
 
 
 def share(session_id: int, path, name=None, turn: str = "") -> dict:
-    """Copy one file into the session's shares; blocking, so run off the loop.
+    """Copy one file into the session's shares; blocking, so run off the loop
+    and only once the places it touches have answered (``named``).
 
     Returns {id, name, size, reused, link}. Sharing the same unchanged file
     under the same name again answers the earlier share instead of a copy.

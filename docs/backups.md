@@ -37,6 +37,13 @@ file identities and sizes can be deleted. Other files in the directory are left
 alone. A rotation failure is a warning alongside the new backup, and older files
 that could not be removed remain listed.
 
+A directory on a [drive that does not answer](silent-drives.md) holds nothing up.
+A backup due then is recorded as failed with the reason, before an archive is
+built for nothing; copies saved there read **Unavailable** until it answers. A
+copy under way when the drive stops answering is given up once the drive has not
+answered for ten minutes, and what was written of it is removed as soon as it
+does. Stopping Puppy does not wait for such a copy: the next start makes it again.
+
 **Recent backups** shows the next scheduled run or current waiting/running state,
 the last 20 outcomes, and any older copies still retained. **Download** links are
 authenticated and can be used repeatedly. Missing or changed files are marked

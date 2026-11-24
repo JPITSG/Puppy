@@ -35,7 +35,7 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from puppy import config, live_websockets, workers
+from puppy import config, live_websockets, places, workers
 from puppy.drivers.base import clean_env
 from puppy.user_paths import service_home
 
@@ -170,6 +170,17 @@ def cli_home(engine_key: str) -> str:
     path = os.path.join(root, engine_key)
     _private_directory(path)
     return path
+
+
+async def _start_folder(cwd: str):
+    """Where a terminal opens: the folder it was asked for, the root when
+    there is none. Found out before the terminal exists, because a drive that
+    does not answer takes a while to say so."""
+    try:
+        place = await places.visit(cwd)
+    except places.NotAnswering as exc:
+        raise TerminalError(str(exc))
+    return place if place.directory else await places.visit("/")
 
 
 def _engine_cli(engine_key: str):
@@ -376,7 +387,7 @@ class TerminalInstance:
         if self.running and not self.viewers:
             self._arm_idle()
 
-    async def start(self) -> None:
+    async def start(self, place) -> None:
         global _active_terminals
         if self.running:
             return
@@ -386,7 +397,9 @@ class TerminalInstance:
                 raise ValueError
         except Exception:
             raise TerminalError("bad terminal command")
-        cwd = self.cwd if os.path.isdir(self.cwd) else "/"
+        # the fork below still holds Puppy's own sockets until it has become
+        # the program, which must not be in a drive's hands
+        argv, cwd = places.launch(place, argv)
         env = clean_env(dict(os.environ))
         env["TERM"] = "xterm-256color"
         if not env.get("HOME"):
@@ -398,7 +411,7 @@ class TerminalInstance:
             raise TerminalError("could not start terminal")
         if pid == 0:
             try:
-                os.chdir(cwd)
+                os.chdir(cwd or "/")
                 os.execvpe(argv[0], argv, env)
             except Exception:
                 os._exit(127)
@@ -416,7 +429,6 @@ class TerminalInstance:
             raise TerminalError("could not initialize terminal")
         self.pid = pid
         self.master = master
-        self.cwd = cwd
         self.running = True
         self.started_at = time.time()
         _active_terminals += 1
@@ -718,6 +730,7 @@ class TerminalRegistry:
         self.instances = {}
         self.bindings = {}
         self.used_ids = set()
+        self.stopped = False
 
     @staticmethod
     def _normalize_owner(owner_session):
@@ -787,15 +800,18 @@ class TerminalRegistry:
         cols = _bounded_int(cols, 80, 10, 500)
         rows = _bounded_int(rows, 24, 4, 300)
         owner_session = self._normalize_owner(owner_session)
+        place = await _start_folder(cwd)
         async with self.lock:
+            if self.stopped:
+                raise TerminalError("Puppy is stopping")
             instance = TerminalInstance(
-                self._new_id(), command, cwd, cols, rows, origin, owner_session,
+                self._new_id(), command, place.path, cols, rows, origin, owner_session,
                 engine=engine, engine_label=engine_label)
             self.instances[instance.terminal_id] = instance
             if owner_session is not None:
                 self._bind_locked(instance, owner_session)
         try:
-            await instance.start()
+            await instance.start(place)
         except Exception:
             async with self.lock:
                 self.instances.pop(instance.terminal_id, None)
@@ -1127,6 +1143,7 @@ async def ws_terminal_instance(request: web.Request):
 
 async def shutdown() -> None:
     if _manager is not None:
+        _manager.stopped = True
         await _manager.stop("Puppy is shutting down")
 
 
@@ -1148,7 +1165,7 @@ def register(app: web.Application) -> None:
         "/api/ws/terminal/{terminal_id:[A-Z0-9]{4}}", ws_terminal_instance)
 
     async def on_startup(_app):
-        manager()
+        manager().stopped = False
         from puppy import terminal_agent
         await terminal_agent.start(_app)
 
@@ -1175,4 +1192,8 @@ async def _reap(pid: int) -> None:
         except ProcessLookupError:
             return
         await asyncio.sleep(wait)
-    await workers.child_exit(pid)
+    if not await workers.child_exit(pid, limit=2.0):
+        # It waits in the kernel, past any signal - for a drive that does not
+        # answer, say. Closing its terminal does not wait with it.
+        log.warning("process %s of a terminal cannot be ended yet", pid)
+        asyncio.ensure_future(workers.child_exit(pid))
