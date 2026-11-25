@@ -3423,6 +3423,13 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 .iv-marks.iv-leaving{opacity:0}
 .iv-marks.iv-anim.iv-leaving{transition-duration:var(--t-fast)}
 .image-viewer.iv-loading .iv-marks,.image-viewer.iv-failed .iv-marks{visibility:hidden}
+/* The original of a picture with marks on it: drawn over it on the same box
+   and transform, so the two compare in place, or simply the marks hidden when
+   they were drawn here. */
+.iv-original{visibility:hidden}
+.image-viewer.iv-swapped .iv-img{visibility:hidden}
+.image-viewer.iv-swapped .iv-original{visibility:visible}
+.image-viewer.iv-original-shown .iv-marks{visibility:hidden}
 /* a tool that is on says so in the bar */
 .iv-bar .iv-tool.on{background:var(--acc-dim);color:var(--acc2)}
 .image-viewer.iv-dragging .iv-img{will-change:transform}
@@ -3440,7 +3447,7 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   color:var(--txt2);font-size:var(--fs-md);
 }
 .iv-status.bad{color:var(--err)}
-.iv-caption,.iv-bar,.image-viewer .modal-close,.iv-nav{
+.iv-caption,.iv-bar,.iv-switch,.image-viewer .modal-close,.iv-nav{
   background:var(--tip-bg);border:1px solid var(--tip-line);box-shadow:var(--tip-shadow);
   -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
 }
@@ -3459,7 +3466,19 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
   overflow-wrap:normal;font-size:var(--fs-md);font-weight:600;text-transform:none;letter-spacing:0;color:var(--txt);
 }
 .iv-meta{flex:none;white-space:nowrap;color:var(--txt3);font-size:var(--fs-xs);font-variant-numeric:tabular-nums}
-.image-viewer .modal-close{width:36px;height:36px;border-radius:50%;color:var(--txt)}
+.image-viewer .modal-close{margin-left:0;width:36px;height:36px;border-radius:50%;color:var(--txt)}
+/* the switch to the original: a word beside the close button - where a longer
+   or shorter name never moves it - lit while the original is what is shown */
+.iv-switch{
+  flex:none;height:36px;padding:0 14px;border-radius:18px;color:var(--txt);
+  font:600 var(--fs-sm)/1 var(--sans);cursor:pointer;
+  transition:color var(--t-base) var(--ease),border-color var(--t-base) var(--ease);
+}
+@media (hover:hover){.iv-switch:hover{border-color:var(--line3)}}
+.iv-switch.on{
+  background-image:linear-gradient(var(--acc-dim),var(--acc-dim));border-color:var(--acc);color:var(--acc2);
+}
+.iv-switch:disabled{opacity:.4;pointer-events:none}
 .iv-nav{position:absolute;z-index:1;top:50%;width:40px;height:40px;margin-top:-20px;border-radius:50%;color:var(--txt)}
 .iv-prev{left:16px}
 .iv-next{right:16px}
@@ -3475,13 +3494,28 @@ details.think .tbody{white-space:pre-wrap;font-style:italic;margin-top:5px}
 /* the controls' corners follow the bar's at its border and padding, so the
    first and the last - a lit tool, the download - keep the same even ring
    of bar around them as the top and bottom, never a corner in its curve */
-.iv-bar .icon-btn,.iv-bar .iv-level{border-radius:calc(var(--r-md) - var(--iv-bar-pad) - 1px)}
+.iv-bar .icon-btn,.iv-bar .iv-level,.iv-bar .iv-revert{border-radius:calc(var(--r-md) - var(--iv-bar-pad) - 1px)}
 .iv-bar .icon-btn{width:34px;height:34px;color:var(--txt)}
 /* the marking tools, colour, undo, copy and download stay on one phone's
    width: there the zoom buttons give their room up (a pinch, a double tap
    and the level still zoom), and on the narrowest the buttons narrow too */
 @media (max-width:440px){.image-viewer.iv-markable .iv-bar :is(.iv-out,.iv-in){display:none}}
 @media (max-width:380px){.iv-bar .icon-btn{width:30px}}
+/* the tools and, while the original is shown, what to do about it take turns
+   in one place as wide as the tools */
+.iv-tools{display:grid}
+.iv-tools>*{grid-area:1/1}
+.iv-toolset{display:flex;align-items:center;gap:2px}
+.iv-revert{
+  visibility:hidden;min-width:0;height:34px;padding:0 8px;border:1px solid var(--line2);
+  background:var(--hov);color:var(--txt);font:600 var(--fs-sm)/1 var(--sans);white-space:nowrap;cursor:pointer;
+  transition:background var(--t-base) var(--ease),border-color var(--t-base) var(--ease);
+}
+.image-viewer.iv-original-shown .iv-toolset{visibility:hidden}
+.image-viewer.iv-original-shown .iv-revert{visibility:visible}
+@media (hover:hover){.iv-revert:hover{background:var(--hov-strong);border-color:var(--line3)}}
+.iv-revert:active{background:var(--hov-strong)}
+.iv-revert:disabled{opacity:.4;pointer-events:none}
 /* the download stands apart from the zoom it is not part of */
 .iv-sep{flex:none;width:1px;height:20px;margin:0 4px;background:var(--tip-line)}
 .iv-level{

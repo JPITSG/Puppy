@@ -19,7 +19,8 @@ own prompt box: `@` offers Main's browsers, terminals, sessions and a spawn,
 images and files can be pasted, dropped or attached with **+**, Enter starts the
 task and Shift+Enter breaks the line. Attached files are copied into the task's
 own storage as it starts, so they belong to the task like any message's
-attachments. Optionally name the task; left unnamed, it takes its prompt's
+attachments; a picture marked up in the box brings the picture under its marks.
+Optionally name the task; left unnamed, it takes its prompt's
 first line, or - with Session titles configured and **Generate a title from
 the task** left on - a title a model writes from the prompt, which replaces
 that first line when it arrives (see [Session titles](session-titles.md)).

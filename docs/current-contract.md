@@ -130,6 +130,15 @@ still contain a value written before that release.
   File and upload previews use `private, no-store`. Consoles check visible
   previews periodically and on viewer opening, retiring missing images from
   every entry point. No event, database or snapshot shape changes.
+- `upload-originals` adds GET `/api/sessions/{sid}/upload/{id}/original` and the
+  optional `X-Puppy-Original` upload header, with which a marked copy names the
+  upload it was drawn on. The node notes it as a private file beside the copy
+  (`o<upload id>`, holding one upload id), keeps that picture for as long as the
+  copy, and answers with its `upload_id`, `path`, `name`, `size` and
+  `content_type`, or `null`; the preview route serves it. The note goes with its
+  copy, travels with a task's adopted attachments and in backups, and is read
+  exactly or refused, never repaired. A node without the capability ignores the
+  header. No event, database or snapshot shape changes.
 - `session-shared-files` adds GET `/api/sessions/{sid}/files` (the session's
   shares, newest first) and GET/HEAD `/api/sessions/{sid}/files/{id}` for one
   file an agent shared through the turn-bound `puppy_files` bridge, served only

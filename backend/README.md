@@ -1331,6 +1331,22 @@ session's uploads under a `t`-prefixed id and names on the `tool_result` event's
 `Cache-Control: private, no-store`; GET and HEAD check the file's current
 availability so consoles can retire previews after deletion.
 
+A node that advertises the additive `upload-originals` capability keeps the
+picture a marked copy was drawn on. The copy's upload names that earlier upload
+of the same session in an `X-Puppy-Original` header, and the node notes it in a
+private file beside the copy (`o` and the copy's upload id, holding the
+original's id; a copy of a copy that was marked already notes the picture under
+both). `GET /api/sessions/{sid}/upload/{upload_id}/original` answers
+`{"original": {upload_id, path, name, size, content_type}}`, or
+`{"original": null}` for a picture that is its own original, and the preview
+route above serves it like any upload. The upload's own answer names the kept
+original's id in `original`, empty when there was none to keep: an upload is
+never refused for the picture under it, only for a header that is not an upload
+id (400). While the marked copy is stored, its original is neither discarded by
+`DELETE` nor taken by the orphan sweep; the note goes with the copy, and both
+with the session. A task that takes over a marked attachment takes its original
+along. Older nodes ignore the header and keep no originals.
+
 The additive `session-tool-image-files` capability provides
 `GET /api/sessions/{sid}/tool-image/{seq}` (and HEAD). The sequence names a
 successful recorded tool result whose matching call is `imageView`, `image_view`

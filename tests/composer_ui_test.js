@@ -1831,6 +1831,9 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
       "the thumbnail carries what the viewer needs to mark it");
     assert.deepEqual(JSON.parse(JSON.stringify(view._marking.marks)), []);
     assert.equal(view._marking.source, "", "an unmarked picture opens as itself");
+    assert.deepEqual(JSON.parse(JSON.stringify(view._stored)), { bid: 0, path: base.path },
+      "and says where the node stores it");
+    assert.equal(calls.fetch[from].init.headers["X-Puppy-Original"], undefined, "a picture of its own names no original");
 
     // the marked copy takes the picture's place at once, and a send waits for it
     assert.equal(b.composer.applyMarks(base, [boxMark]), true);
@@ -1844,6 +1847,7 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     const upload = calls.fetch.at(-1);
     assert.equal(upload.init.headers["Content-Type"], "image/png");
     assert.equal(upload.init.headers["X-Puppy-Filename"], "shot-marked.png");
+    assert.equal(upload.init.headers["X-Puppy-Original"], baseId, "the node is told what the copy was drawn on");
     const markedId = completeUpload(upload);
     await settle();
     assert.equal(b.composer.sendBlocker(), "");
@@ -1853,6 +1857,8 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     const markedView = b.box.querySelector(".attach-view");
     assert.deepEqual(JSON.parse(JSON.stringify(markedView._marking.marks)), [boxMark]);
     assert.equal(markedView._marking.source, base.url, "a marked picture opens as it was, its marks laid over it");
+    assert.equal(markedView._marking.name, "shot.png", "under its own name");
+    assert.equal(markedView._stored.path, base.path, "and an original is asked for by the picture it opens");
 
     // marked again: drawn from the original, the earlier copy spent once the new one lands
     b.composer.applyMarks(marked, [boxMark, arrow]);
@@ -1860,6 +1866,7 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     assert.ok(again.original === base && again.previous === marked);
     await settle();
     assert.deepEqual(rendered.at(-1), { url: base.url, marks: [boxMark, arrow] });
+    assert.equal(calls.fetch.at(-1).init.headers["X-Puppy-Original"], baseId, "the same picture under both");
     completeUpload(calls.fetch.at(-1));
     await settle();
     assert.deepEqual(deletes(apiFrom), [`sessions/10/upload/${markedId}`], "the earlier marked copy goes");
@@ -1893,12 +1900,95 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     await settle();
     const lastId = completeUpload(calls.fetch.at(-1));
     await settle();
+    const removedAt = deletes(apiFrom).length;
     b.box.querySelector(".attach-x").onclick();
     assert.equal(b.composer.attachments.length, 0);
-    assert.ok(deletes(apiFrom).includes(`sessions/10/upload/${baseId}`) &&
-      deletes(apiFrom).includes(`sessions/10/upload/${lastId}`));
+    assert.deepEqual(deletes(apiFrom).slice(removedAt), [`sessions/10/upload/${lastId}`],
+      "the marked copy first: the node keeps a picture while a marked copy of it is stored");
+    await settle();
+    assert.deepEqual(deletes(apiFrom).slice(removedAt),
+      [`sessions/10/upload/${lastId}`, `sessions/10/upload/${baseId}`], "then the picture under it");
 
-    // a sent marked picture lets its original go; a busy box marks nothing
+    // a picture the node kept under a copy marked by another page: the viewer
+    // reverts to it and it takes the copy's place, owned by nobody here
+    const kept = { url: "/api/kept", path: "/srv/data/uploads/10/1700000000000-00000000aa/tunnel.jpg",
+                   name: "tunnel.jpg", size: 12, contentType: "image/jpeg" };
+    const reload = async () => {
+      paste(b.ta);
+      const copy = b.composer.attachments.at(-1);
+      const id = completeUpload(calls.fetch.at(-1));
+      await settle();
+      return [copy, id];
+    };
+    const [copy, copyId] = await reload();
+    let at = deletes(apiFrom).length;
+    assert.equal(b.composer.applyMarks(copy, [], kept), true);
+    const back = b.composer.attachments[0];
+    assert.ok(back.path === kept.path && back.name === "tunnel.jpg" && back.uploadId === "" && copy.removed);
+    assert.ok(b.composer.message().includes(`[image attached: ${kept.path} `), "the message carries the original");
+    assert.deepEqual(deletes(apiFrom).slice(at), [`sessions/10/upload/${copyId}`]);
+    b.composer.removeAttachment(back);
+    await settle();
+    assert.equal(deletes(apiFrom).length, at + 1, "a picture this box never uploaded is not its to delete");
+    // reverted and marked again: the marks go on the original, and the copy it replaces goes once they land
+    const [second, secondId] = await reload();
+    at = deletes(apiFrom).length;
+    assert.equal(b.composer.applyMarks(second, [arrow], kept), true);
+    const remarked = b.composer.attachments[0];
+    assert.ok(remarked.original.path === kept.path && remarked.previous === second && !second.removed);
+    assert.equal(remarked.name, "tunnel-marked.png");
+    await settle();
+    assert.equal(calls.fetch.at(-1).init.headers["X-Puppy-Original"], "1700000000000-00000000aa");
+    completeUpload(calls.fetch.at(-1));
+    await settle();
+    assert.deepEqual(deletes(apiFrom).slice(at), [`sessions/10/upload/${secondId}`]);
+    assert.ok(second.removed && !remarked.original.removed && remarked.previous === null);
+    b.composer.removeAttachment(remarked);
+    await settle();
+    // a copy marked here on top of an earlier page's marks, then reverted to what was under both
+    const [layered] = await reload();
+    b.composer.applyMarks(layered, [boxMark]);
+    await settle();
+    const layeredId = completeUpload(calls.fetch.at(-1));
+    await settle();
+    at = deletes(apiFrom).length;
+    const top = b.composer.attachments[0];
+    assert.equal(b.composer.applyMarks(top, [], kept), true);
+    assert.ok(top.removed && layered.removed && b.composer.attachments[0].path === kept.path);
+    await settle();
+    assert.deepEqual(deletes(apiFrom).slice(at),
+      [`sessions/10/upload/${layeredId}`, `sessions/10/upload/${layered.uploadId}`], "both marked copies go, in that order");
+    b.composer.removeAttachment(b.composer.attachments[0]);
+
+    // let go while a new marked copy is on its way: the one it replaces goes, then the picture under both
+    const [held, heldId] = await reload();
+    b.composer.applyMarks(held, [boxMark]);
+    await settle();
+    const heldCopy = completeUpload(calls.fetch.at(-1));
+    await settle();
+    b.composer.applyMarks(b.composer.attachments[0], [boxMark, arrow]);
+    await settle();
+    at = deletes(apiFrom).length;
+    b.composer.removeAttachment(b.composer.attachments[0]);
+    assert.deepEqual(deletes(apiFrom).slice(at), [`sessions/10/upload/${heldCopy}`]);
+    await settle();
+    assert.deepEqual(deletes(apiFrom).slice(at), [`sessions/10/upload/${heldCopy}`, `sessions/10/upload/${heldId}`],
+      "the picture last, when no copy of it is stored");
+
+    // a picture of another conversation, recalled here, is not this node session's to name
+    b.composer.replace("[image attached: /srv/data/uploads/77/1700000000000-00000000bb/other.png — view it with your image/file tools]");
+    const foreign = b.composer.attachments[0];
+    assert.equal(foreign.path, "/srv/data/uploads/77/1700000000000-00000000bb/other.png");
+    b.composer.applyMarks(foreign, [boxMark]);
+    await settle();
+    assert.equal(calls.fetch.at(-1).init.headers["X-Puppy-Original"], undefined);
+    completeUpload(calls.fetch.at(-1));
+    await settle();
+    b.composer.removeAttachment(b.composer.attachments[0]);
+    await settle();
+    b.composer.replace("");
+
+    // a sent marked picture leaves its original with the node, to look at; a busy box marks nothing
     paste(b.ta);
     const next = b.composer.attachments[0];
     const nextId = completeUpload(calls.fetch.at(-1));
@@ -1908,7 +1998,9 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     completeUpload(calls.fetch.at(-1));
     await settle();
     b.composer.take();
-    assert.ok(deletes(apiFrom).includes(`sessions/10/upload/${nextId}`), "the unsent original goes with the send");
+    await settle();
+    assert.ok(next.removed && !deletes(apiFrom).includes(`sessions/10/upload/${nextId}`),
+      "the box lets it go and the node keeps it");
     paste(b.ta);
     completeUpload(calls.fetch.at(-1));
     await settle();
@@ -1917,11 +2009,27 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
     assert.equal(b.composer.applyMarks(b.composer.attachments[0], [boxMark]), false);
     b.composer.setBusy(false);
     b.composer.destroy();
+    // a cancelled dialog lets go of everything, the marked copy before its picture
+    const cancelled = makeBox({ directory: () => null });
+    paste(cancelled.ta);
+    const cancelledId = completeUpload(calls.fetch.at(-1));
+    await settle();
+    cancelled.composer.applyMarks(cancelled.composer.attachments[0], [boxMark]);
+    await settle();
+    const cancelledCopy = completeUpload(calls.fetch.at(-1));
+    await settle();
+    at = deletes(apiFrom).length;
+    cancelled.composer.destroy({ discardUploads: true });
+    assert.deepEqual(deletes(apiFrom).slice(at), [`sessions/10/upload/${cancelledCopy}`]);
+    await settle();
+    assert.deepEqual(deletes(apiFrom).slice(at),
+      [`sessions/10/upload/${cancelledCopy}`, `sessions/10/upload/${cancelledId}`]);
     delete context.imageWithMarks;
   }
   console.log("PASS: marks on a waiting picture: a marked PNG takes its place at once and a send waits for it, the " +
-              "picture under the marks is kept to mark again or to come back, failures leave the box as it was, " +
-              "and removing or sending lets the kept picture go");
+              "picture under the marks is kept to mark again or to come back - the node's own where an earlier page " +
+              "drew them - failures leave the box as it was, removing lets the copy and then the kept picture go, " +
+              "and sending leaves it with the node");
 
   /* An AVIF - a picture no engine reads - is drawn by the box and goes to
      the node as a PNG (a JPEG where the PNG would pass the upload limit),

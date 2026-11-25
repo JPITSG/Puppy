@@ -591,6 +591,20 @@ the message waits while it uploads. The prompt box keeps the unmarked picture,
 so opening the copy again shows the marks to change, and undoing them all
 brings the original back.
 
+The **Original** button beside the close button, or the `O` key, shows a marked
+picture as it was before its marks - in the same place and at the same zoom, so
+the two compare at a press - and shows the marks again on the next one. Its
+download and copy follow what is shown: with the marks in view they carry them.
+While the picture still waits in a prompt box, the marking tools then make room
+for **Revert to original**, which takes every mark off at once; undo brings
+them back until the viewer closes.
+
+The backend keeps the unmarked picture for as long as it keeps the marked copy,
+so the original can be shown and put back after a reload or in another browser.
+A marked picture opened from the chat history has the same **Original** button,
+including one that went to a task with its first prompt. Pictures marked by an
+earlier version kept no original, so in the chat history they have no button.
+
 Pictures a tool hands back to the engine open the same way: Claude Code reading
 an image or a screenshot, the managed browser's and remote screens' captures, and the images
 in Codex's MCP results (an image in an OpenCode tool update is read the same
@@ -1543,6 +1557,7 @@ node tests/task_fold_ui_test.js      # task removal and the folded archive card
 node tests/status_bar_ui_test.js     # the status bar: one session setting, followed by every task tab
 node tests/tool_result_ui_test.js    # tool results folded into their call's card
 python3 tests/tool_images_test.py    # tool pictures: the reader, each driver, storage, both runtimes
+python3 tests/upload_originals_test.py # the picture under a marked copy: storage, sweeps, tasks, both runtimes
 node tests/image_viewer_ui_test.js   # the image viewer, and the pictures on tool cards
 python3 tests/shared_files_test.py   # files an agent shares: what may be shared, storage, routes, the relay, the tool
 node tests/shared_files_ui_test.js   # shared-file links in answers and on the share tool's card

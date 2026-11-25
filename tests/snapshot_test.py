@@ -406,6 +406,8 @@ async def main() -> None:
                   "1700000000000-abcdef0123" / "image.png")
         upload.parent.mkdir(parents=True)
         upload.write_bytes(b"saved-upload")
+        # a marked copy's note names the picture it was drawn on, beside it
+        uploads._write_original(directory_id, "1700000000001-abcdef0124", "1700000000000-abcdef0123")
         tls_dir = Path(config.DATA_DIR) / "tls"
         tls_dir.mkdir(mode=0o700)
         tls_key = tls_dir / "identity.key"
@@ -1017,6 +1019,9 @@ async def main() -> None:
         restored_upload = (Path(config.DATA_DIR) / "uploads" / str(directory_id) /
                            "1700000000000-abcdef0123" / "image.png")
         assert restored_upload.read_bytes() == b"saved-upload"
+        restored_note = restored_upload.parent.parent / "o1700000000001-abcdef0124"
+        assert restored_note.stat().st_mode & 0o777 == 0o600
+        assert uploads._original_file(directory_id, "1700000000001-abcdef0124") == restored_upload
         assert tls_key.read_bytes() == b"saved-private-tls-material"
         assert tls_key.stat().st_mode & 0o777 == 0o600
         assert str(Path(config.DATA_DIR).resolve() / "uploads") in \

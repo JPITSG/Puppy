@@ -28,6 +28,14 @@ SIZE_HEADER = "X-Puppy-Size"
 STREAM_CHUNK_BYTES = 256 * 1024
 MAX_FILENAME_BYTES = 180
 UPLOAD_ID = re.compile(r"^\d{13}-[0-9a-f]{10}$")
+# An id anywhere in a text, overlapping ones included: what a sweep keeps.
+UPLOAD_ID_MENTION = re.compile(r"(?=(\d{13}-[0-9a-f]{10}))")
+# A copy of a picture with marks on it names the upload it was drawn on in this
+# header, and the node notes it beside the copy: a file called "o" and the
+# copy's id, holding the original's id. The original stays for as long as the
+# copy does, so it can be shown and put back in any browser, after any reload.
+ORIGINAL_HEADER = "X-Puppy-Original"
+ORIGINAL_NOTE = re.compile(r"^o(\d{13}-[0-9a-f]{10})$")
 # Images a tool gave back to the model live beside the session's uploads under
 # an id of their own, a "t" and an upload id: see store_tool_images.
 TOOL_IMAGE_ID = re.compile(r"^t\d{13}-[0-9a-f]{10}$")
@@ -124,6 +132,22 @@ def _upload_session_ids(root: Path) -> list:
     return ids
 
 
+def _mentioned_uploads(session_id: int) -> set:
+    """Every upload id a session's prompts mention, sent or still queued.
+
+    One read of the prompts, however many files a session has: asking for
+    each of them in turn goes through the whole history every time.
+    """
+    texts = [row["payload"] for row in db.query(
+        "SELECT payload FROM events WHERE session_id=? AND kind='user'", (int(session_id),))]
+    texts.extend(row["value"] for row in db.query(
+        "SELECT value FROM meta WHERE key=?", ("session_queue.{}".format(int(session_id)),)))
+    found = set()
+    for text in texts:
+        found.update(UPLOAD_ID_MENTION.findall(text))
+    return found
+
+
 def sweep_orphans(session_id=None) -> int:
     """Remove upload directories no durable text names any more.
 
@@ -132,7 +156,8 @@ def sweep_orphans(session_id=None) -> int:
     to again is reached. Every uncertainty retains the file: keeping private
     bytes is cheaper than deleting one a message still names. A session whose
     row is gone has no referencing text at all, so this also recovers the
-    storage of a delete that failed part way.
+    storage of a delete that failed part way. The picture under a marked copy
+    stays for as long as the copy does, and the note that says so goes with it.
     """
     root = Path(config.DATA_DIR).resolve() / "uploads"
     if not root.is_dir():
@@ -146,33 +171,52 @@ def sweep_orphans(session_id=None) -> int:
             children = sorted(session_root.iterdir())
         except OSError:
             continue
-        draft = ""
-        candidates = []
+        present, candidates, notes = set(), [], {}
         for child in children:
-            if not UPLOAD_ID.fullmatch(child.name) or child.is_symlink() or \
-                    not child.is_dir():
+            note = ORIGINAL_NOTE.fullmatch(child.name)
+            if note is None and (not UPLOAD_ID.fullmatch(child.name) or child.is_symlink() or
+                                 not child.is_dir()):
                 continue
             try:
-                if now - child.lstat().st_mtime < ORPHAN_AGE_SECONDS:
-                    continue
+                old = now - child.lstat().st_mtime >= ORPHAN_AGE_SECONDS
             except OSError:
                 continue
-            candidates.append(child)
-        if not candidates:
+            if note is not None:
+                notes[note.group(1)] = (child, old)
+                continue
+            present.add(child.name)
+            if old:
+                candidates.append(child)
+        # a note whose marked copy is gone says nothing any more
+        spent = [path for upload_id, (path, old) in notes.items()
+                 if old and upload_id not in present]
+        if not candidates and not spent:
             continue
         try:
-            draft = str(db.get_session_draft(sid).get("text") or "")
+            named = _attachment_upload_ids(sid, str(db.get_session_draft(sid).get("text") or ""))
+            named |= _mentioned_uploads(sid)
+            originals = {upload_id: _read_original(path)
+                         for upload_id, (path, _old) in notes.items() if upload_id in present}
         except Exception as exc:
             log.warning("upload sweep skipped session %s: %s", sid, exc)
             continue
+        kept = (present - {child.name for child in candidates}) | named
+        kept |= {original for upload_id, original in originals.items() if upload_id in kept}
         for child in candidates:
+            if child.name in kept:
+                continue
             try:
-                if upload_is_referenced(sid, child.name, (draft,)):
-                    continue
                 shutil.rmtree(str(child))
                 removed += 1
+                if child.name in notes:
+                    spent.append(notes[child.name][0])
             except Exception as exc:
                 log.warning("stale upload retained: %s", exc)
+        for path in spent:
+            try:
+                path.unlink()
+            except OSError as exc:
+                log.warning("stale upload note retained: %s", exc)
     if removed:
         log.info("discarded %s stranded upload(s)", removed)
     return removed
@@ -249,6 +293,123 @@ def _validated_upload_file(session_id: int, upload_id: str) -> Path:
     return children[0]
 
 
+def _session_root(session_id: int) -> Path:
+    return Path(config.DATA_DIR).resolve() / "uploads" / str(int(session_id))
+
+
+def _read_original(note: Path) -> str:
+    """The upload id a note holds; OSError when it is not one Puppy wrote."""
+    fd = os.open(str(note), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) |
+                 getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        uid_getter = getattr(os, "geteuid", None) or getattr(os, "getuid")
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != int(uid_getter()):
+            raise OSError("upload note failed safety validation")
+        value = os.read(fd, 64).decode("ascii", "replace")   # an id and nothing else
+    finally:
+        os.close(fd)
+    if not UPLOAD_ID.fullmatch(value):
+        raise OSError("upload note failed safety validation")
+    return value
+
+
+def _noted_original(session_id: int, upload_id: str) -> str:
+    """The upload a marked copy was drawn on, or "" for any other upload."""
+    try:
+        return _read_original(_session_root(session_id) / ("o" + upload_id))
+    except FileNotFoundError:
+        return ""
+
+
+def _write_original(session_id: int, upload_id: str, original: str) -> None:
+    root = _session_root(session_id)
+    partial = root / (".o{}.part".format(upload_id))
+    try:
+        fd = os.open(str(partial), os.O_WRONLY | os.O_CREAT | os.O_TRUNC |
+                     getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(original.encode("ascii"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(partial), str(root / ("o" + upload_id)))
+    except BaseException:
+        try:
+            partial.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _forget_original(session_id: int, upload_id: str) -> None:
+    """Drop a removed upload's own note; the sweep takes one left behind."""
+    try:
+        (_session_root(session_id) / ("o" + upload_id)).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning("session %s upload note %s retained: %s", session_id, upload_id, exc)
+
+
+def _is_original(session_id: int, upload_id: str) -> bool:
+    """Whether a marked copy still stored here was drawn on this upload. A
+    note that cannot be read may name any upload, so it counts."""
+    root = _session_root(session_id)
+    try:
+        names = set(os.listdir(str(root)))
+    except FileNotFoundError:
+        return False
+    for name in names:
+        note = ORIGINAL_NOTE.fullmatch(name)
+        if note is None or note.group(1) not in names:
+            continue
+        try:
+            if _read_original(root / name) == upload_id:
+                return True
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+    return False
+
+
+def _original_file(session_id: int, upload_id: str) -> Path:
+    """The picture under a marked copy, or FileNotFoundError."""
+    original = _noted_original(session_id, upload_id)
+    if not original:
+        raise FileNotFoundError(upload_id)
+    target = _validated_upload_file(session_id, original)
+    if target.suffix.lower() not in PREVIEW_CONTENT_TYPES:
+        raise FileNotFoundError(upload_id)
+    return target
+
+
+def _touch_original(session_id: int, original: str) -> None:
+    """An upload being marked is in use again: no sweep takes it meanwhile."""
+    try:
+        os.utime(str(_validated_upload_file(session_id, original).parent))
+    except OSError:
+        pass
+
+
+def _remember_original(session_id: int, upload_id: str, original: str) -> str:
+    """Note that ``upload_id`` is ``original`` with marks on it, and say so.
+
+    Marks on a copy that was marked already lead back to the picture under
+    both. Never raises: a marked copy is worth having without its original.
+    """
+    try:
+        original = _noted_original(session_id, original) or original
+        target = _validated_upload_file(session_id, original)
+        if target.suffix.lower() not in PREVIEW_CONTENT_TYPES:
+            raise OSError("the original is not a picture")
+        _write_original(session_id, upload_id, original)
+        return original
+    except OSError as exc:
+        log.warning("session %s upload %s keeps no original: %s", session_id, upload_id, exc)
+        return ""
+
+
 def _attachment_upload_ids(session_id: int, text: str) -> set:
     """Upload ids named by well-formed attachment marker lines in ``text``."""
     if not isinstance(text, str) or not text:
@@ -306,7 +467,8 @@ def discard_abandoned(session_id: int, abandoned, retained=()) -> int:
             # The random id is JSON-safe and appears unchanged inside a user
             # event payload. A false positive only retains a file; it can never
             # authorize deletion of a different upload.
-            referenced = upload_is_referenced(session_id, upload_id)
+            referenced = upload_is_referenced(session_id, upload_id) or \
+                _is_original(session_id, upload_id)
         except Exception as exc:
             log.warning("could not check session %s upload %s references: %s",
                         session_id, upload_id, exc)
@@ -324,6 +486,7 @@ def discard_abandoned(session_id: int, abandoned, retained=()) -> int:
         try:
             target.unlink()
             target.parent.rmdir()
+            _forget_original(session_id, upload_id)
             removed += 1
             log.info("discarded abandoned session %s upload %s", session_id, upload_id)
         except OSError as exc:
@@ -406,27 +569,49 @@ def adopt_attachments(source_id: int, target_id: int, text: str) -> str:
     root = Path(config.DATA_DIR).resolve() / "uploads"
     target_root = root / str(target_id)
     copied = []
+
+    def copy(source: Path, upload_id: str) -> None:
+        destination = target_root / upload_id
+        destination.mkdir(mode=0o700)
+        copied.append(destination)
+        target = destination / source.name
+        with source.open("rb") as reader, target.open("xb") as writer:
+            os.chmod(str(target), 0o600)
+            operations.copyfileobj(reader, writer, STREAM_CHUNK_BYTES)
+            writer.flush()
+            os.fsync(writer.fileno())
+
+    def discard(directories) -> None:
+        for directory in directories:
+            shutil.rmtree(str(directory), ignore_errors=True)
+            _forget_original(target_id, directory.name)
+
     try:
         for upload_id in sorted(upload_ids):
             source = _staged_file(source_id, upload_id)
             _private_directory(root)
             _private_directory(target_root)
-            destination = target_root / upload_id
-            destination.mkdir(mode=0o700)
-            copied.append(destination)
-            target = destination / source.name
-            with source.open("rb") as reader, target.open("xb") as writer:
-                os.chmod(str(target), 0o600)
-                operations.copyfileobj(reader, writer, STREAM_CHUNK_BYTES)
-                writer.flush()
-                os.fsync(writer.fileno())
+            copy(source, upload_id)
+        # The picture under a marked copy comes along with it. The message
+        # needs the marked copy alone, so one that cannot come is left out.
+        for upload_id in sorted(upload_ids):
+            before = len(copied)
+            try:
+                source = _original_file(source_id, upload_id)
+                if not (target_root / source.parent.name).exists():
+                    copy(source, source.parent.name)
+                _write_original(target_id, upload_id, source.parent.name)
+            except OSError as exc:
+                discard(copied[before:])
+                del copied[before:]
+                if not isinstance(exc, FileNotFoundError):
+                    log.warning("session %s took upload %s over without its original: %s",
+                                target_id, upload_id, exc)
     except (AttachmentError, operations.Cancelled):
-        for directory in copied:
-            shutil.rmtree(str(directory), ignore_errors=True)
+        discard(copied)
         raise
     except OSError as exc:
-        for directory in copied:
-            shutil.rmtree(str(directory), ignore_errors=True)
+        discard(copied)
         log.warning("session %s could not adopt session %s uploads: %s",
                     target_id, source_id, exc)
         raise AttachmentError("An attached file could not be copied into the task")
@@ -561,6 +746,9 @@ async def h_session_upload(request: web.Request):
                 policy["max_file_size_mb"]), "uploads": policy,
         }, status=413)
 
+    original = request.headers.get(ORIGINAL_HEADER, "")
+    if original and not UPLOAD_ID.fullmatch(original):
+        return web.json_response({"error": "invalid original upload id"}, status=400)
     filename = _safe_filename(request.headers.get(FILENAME_HEADER, "file"))
     content_type = (request.headers.get("Content-Type") or "application/octet-stream")
     content_type = content_type.split(";", 1)[0].strip().lower()[:120] or \
@@ -570,6 +758,8 @@ async def h_session_upload(request: web.Request):
     _active_uploads += 1
     _state_changed()
     try:
+        if original:
+            _touch_original(session_id, original)
         directory = _new_upload_directory(session_id)
         final_path = directory / filename
         partial = directory / ("." + filename + ".part")
@@ -592,6 +782,8 @@ async def h_session_upload(request: web.Request):
             os.fsync(output.fileno())
         os.replace(str(partial), str(final_path))
         partial = None
+        if original:
+            original = _remember_original(session_id, directory.name, original)
         log.info("session %s file uploaded: %s (%d bytes, %s)",
                  session_id, final_path, size, content_type)
         return web.json_response({
@@ -601,6 +793,7 @@ async def h_session_upload(request: web.Request):
             "name": filename,
             "size": size,
             "content_type": content_type,
+            "original": original,
             "uploads": policy,
         })
     except web.HTTPException:
@@ -645,7 +838,8 @@ async def h_session_upload_delete(request: web.Request):
         retained.extend(item for item in hub.queue + hub.held if isinstance(item, str))
         if hub._active_prompt_text:
             retained.append(hub._active_prompt_text)
-        if upload_is_referenced(session_id, upload_id, retained):
+        if upload_is_referenced(session_id, upload_id, retained) or \
+                _is_original(session_id, upload_id):
             return web.json_response({"ok": True, "removed": False, "referenced": True})
     except Exception as exc:
         log.warning("session %s upload %s reference check failed: %s",
@@ -661,6 +855,7 @@ async def h_session_upload_delete(request: web.Request):
     try:
         target.unlink()
         target.parent.rmdir()
+        _forget_original(session_id, upload_id)
     except OSError as exc:
         log.warning("session %s upload %s could not be discarded: %s",
                     session_id, upload_id, exc)
@@ -703,6 +898,33 @@ async def h_session_upload_preview(request: web.Request):
         # The bytes may have been removed since the last preview.
         "Cache-Control": "private, no-store",
     })
+
+
+async def h_session_upload_original(request: web.Request):
+    """Say which picture a marked copy was drawn on, if one was kept. The
+    preview route above serves it: it is an upload like any other."""
+    session_id = int(request.match_info["sid"])
+    if db.get_session(session_id) is None:
+        return web.json_response({"error": "session not found"}, status=404)
+    upload_id = request.match_info.get("upload_id", "")
+    if not UPLOAD_ID.fullmatch(upload_id):
+        return web.json_response({"error": "invalid upload id"}, status=400)
+    original = None
+    try:
+        target = _original_file(session_id, upload_id)
+        original = {
+            "upload_id": target.parent.name, "path": str(target), "name": target.name,
+            "size": target.lstat().st_size,
+            "content_type": PREVIEW_CONTENT_TYPES[target.suffix.lower()],
+        }
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning("session %s upload %s failed original validation: %s",
+                    session_id, upload_id, exc)
+        return web.json_response({"error": "upload storage failed safety validation"},
+                                 status=409)
+    return web.json_response({"original": original}, headers={"Cache-Control": "no-store"})
 
 
 def _tool_image_path(session_id: int, seq: int) -> Path:
@@ -790,6 +1012,9 @@ def register(app: web.Application) -> None:
     app.router.add_get(
         "/api/sessions/{sid:\\d+}/upload/{upload_id:t?[0-9]{13}-[0-9a-f]{10}}",
         h_session_upload_preview)
+    app.router.add_get(
+        "/api/sessions/{sid:\\d+}/upload/{upload_id:[0-9]{13}-[0-9a-f]{10}}/original",
+        h_session_upload_original)
     app.router.add_delete(
         "/api/sessions/{sid:\\d+}/upload/{upload_id:[0-9]{13}-[0-9a-f]{10}}",
         h_session_upload_delete)

@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 import shlex
 import shutil
+import stat
 import sys
 import time
 from types import SimpleNamespace
@@ -2310,7 +2311,7 @@ async def image_mark_checks(instance):
     shots = os.environ.get("MARK_SHOT")
     measure = """(() => {
         const v = imageViewerOpen, bar = v.bar, b = bar.getBoundingClientRect(), cs = getComputedStyle(bar);
-        const controls = [...bar.children].filter(n => !n.classList.contains('iv-sep') &&
+        const controls = [...bar.querySelectorAll('.icon-btn,.iv-level')].filter(n =>
             getComputedStyle(n).display !== 'none');
         const f = controls[0].getBoundingClientRect(), l = controls[controls.length - 1].getBoundingClientRect();
         return {first: controls[0].className, last: controls[controls.length - 1].className,
@@ -2508,6 +2509,300 @@ async def image_mark_checks(instance):
           "opens over the viewer with Escape closing it alone, and real drags draw a red box and, after a real "
           "pick of blue, a blue line - blue in the marked copy - handed to the prompt box, desktop and phones in "
           "both themes", flush=True)
+
+
+async def image_original_checks(instance, sid):
+    """A marked picture is one press from how it was before its marks, and one
+    more from having it back, while it waits and once it is sent. In real
+    layout and through the node's own storage: a picture picked through the
+    file input, a real drag drawing a box, a real click on Original hiding it
+    in place - the picture, the bar and its controls where they were, the
+    tools' place holding Revert to original - and another bringing it back;
+    Revert and the undo of it; the marked copy stored with its original. After
+    a reload, with the page's own memory of the marks gone, the same switch
+    shows the node's original over the copy at the same box and zoom, and
+    Revert puts that picture back in the message. A copy then sent shows its
+    original from the transcript with nothing to revert and downloads it under
+    its own name. The head keeps its name, the switch and the close button
+    apart on a desktop and phones in both themes. ORIGINAL_SHOT names a
+    directory to save what each looks like."""
+    page = instance.page_session
+    shots = os.environ.get("ORIGINAL_SHOT")
+    lane = ROOT / "original-lane"
+    lane.mkdir(parents=True, exist_ok=True)
+    plain = (223, 230, 238)
+    source = lane / "shelf photo.png"
+    source.write_bytes(demo_png(900, 600, plain))
+
+    async def mouse(kind, x, y, buttons=0):
+        await instance.call("Input.dispatchMouseEvent", {
+            "type": kind, "x": x, "y": y, "button": "left" if kind != "mouseMoved" or buttons else "none",
+            "buttons": buttons, "clickCount": 1}, session=page)
+
+    async def click(expression):
+        spot = await evaluate(instance, """(async () => { const node = %s;
+            node.scrollIntoView({block: 'center'});
+            await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+            const r = node.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+            const hit = document.elementFromPoint(x, y);
+            return {x, y, hit: !!hit && (hit === node || node.contains(hit)), what: hit && hit.className}; })()""" % expression)
+        assert spot["hit"], (expression, spot)
+        await mouse("mouseMoved", spot["x"], spot["y"])
+        await mouse("mousePressed", spot["x"], spot["y"], 1)
+        await mouse("mouseReleased", spot["x"], spot["y"])
+
+    async def drag(x1, y1, x2, y2):
+        box = await evaluate(instance, """(() => { const r = imageViewerOpen.img.getBoundingClientRect();
+            return [r.left, r.top, r.width, r.height]; })()""")
+        at = lambda fx, fy: (box[0] + box[2] * fx, box[1] + box[3] * fy)
+        await mouse("mouseMoved", *at(x1, y1))
+        await mouse("mousePressed", *at(x1, y1), 1)
+        await mouse("mouseMoved", *at((x1 + x2) / 2, (y1 + y2) / 2), 1)
+        await mouse("mouseMoved", *at(x2, y2), 1)
+        await mouse("mouseReleased", *at(x2, y2))
+
+    async def escape():
+        for kind in ("keyDown", "keyUp"):
+            await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "Escape", "code": "Escape",
+                                                           "windowsVirtualKeyCode": 27}, session=page)
+        await until(instance, "!imageViewerOpen")
+
+    async def settle():
+        await evaluate(instance, "Promise.all(document.getAnimations().filter(a => a.effect && "
+                                 "a.effect.getTiming().iterations !== Infinity)"
+                                 ".map(a => a.finished.catch(() => {}))).then(() => new Promise(r => "
+                                 "requestAnimationFrame(() => requestAnimationFrame(() => r(true)))))")
+
+    async def opened(expression):
+        await click(expression)
+        await until(instance, "!!imageViewerOpen && imageViewerOpen.ready")
+        await settle()
+
+    async def shot(name):
+        if shots:
+            data = await instance.call("Page.captureScreenshot", {"format": "png"}, session=page)
+            Path(shots, name + ".png").write_bytes(base64.b64decode(data["data"]))
+
+    async def pixel(fx, fy):
+        """What the screen shows at a share of the picture's box."""
+        box = await evaluate(instance, """(() => { const r = imageViewerOpen.img.getBoundingClientRect();
+            return [r.left, r.top, r.width, r.height]; })()""")
+        data = await instance.call("Page.captureScreenshot", {"format": "png", "clip": {
+            "x": box[0] + box[2] * fx - 1, "y": box[1] + box[3] * fy - 1, "width": 2, "height": 2, "scale": 1}},
+            session=page)
+        return await evaluate(instance, """(async () => { const img = new Image();
+            img.src = 'data:image/png;base64,%s'; await img.decode();
+            const c = document.createElement('canvas'); c.width = c.height = 2;
+            const g = c.getContext('2d'); g.drawImage(img, 0, 0, 2, 2);
+            return [...g.getImageData(0, 0, 1, 1).data].slice(0, 3); })()""" % data["data"])
+
+    def is_plain(rgb):
+        return all(abs(a - b) <= 3 for a, b in zip(rgb, plain))
+
+    def is_red(rgb):
+        return rgb[0] > 200 and rgb[1] < 120 and rgb[2] < 120
+
+    state = """(() => { const v = imageViewerOpen, q = s => v.m.querySelector(s);
+        const box = n => { const r = n.getBoundingClientRect(); return [r.left, r.top, r.width, r.height].map(Math.round); };
+        const seen = n => !!n && getComputedStyle(n).visibility === 'visible' && getComputedStyle(n).display !== 'none';
+        return {button: seen(v.originalButton), disabled: v.originalButton.disabled, text: v.originalButton.textContent,
+            pressed: v.originalButton.getAttribute('aria-pressed'), name: v.name.textContent,
+            href: v.downloadLink.getAttribute('href'), download: v.downloadLink.download,
+            tools: seen(v.boxButton), revert: seen(v.revertButton), marks: seen(v.marksLayer),
+            main: seen(v.img), original: seen(v.originalImg), undo: v.undoButton ? !v.undoButton.disabled : null,
+            picture: box(v.img), over: box(v.originalImg), bar: box(v.bar),
+            controls: [...v.bar.querySelectorAll('.iv-level,.iv-download')].map(box),
+            head: {caption: box(q('.iv-caption')), button: box(v.originalButton), close: box(q('.modal-close'))},
+            vw: innerWidth}; })()"""
+    chip = "demoView.composer.attachStrip.querySelector('.attach-view')"
+
+    async def staged(path=None):
+        await evaluate(instance, "if (typeof closeDrawer === 'function') closeDrawer(); "
+                                 "lsDel('puppy.markColor'); demoView.composer.replace(''); true")
+        handle = await instance.call("Runtime.evaluate", {"expression": "demoView.composer.fileInput"}, session=page)
+        await instance.call("DOM.setFileInputFiles", {
+            "files": [str(source)], "objectId": handle["result"]["objectId"]}, session=page)
+        await until(instance, "demoView.composer.attachments.length === 1 && !!demoView.composer.attachments[0].path")
+        return await evaluate(instance, "demoView.composer.attachments[0].path")
+
+    async def landed():
+        await until(instance, "demoView.composer.attachments.length === 1 && !demoView.composer.sendBlocker()")
+        return await evaluate(instance, "demoView.composer.attachments[0].path")
+
+    def check_head(g, where):
+        caption, button, close = g["head"]["caption"], g["head"]["button"], g["head"]["close"]
+        assert caption[0] + caption[2] + 6 <= button[0], ("the switch stands clear of the name", where, g)
+        assert 6 <= close[0] - button[0] - button[2] <= 12 and close[0] + close[2] <= g["vw"] - 6, \
+            ("beside the close button", where, g)
+        assert abs(button[1] - close[1]) <= 1 and abs(button[3] - close[3]) <= 1, ("level with the close", where, g)
+        assert caption[2] >= 60, ("and leaves the name room", where, g)
+
+    try:
+        for width, height, scale, mobile, theme in ((1280, 800, 1, False, "dark"), (1280, 800, 1, False, "light"),
+                                                    (390, 844, 2, True, "dark"), (360, 740, 2, True, "light")):
+            await instance.call("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile}, session=page)
+            await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); true")
+            where = (width, theme)
+            first = await staged()
+            await opened(chip)
+            g = await evaluate(instance, state)
+            assert g["button"] and g["disabled"] and g["text"] == "Original" and g["pressed"] == "false", (where, g)
+            assert g["tools"] and not g["revert"] and g["name"] == "shelf photo.png", (where, g)
+            check_head(g, where)
+            # a real drag draws a box; the switch comes alive
+            await click("imageViewerOpen.boxButton")
+            await drag(0.3, 0.3, 0.7, 0.7)
+            g = await evaluate(instance, state)
+            assert not g["disabled"] and g["marks"] and g["undo"], (where, g)
+            assert is_red(await pixel(0.5, 0.3)) and is_plain(await pixel(0.5, 0.5)), where
+            await shot("editing-{}-{}".format(width, theme))
+            before = g
+            # what is copied and saved is what is shown
+            saved = """(async () => { const v = imageViewerOpen;
+                const blob = await imagePngBlob(v.shownPicture(), v.shownMarks());
+                const bitmap = await createImageBitmap(blob), c = document.createElement('canvas');
+                c.width = bitmap.width; c.height = bitmap.height;
+                const g = c.getContext('2d'); g.drawImage(bitmap, 0, 0);
+                return {size: [c.width, c.height], name: v.downloadLink.download,
+                        at: [...g.getImageData(450, 180, 1, 1).data].slice(0, 3)}; })()"""
+            got = await evaluate(instance, saved)
+            assert got["size"] == [900, 600] and got["name"] == "shelf photo-marked.png" and is_red(got["at"]), (where, got)
+            # Original: the marks out of sight, nothing moved, the tools' place offering the revert
+            await click("imageViewerOpen.originalButton")
+            g = await evaluate(instance, state)
+            assert g["pressed"] == "true" and not g["marks"] and not g["tools"] and g["revert"], (where, g)
+            assert is_plain(await pixel(0.5, 0.3)), ("the picture without its marks", where)
+            for key in ("picture", "bar", "controls", "head"):
+                assert g[key] == before[key], ("a press moves nothing", key, where, g, before)
+            assert await evaluate(instance, "!imageViewerOpen.tool"), "no tool draws on what is not shown"
+            got = await evaluate(instance, saved)
+            assert got["name"] == "shelf photo.png" and is_plain(got["at"]), (where, got)
+            await shot("original-{}-{}".format(width, theme))
+            await click("imageViewerOpen.originalButton")
+            g = await evaluate(instance, state)
+            assert g["pressed"] == "false" and g["marks"] and g["tools"] and not g["revert"], (where, g)
+            assert is_red(await pixel(0.5, 0.3)), where
+            # Revert takes every mark and one undo brings them back
+            await click("imageViewerOpen.originalButton")
+            await click("imageViewerOpen.revertButton")
+            g = await evaluate(instance, state)
+            assert g["disabled"] and g["pressed"] == "false" and g["tools"] and not g["revert"] and g["undo"], (where, g)
+            assert is_plain(await pixel(0.5, 0.3)), where
+            assert await evaluate(instance, "imageViewerOpen.m.contains(document.activeElement) || "
+                                            "imageViewerOpen.m === document.activeElement"), "the keys stay with the viewer"
+            await click("imageViewerOpen.undoButton")
+            assert is_red(await pixel(0.5, 0.3)), ("the undo of a revert", where)
+            await escape()
+            marked = await landed()
+            assert marked.endswith("/shelf photo-marked.png") and marked != first, (where, marked)
+            note = Path(marked).parent.parent / ("o" + Path(marked).parent.name)
+            assert note.read_text() == Path(first).parent.name and stat.S_IMODE(note.stat().st_mode) == 0o600, \
+                ("the node notes what the copy was drawn on", where)
+            # this page still holds the marks: they come back to change, with the original a press away
+            await opened(chip)
+            g = await evaluate(instance, state)
+            assert not g["disabled"] and g["marks"], (where, g)
+            await click("imageViewerOpen.originalButton")
+            g = await evaluate(instance, state)
+            assert g["name"] == "shelf photo.png" and g["download"] == "shelf photo.png", (where, g)
+            await escape()
+            assert await evaluate(instance, "demoView.composer.attachments[0].path") == marked, \
+                "looking at the original changes nothing"
+
+            # a page that never drew the marks: the node knows the original
+            await evaluate(instance, "demoView.sharedDraft && demoView.sharedDraft.flush ? "
+                                     "(demoView.sharedDraft.flush(), true) : true")
+            end = time.monotonic() + 10
+            while marked not in (db.get_session_draft(sid)["text"] or ""):
+                assert time.monotonic() < end, "the draft names the marked copy"
+                await asyncio.sleep(.05)
+            await instance.call("Page.reload", session=page)
+            await until(instance, "typeof state !== 'undefined' && state.sessions.length > 0")
+            await evaluate(instance, "applyTheme(" + json.dumps(theme) + "); openSessionTab(0," + str(sid) +
+                           ",state.sessions.find(s=>s.id===" + str(sid) + ")); window.demoView=state.views['s:0:" +
+                           str(sid) + "'].activeView(); true")
+            await until(instance, "!!demoView.sharedDraft && demoView.draftReady && "
+                                  "demoView.composer.attachments.length === 1")
+            assert await evaluate(instance, "!demoView.composer.attachments[0].original && "
+                                            "demoView.composer.attachments[0].path") == marked
+            await evaluate(instance, "if (typeof closeDrawer === 'function') closeDrawer(); true")
+            await until(instance, chip + ".querySelector('img').naturalWidth === 900")
+            await opened(chip)
+            await until(instance, "!imageViewerOpen.originalButton.disabled")
+            before = await evaluate(instance, state)
+            assert before["name"] == "shelf photo-marked.png" and before["main"] and not before["original"], (where, before)
+            assert is_red(await pixel(0.5, 0.3)), where
+            await click("imageViewerOpen.originalButton")
+            await until(instance, "imageViewerOpen.swapped")
+            g = await evaluate(instance, state)
+            assert g["original"] and not g["main"] and g["over"] == g["picture"] == before["picture"], \
+                ("the original on the same box", where, g)
+            assert g["name"] == "shelf photo.png" and Path(first).parent.name in g["href"], (where, g)
+            assert is_plain(await pixel(0.5, 0.3)), where
+            for key in ("bar", "controls"):
+                assert g[key] == before[key], (key, where, g, before)
+            assert g["head"]["button"] == before["head"]["button"], \
+                ("a shorter name never moves the switch under the pointer", where, g, before)
+            check_head(g, where)
+            await shot("reloaded-{}-{}".format(width, theme))
+            await click("imageViewerOpen.revertButton")
+            g = await evaluate(instance, state)
+            assert g["original"] and g["disabled"] and g["undo"] and g["tools"], (where, g)
+            await escape()
+            assert await landed() == first, ("the picture as it was is what the message carries", where)
+            assert await evaluate(instance, "demoView.composer.message()") == \
+                "[image attached: " + first + " — view it with your image/file tools]"
+
+            # sent: the transcript's own thumbnail opens the marked copy, its original a press away
+            await evaluate(instance, """(() => { document.querySelectorAll('.original-lane').forEach(n => n.remove());
+                const node = demoView.buildEventNode({kind: 'user', seq: 900001, ts: Date.now() / 1000, data: {
+                    text: 'The tunnel, as drawn\\n\\n[image attached: ' + %s + ' \u2014 view it with your image/file tools]'}});
+                node.classList.add('original-lane'); demoView.inner.appendChild(node);
+                node.scrollIntoView({block: 'center'}); return true; })()""" % json.dumps(marked))
+            sent = "document.querySelector('.original-lane .attach-view')"
+            await until(instance, sent + ".querySelector('img').naturalWidth === 900 && !" + sent + ".disabled")
+            await opened(sent)
+            await until(instance, "!imageViewerOpen.originalButton.disabled")
+            g = await evaluate(instance, state)
+            assert g["button"] and g["undo"] is None and not g["revert"], ("nothing to revert in a sent message", where, g)
+            assert is_red(await pixel(0.5, 0.3)), where
+            check_head(g, where)
+            await click("imageViewerOpen.originalButton")
+            await until(instance, "imageViewerOpen.swapped")
+            g = await evaluate(instance, state)
+            assert g["pressed"] == "true" and g["download"] == "shelf photo.png", (where, g)
+            assert is_plain(await pixel(0.5, 0.3)), where
+            await shot("sent-original-{}-{}".format(width, theme))
+            for kind in ("keyDown", "keyUp"):
+                await instance.call("Input.dispatchKeyEvent", {"type": kind, "key": "o", "code": "KeyO",
+                                                               "windowsVirtualKeyCode": 79}, session=page)
+            await until(instance, "!imageViewerOpen.swapped")
+            assert is_red(await pixel(0.5, 0.3)), ("the O key flips it back", where)
+            await shot("sent-marked-{}-{}".format(width, theme))
+            await escape()
+            assert await evaluate(instance, "document.activeElement === " + sent), "focus returns to the thumbnail"
+            # a picture that was never marked has no switch at all
+            await evaluate(instance, """(() => { document.querySelectorAll('.original-lane').forEach(n => n.remove());
+                const node = demoView.buildEventNode({kind: 'user', seq: 900002, ts: Date.now() / 1000, data: {
+                    text: '[image attached: ' + %s + ' \u2014 view it with your image/file tools]'}});
+                node.classList.add('original-lane'); demoView.inner.appendChild(node);
+                node.scrollIntoView({block: 'center'}); return true; })()""" % json.dumps(first))
+            await until(instance, sent + ".querySelector('img').naturalWidth === 900 && !" + sent + ".disabled")
+            await opened(sent)
+            await asyncio.sleep(.2)
+            assert not (await evaluate(instance, state))["button"], where
+            await escape()
+            await evaluate(instance, "document.querySelectorAll('.original-lane').forEach(n => n.remove()); "
+                                     "demoView.composer.replace(''); true")
+    finally:
+        await evaluate(instance, "document.querySelectorAll('.original-lane').forEach(n => n.remove()); "
+                                 "demoView.composer.replace(''); lsDel('puppy.markColor'); applyTheme('dark'); true")
+        await instance.call("Emulation.clearDeviceMetricsOverride", {}, session=page)
+        shutil.rmtree(lane, ignore_errors=True)
+    print("PASS: a marked picture's original is one press away in the prompt box and in the transcript - drawn here, "
+          "after a reload and once sent - at the same box and zoom with nothing moving, Revert puts it back and undo "
+          "takes that back, desktop and phones in both themes", flush=True)
 
 
 async def tool_image_checks(instance):
@@ -11699,9 +11994,13 @@ async def main(args):
                 await operation_progress_checks(instances[0])
                 await operation_cancellation_checks(instances[0])
                 return
+            if args.image_original_only:
+                await image_original_checks(instances[0], sid)
+                return
             if args.image_viewer_only:
                 await image_viewer_checks(instances[0], args.screenshots)
                 await image_mark_checks(instances[0])
+                await image_original_checks(instances[0], sid)
                 await tool_image_checks(instances[0])
                 return
             await directory_checks(instances[0], app)
@@ -11730,6 +12029,7 @@ async def main(args):
             await loop_checks(instances[0], args.screenshots)
             await image_viewer_checks(instances[0], args.screenshots)
             await image_mark_checks(instances[0])
+            await image_original_checks(instances[0], sid)
             await tool_image_checks(instances[0])
             await shared_file_checks(instances[0])
             await avif_attachment_checks(instances[0])
@@ -11788,6 +12088,7 @@ if __name__ == "__main__":
     parser.add_argument("--token-usage-only", action="store_true")
     parser.add_argument("--question-scroll-only", action="store_true")
     parser.add_argument("--image-viewer-only", action="store_true")
+    parser.add_argument("--image-original-only", action="store_true")
     parser.add_argument("--shared-files-only", action="store_true")
     parser.add_argument("--operations-only", action="store_true")
     parser.add_argument("--session-request-only", action="store_true")

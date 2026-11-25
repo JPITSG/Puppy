@@ -5940,15 +5940,18 @@ function backendSupportsUploadPreviews(bid) {
   return backendHasCapability(backend, "upload-preview");
 }
 
-/* An upload's stored path ends in its session id, its upload id, and its own
-   name. That is enough to ask the node that holds it for the bytes back, so a
-   preview no longer dies with the page's blob URL. */
+/* Whether a node keeps the picture a marked copy was drawn on. */
+function backendSupportsUploadOriginals(bid) {
+  if (!bid) return true;
+  return backendHasCapability(state.backends.find(b => b.id === bid), "upload-originals");
+}
+
+/* Where a stored upload is read back from, so a preview no longer dies with
+   the page's blob URL. */
 function uploadPreviewUrl(bid, storedPath) {
   if (!backendSupportsUploadPreviews(bid)) return "";
-  const match = /\/uploads\/(\d+)\/(\d{13}-[0-9a-f]{10})\/[^/]+$/
-    .exec(String(storedPath || ""));
-  if (!match) return "";
-  return apiPath(bid, `sessions/${match[1]}/upload/${match[2]}?preview=1`);
+  const stored = storedUpload(storedPath);
+  return stored ? apiPath(bid, `sessions/${stored.sid}/upload/${stored.id}?preview=1`) : "";
 }
 
 function backendSupportsScratch(bid) {
@@ -15864,7 +15867,11 @@ class Composer {
     this.locallyEdited = false;
     spellLearnSent(this.ta.value);   // the marked words of a sent message count
     const message = this.message();
-    this.attachments.forEach(a => { this.releaseOriginal(a); this.retireSentAttachment(a); });
+    // the picture under a sent picture's marks stays with the node, to look at
+    this.attachments.forEach(a => {
+      this.releaseUnder(a, { discard: false });
+      this.retireSentAttachment(a);
+    });
     this.attachments = [];
     this.renderAttachments(false);
     this.ta.value = "";
@@ -16231,17 +16238,19 @@ class Composer {
     document.removeEventListener("visibilitychange", this._onTypingVisibility);
     this.hideMention();
     const staged = new Set([...(this.histAttach || []), ...this.attachments]);
-    for (const attachment of [...staged])
-      for (const kept of [attachment.original, attachment.previous]) if (kept) staged.add(kept);
     this.histAttach = null;
     this.attachments = [];
-    for (const attachment of staged) {
+    const letGo = (attachment, after) => {
+      if (!attachment || attachment.removed) return;
       attachment.removed = true;
       if (attachment.controller) attachment.controller.abort();
       if (attachment.url && attachment.ownsUrl) URL.revokeObjectURL(attachment.url);
       attachment.url = "";
-      if (discardUploads && attachment.uploadId) this.discardServerUpload(attachment.uploadId, true);
-    }
+      if (discardUploads) after = this.discardServerUpload(attachment.uploadId, true, after);
+      letGo(attachment.previous, after);
+      letGo(attachment.original, after);
+    };
+    for (const attachment of staged) letGo(attachment, null);
     for (const url of this.sentThumbs.values()) URL.revokeObjectURL(url);
     this.sentThumbs.clear();
   }
@@ -16282,11 +16291,10 @@ class Composer {
         continue;
       }
       if (reused.has(source)) continue;
-      if (source.original) this.releaseAttachment(source.original);
       source.removed = true;
       if (source.controller) source.controller.abort();
-      if (replaceUploading && source.uploadId)
-        this.discardServerUpload(source.uploadId, true);
+      this.releaseUnder(source, { after: replaceUploading ?
+        this.discardServerUpload(source.uploadId, true) : null });
       if (source.url && source.ownsUrl) URL.revokeObjectURL(source.url);
       source.url = "";
     }
@@ -17383,9 +17391,12 @@ class Composer {
   }
 
   /* One staged file onto the node, filling in its attachment: nothing once
-     it is there (or once the box let it go meanwhile), else what went wrong. */
+     it is there (or once the box let it go meanwhile), else what went wrong.
+     A marked copy names the upload it was drawn on, and the node keeps that
+     picture for as long as it keeps the copy. */
   async sendUpload(attachment, file) {
     const controller = attachment.controller;
+    const under = attachment.original ? storedUpload(attachment.original.path) : null;
     try {
       const response = await fetch(apiPath(this.host.bid, `sessions/${this.host.sid}/upload`), {
         method: "POST",
@@ -17393,6 +17404,7 @@ class Composer {
           "Content-Type": attachment.contentType,
           "X-Puppy-Filename": encodeURIComponent(attachment.name),
           "X-Puppy-Size": String(file.size),
+          ...(under && under.sid === Number(this.host.sid) ? { "X-Puppy-Original": under.id } : {}),
         },
         body: file,
         redirect: "error",
@@ -17426,26 +17438,29 @@ class Composer {
     }
   }
 
-  discardServerUpload(uploadId, quiet = false) {
-    if (!uploadId) return;
-    api(this.host.bid, `sessions/${this.host.sid}/upload/${uploadId}`, {
+  /* `after` is an earlier discard to wait for: a node keeps a picture while
+     a marked copy of it is stored, so the copy has to go first. */
+  discardServerUpload(uploadId, quiet = false, after = null) {
+    if (!uploadId) return after;
+    const discard = () => api(this.host.bid, `sessions/${this.host.sid}/upload/${uploadId}`, {
       method: "DELETE", keepalive: true, timeoutMs: 10000,
     }).catch(error => {
       if (!quiet) toast(`Could not discard upload · ${error.message}`, "bad");
     });
+    return after ? after.then(discard) : discard();
   }
 
   removeAttachment(attachment, quiet = false) {
     if (!attachment || attachment.removed) return;
     this.attachments = this.attachments.filter(item => item !== attachment);
-    this.releaseAttachment(attachment, quiet);
-    this.releaseOriginal(attachment);
+    this.releaseAttachment(attachment, { quiet });
     this.renderAttachments();
   }
 
   /* An attachment the box has let go: its upload stopped, its own preview
-     released, and its bytes discarded where they belong to this box alone. */
-  releaseAttachment(attachment, quiet = true) {
+     released, and its bytes discarded where they belong to this box alone.
+     What it keeps under its marks goes with it, but for `keep`. */
+  releaseAttachment(attachment, { quiet = true, keep = null, discard = true, after = null } = {}) {
     if (!attachment || attachment.removed) return;
     attachment.removed = true;
     if (attachment.controller) attachment.controller.abort();
@@ -17458,16 +17473,18 @@ class Composer {
        the bytes: another browser may still hold a local draft or have sent
        a later edit which contains this marker. Session deletion cleans staged
        bytes otherwise. */
-    if (attachment.uploadId && this.host.privateUploads())
-      this.discardServerUpload(attachment.uploadId, quiet);
+    if (discard && attachment.uploadId && this.host.privateUploads())
+      after = this.discardServerUpload(attachment.uploadId, quiet, after);
+    this.releaseUnder(attachment, { keep, discard, after });
   }
 
   /* A marked picture keeps the one under its marks so the marks stay
-     changeable; when the marked copy goes, that one goes with it. */
-  releaseOriginal(attachment) {
-    if (!attachment) return;
-    if (attachment.original) this.releaseAttachment(attachment.original);
-    if (attachment.previous) this.releaseAttachment(attachment.previous);
+     changeable - and the marked copy it replaces until its own has landed;
+     when the marked copy goes, they go with it, every copy of a picture
+     before the picture. */
+  releaseUnder(attachment, { keep = null, discard = true, after = null } = {}) {
+    for (const under of [attachment.previous, attachment.original])
+      if (under && under !== keep) this.releaseAttachment(under, { keep, discard, after });
   }
 
   /* ---- marks on a waiting picture ---- */
@@ -17489,16 +17506,22 @@ class Composer {
   /* The viewer closed on new marks for `attachment`: a marked copy of the
      picture under them takes its place in the box - uploading at once, so a
      send waits for it - and the picture itself is kept for the next change.
-     No marks left puts that picture back. A copy that cannot be made or
-     uploaded leaves the box as it was, and says so. */
-  applyMarks(attachment, marks) {
+     No marks left puts that picture back. `original` is the picture the node
+     kept under a copy marked earlier, when the viewer reverted to it: the
+     marks are then on that one, or that one is what comes back. A copy that
+     cannot be made or uploaded leaves the box as it was, and says so. */
+  applyMarks(attachment, marks, original = null) {
     if (!this.markable(attachment)) return false;
-    const base = attachment.original || attachment;
+    const base = original ? {
+      name: original.name, size: original.size, contentType: original.contentType,
+      path: original.path, uploadId: "", url: "", ownsUrl: false, sizeText: "", line: "",
+      preview: true, uploading: false, controller: null, removed: false,
+    } : attachment.original || attachment;
     const at = this.attachments.indexOf(attachment);
     if (!marks.length) {
-      if (!attachment.original) return false;
+      if (base === attachment) return false;
       this.attachments.splice(at, 1, base);
-      this.releaseAttachment(attachment);
+      this.releaseAttachment(attachment, { keep: base });
       this.renderAttachments();
       return true;
     }
@@ -17516,7 +17539,7 @@ class Composer {
     const restore = reason => {
       if (marked.removed) return;
       const place = this.attachments.indexOf(marked);
-      marked.original = marked.previous = null;   // both stay with the box's own copy
+      marked.original = marked.previous = null;   // what is under it stays with the box's own copy
       if (place >= 0) this.attachments.splice(place, 1, attachment);
       this.releaseAttachment(marked);
       this.renderAttachments();
@@ -17535,8 +17558,9 @@ class Composer {
         return;
       }
       // an earlier marked copy is spent; the picture under the marks is kept
-      if (marked.previous) this.releaseAttachment(marked.previous);
+      const spent = marked.previous;
       marked.previous = null;
+      this.releaseAttachment(spent, { keep: base });
     }, error => restore((error && error.message) || "the image could not be drawn"));
     return true;
   }
@@ -17550,9 +17574,13 @@ class Composer {
         ? (a.url || uploadPreviewUrl(this.host.bid, a.path)) : "", a.uploading,
         {checkUrl: a.path ? uploadPreviewUrl(this.host.bid, a.path) : ""});
       const view = chip.querySelector(".attach-view");
-      if (view && this.markable(a))
-        view._marking = { composer: this, attachment: a, marks: a.marks || [],
-          source: a.original ? this.attachmentPreview(a.original) : "" };
+      if (view) {
+        const markable = this.markable(a), shown = markable && a.original || a;   // what the viewer opens
+        if (markable)
+          view._marking = { composer: this, attachment: a, marks: a.marks || [],
+            source: a.original ? this.attachmentPreview(a.original) : "", name: shown.name };
+        view._stored = { bid: this.host.bid, path: shown.path };
+      }
       const x = el("button", "attach-x");
       x.type = "button";
       x.appendChild(xIcon(12));
@@ -18547,6 +18575,13 @@ function baseName(path) {
   return value.split("/").pop() || value;
 }
 
+/* An upload's stored path ends in its session id, its upload id and its own
+   name: enough to ask the node that holds it about it, or for its bytes. */
+function storedUpload(path) {
+  const match = /\/uploads\/(\d+)\/(\d{13}-[0-9a-f]{10})\/[^/]+$/.exec(String(path || ""));
+  return match ? { sid: Number(match[1]), id: match[2] } : null;
+}
+
 function attachmentMarkerLine(a) {
   if (a.line) return a.line;   // recalled markers round-trip byte for byte
   return a.preview
@@ -18794,15 +18829,18 @@ function imageClipboardAvailable() {
     navigator.clipboard && typeof navigator.clipboard.write === "function");
 }
 
-/* The decoded picture as PNG, the one image type every clipboard takes. */
-function imagePngBlob(img) {
+/* The decoded picture as PNG, the one image type every clipboard takes, with
+   the marks in view on it. */
+function imagePngBlob(img, marks = []) {
   return new Promise((resolve, reject) => {
     const width = img.naturalWidth, height = img.naturalHeight;
     if (!width || !height) { reject(new Error("the picture has not loaded")); return; }
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
-    canvas.getContext("2d").drawImage(img, 0, 0);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    if (marks.length) paintImageMarks(ctx, marks);
     canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error("the picture could not be read")), "image/png");
   });
 }
@@ -19092,6 +19130,30 @@ function imageWithMarks(url, marks) {
   });
 }
 
+/* The picture a stored upload was marked from, or null for one that is its
+   own original - asked of the node that keeps both, and remembered: a copy
+   learns its original as it is stored and never again. */
+const uploadOriginals = new Map();   // node and upload -> a promise of the answer
+function storedOriginal(bid, path) {
+  const stored = storedUpload(path);
+  if (!stored || !backendSupportsUploadOriginals(bid)) return Promise.resolve(null);
+  const key = [Number(bid) || 0, stored.sid, stored.id].join("/");
+  let answer = uploadOriginals.get(key);
+  if (!answer) {
+    answer = api(bid, `sessions/${stored.sid}/upload/${stored.id}/original`, { timeoutMs: 15000 })
+      .then(result => {
+        const found = result && result.original;
+        const url = found && typeof found.name === "string" ? uploadPreviewUrl(bid, found.path) : "";
+        return url ? { url, path: found.path, name: found.name, size: Number(found.size) || 0,
+                       contentType: String(found.content_type || "") } : null;
+      });
+    answer.catch(() => uploadOriginals.delete(key));   // a node out of reach is asked again
+    uploadOriginals.set(key, answer);
+    if (uploadOriginals.size > 256) uploadOriginals.delete(uploadOriginals.keys().next().value);
+  }
+  return answer;
+}
+
 /* A marked copy's name: the picture's own, said to be marked, as a PNG. */
 function markedImageName(name) {
   const stem = String(name || "image").replace(/\.[^./]*$/, "").replace(/-marked$/, "") || "image";
@@ -19119,6 +19181,10 @@ class ImageViewer {
     this.tool = "";                // the marking tool that is on: "", "box", "arrow" or "line"
     this.markColor = imageMarkColorPref();   // the colour new marks take
     this.draft = null;             // the mark a press is drawing
+    this.originalShown = false;    // the picture as it was before its marks is on the screen
+    this.originalLoading = "";     // the address its own picture is on its way from,
+    this.originalLoaded = "";      // or has been drawn from
+    this.swapped = false;          // that picture is drawn in the marked one's place
   }
 
   open(thumb = null) {
@@ -19126,7 +19192,7 @@ class ImageViewer {
     for (const ghost of document.querySelectorAll(".iv-ghost")) ghost.remove();
     const dialog = modal(`<h2 class="iv-name"></h2>
       <div class="iv-scrim"></div>
-      <div class="iv-stage"><img class="iv-img" alt="" draggable="false"><p class="iv-status hidden" role="status"></p></div>
+      <div class="iv-stage"><img class="iv-img" alt="" draggable="false"><img class="iv-img iv-original" alt="" draggable="false"><p class="iv-status hidden" role="status"></p></div>
       <button type="button" class="icon-btn iv-nav iv-prev" aria-label="Previous image"></button>
       <button type="button" class="icon-btn iv-nav iv-next" aria-label="Next image"></button>
       <div class="iv-bar">
@@ -19152,6 +19218,7 @@ class ImageViewer {
     this.scrim = q(".iv-scrim");
     this.stage = q(".iv-stage");
     this.img = q(".iv-img");
+    this.originalImg = q(".iv-original");
     this.status = q(".iv-status");
     this.prevButton = q(".iv-prev");
     this.nextButton = q(".iv-next");
@@ -19161,11 +19228,18 @@ class ImageViewer {
     this.inButton = q(".iv-in");
     this.downloadLink = q(".iv-download");
     this.downloadLink.appendChild(downloadIcon(14));
+    this.downloadLink.onclick = event => this.saveMarked(event);
     this.copyButton = q(".iv-copy");
     if (imageClipboardAvailable()) {
       this.copyButton.appendChild(copyIcon());
       this.copyButton.onclick = () => this.copy();
     } else this.copyButton.remove();
+    /* A picture with marks on it is one press from how it was without them. */
+    this.originalButton = el("button", "iv-switch hidden", "Original");
+    this.originalButton.type = "button";
+    this.originalButton.setAttribute("aria-pressed", "false");
+    this.originalButton.onclick = () => this.showOriginal(!this.originalShown);
+    this.head.insertBefore(this.originalButton, q(".modal-close"));
     this.prevButton.appendChild(chevronIcon(18, "left"));
     this.nextButton.appendChild(chevronIcon(18, "right"));
     this.outButton.appendChild(minusIcon(14));
@@ -19202,12 +19276,18 @@ class ImageViewer {
       }
       this.colorButton.onclick = () => this.pickColor();
       this.undoButton.onclick = () => this.undoMark();
+      /* The tools share their place with the one thing to do about an original
+         while it is shown: the bar keeps its width and nothing in it moves. */
+      const tools = el("div", "iv-tools"), set = el("div", "iv-toolset");
+      set.append(this.boxButton, this.arrowButton, this.lineButton, this.colorButton, this.undoButton);
+      this.revertButton = el("button", "iv-revert", "Revert to original");
+      this.revertButton.type = "button";
+      this.revertButton.onclick = () => this.revert();
+      tools.append(set, this.revertButton);
       const sep = el("span", "iv-sep");
       sep.setAttribute("aria-hidden", "true");
       const first = this.bar.firstElementChild;
-      for (const node of [this.boxButton, this.arrowButton, this.lineButton, this.colorButton,
-                          this.undoButton, sep])
-        this.bar.insertBefore(node, first);
+      for (const node of [tools, sep]) this.bar.insertBefore(node, first);
       m.classList.add("iv-markable");
     }
     this.prevButton.onclick = () => this.go(this.index - 1);
@@ -19274,17 +19354,17 @@ class ImageViewer {
     this.draft = null;
     this.pointers.clear();
     this.width = this.height = 0;
+    this.originalShown = false;
+    this.originalLoading = this.originalLoaded = "";
+    this.originalImg.removeAttribute("src");
+    this.m.classList.remove("iv-failed");
     this.drawMarks();
     this.syncTools();
-    this.name.textContent = item.name || "Image";
     this.img.alt = item.name || "";
-    this.downloadLink.href = item.url;
-    this.downloadLink.download = item.name || "image";
-    this.downloadLink.setAttribute("aria-label", "Download " + (item.name || "image"));
     this.meta.textContent = this.counter();
+    this.findOriginal(item);
     this.enable(this.prevButton, index > 0);
     this.enable(this.nextButton, index < this.items.length - 1);
-    this.m.classList.remove("iv-failed");
     this.m.classList.add("iv-loading");
     this.status.classList.add("hidden");
     this.later(() => {
@@ -19338,8 +19418,11 @@ class ImageViewer {
     layer.setAttribute("viewBox", `0 0 ${this.width} ${this.height}`);
     layer.setAttribute("width", this.width);
     layer.setAttribute("height", this.height);
-    layer.style.width = this.width + "px";
-    layer.style.height = this.height + "px";
+    // the marks, and the original's own picture, stand on the picture's box
+    for (const node of [layer, this.originalImg]) {
+      node.style.width = this.width + "px";
+      node.style.height = this.height + "px";
+    }
     this.meta.textContent = this.counter();
     this.m.classList.remove("iv-loading");
     this.status.classList.add("hidden");
@@ -19451,14 +19534,18 @@ class ImageViewer {
     this.apply(false);
   }
 
-  /* The marks layer wears the picture's transform and its motion classes,
-     so marks move, slide and fade with the picture they are on. */
+  /* The marks layer and the original wear the picture's transform and its
+     motion classes, so they move, slide and fade with it. */
   followPicture() {
-    const img = this.img, layer = this.marksLayer;
-    if (!layer) return;
-    layer.style.transform = img.style.transform;
-    for (const name of ["iv-anim", "iv-leaving"])
-      layer.classList.toggle(name, img.classList.contains(name));
+    const img = this.img;
+    for (const layer of [this.marksLayer, this.originalImg]) {
+      if (!layer) continue;
+      layer.style.transform = img.style.transform;
+      for (const name of ["iv-anim", "iv-leaving"])
+        layer.classList.toggle(name, img.classList.contains(name));
+    }
+    this.originalImg.style.borderRadius = img.style.borderRadius;
+    this.originalImg.classList.toggle("iv-crisp", img.classList.contains("iv-crisp"));
   }
 
   /* ---- marks ---- */
@@ -19484,14 +19571,125 @@ class ImageViewer {
   }
 
   /* The tools answer for the picture shown: drawing needs a loaded picture
-     the box still waits to send, undo a mark to take back. */
+     the box still waits to send, undo a mark - or a revert - to take back. */
   syncTools() {
-    if (!this.boxButton) return;
-    const item = this.markItem(), on = !!item && this.ready;
-    for (const button of Object.values(this.toolButtons)) this.enable(button, on);
-    this.enable(this.colorButton, on);
-    this.enable(this.undoButton, on && item.marks.length > 0);
-    if (!on && this.tool) this.setTool("");
+    if (this.boxButton) {
+      const item = this.markItem(), on = !!item && this.ready;
+      for (const button of Object.values(this.toolButtons)) this.enable(button, on);
+      this.enable(this.colorButton, on);
+      this.enable(this.undoButton, on && (item.marks.length > 0 || !!item.reverted));
+      if (!on && this.tool) this.setTool("");
+    }
+    this.syncOriginal();
+  }
+
+  /* ---- the original ---- */
+  /* Whether the picture shown has anything on it its original has not: marks
+     drawn here, or a marked copy whose original the node kept. */
+  altered(item = this.items[this.index]) {
+    return !!item && ((!!item.marking && item.marks.length > 0) || (!!item.original && !item.onOriginal));
+  }
+
+  /* Ask, once, what the picture was marked from. */
+  findOriginal(item) {
+    if (!item.stored || item.originalAsked) return;
+    item.originalAsked = true;
+    storedOriginal(item.stored.bid, item.stored.path).then(original => {
+      item.original = original;
+      if (!this.closed && this.items[this.index] === item) this.syncOriginal();
+    }, () => { item.originalAsked = false; });
+  }
+
+  /* The picture as it was before its marks, in their place and at their zoom,
+     so the two compare at a press; its name and download go with it. */
+  showOriginal(on) {
+    on = !!on && this.ready && this.altered();
+    if (on === this.originalShown) return;
+    this.originalShown = on;
+    if (on) this.setTool("");
+    this.syncOriginal();
+  }
+
+  /* Marks drawn here only need hiding to show the original under them. A copy
+     that was marked earlier has its original in a picture of its own, drawn
+     over this one once it is there - and it is what further marks go on after
+     a revert. */
+  syncOriginal() {
+    const item = this.items[this.index], altered = this.ready && this.altered(item);
+    if (!altered) this.originalShown = false;
+    const on = this.originalShown;
+    const own = item && item.original && (on || item.onOriginal) && this.ready ? item.original : null;
+    const drawn = !!own && this.originalLoaded === own.url;
+    if (own && !drawn) this.loadOriginal(item);
+    this.originalButton.classList.toggle("hidden",
+      !item || !(item.marking || (item.original && !item.onOriginal)));
+    this.enable(this.originalButton, altered);
+    this.originalButton.setAttribute("aria-pressed", String(on));
+    this.originalButton.classList.toggle("on", on);
+    this.m.classList.toggle("iv-original-shown", on);
+    this.m.classList.toggle("iv-swapped", drawn);
+    this.swapped = drawn;
+    if (this.revertButton) this.enable(this.revertButton, on && (!own || drawn));
+    if (!item) return;
+    // the original's own name; with no mark on it, the picture marks here were on has its own again
+    const bare = item.marking && !this.shownMarks().length;
+    const name = (own ? own.name : bare && item.marking.name || item.name) || "";
+    this.name.textContent = name || "Image";
+    this.originalImg.alt = name;
+    if (!this.m.classList.contains("iv-failed")) this.downloadLink.href = own ? own.url : item.url;
+    const saved = this.shownMarks().length ? markedImageName(name) : name || "image";
+    this.downloadLink.download = saved;
+    this.downloadLink.setAttribute("aria-label", "Download " + saved);
+  }
+
+  loadOriginal(item) {
+    const img = this.originalImg, url = item.original.url, generation = this.generation;
+    if (this.originalLoading === url) return;
+    this.originalLoading = url;
+    const settle = ok => {
+      if (generation !== this.generation || this.closed || this.originalLoading !== url) return;
+      this.originalLoading = "";
+      if (ok && img.naturalWidth > 0) this.originalLoaded = url;
+      else {
+        img.removeAttribute("src");
+        this.originalShown = false;
+        if (item.onOriginal) this.undoRevert(item);
+        toast("Could not load the original image", "bad");
+      }
+      this.drawMarks();
+      this.syncTools();
+    };
+    img.onload = img.onerror = null;
+    img.src = url;
+    if (typeof img.decode === "function")
+      img.decode().then(() => settle(true), () => settle(img.complete));
+    else {
+      img.onload = () => settle(true);
+      img.onerror = () => settle(false);
+    }
+  }
+
+  /* Every mark goes and the original is the picture again. Undo brings them
+     back until the viewer closes and hands the prompt box what is left. */
+  revert() {
+    const item = this.markItem();
+    if (!item || !this.ready || !this.altered(item)) return;
+    item.reverted = { marks: item.marks, onOriginal: !!item.onOriginal, earlier: item.reverted || null };
+    item.marks = [];
+    item.onOriginal = !!item.original;
+    this.originalShown = false;
+    // its own button is about to give its place back to the tools
+    if (document.activeElement === this.revertButton) this.m.focus({ preventScroll: true });
+    this.drawMarks();
+    this.syncTools();
+  }
+
+  undoRevert(item) {
+    if (!item.reverted) return;
+    const { marks, onOriginal, earlier } = item.reverted;
+    item.marks = marks;
+    item.onOriginal = onOriginal;
+    item.reverted = earlier;
   }
 
   setTool(tool) {
@@ -19526,10 +19724,13 @@ class ImageViewer {
     this.paintColorButton();
   }
 
+  /* The last mark, or the revert that took the ones before it. */
   undoMark() {
     const item = this.markItem();
-    if (!item || !item.marks.length) return;
-    item.marks.pop();
+    if (!item || !(item.marks.length || item.reverted)) return;
+    if (item.marks.length) item.marks.pop();
+    else this.undoRevert(item);
+    this.originalShown = false;   // what came back is in view
     this.drawMarks();
     this.syncTools();
   }
@@ -19550,8 +19751,9 @@ class ImageViewer {
     for (const item of this.items) {
       if (!item.marking) continue;
       const before = JSON.stringify(item.marking.marks || []);
-      if (JSON.stringify(item.marks) === before) continue;
-      item.marking.composer.applyMarks(item.marking.attachment, item.marks);
+      const original = item.onOriginal ? item.original : null;
+      if (!original && JSON.stringify(item.marks) === before) continue;
+      item.marking.composer.applyMarks(item.marking.attachment, item.marks, original);
     }
   }
 
@@ -19628,6 +19830,7 @@ class ImageViewer {
       case "-": case "_": this.zoomTo(this.s / IMAGE_VIEWER_STEP); break;
       case "0": this.zoomTo(this.fit); break;
       case "1": this.zoomTo(1); break;
+      case "o": case "O": this.showOriginal(!this.originalShown); break;
       case "PageUp": this.go(this.index - 1); break;
       case "PageDown": this.go(this.index + 1); break;
       case "ArrowLeft": case "ArrowRight": {
@@ -19649,6 +19852,35 @@ class ImageViewer {
     event.preventDefault();
   }
 
+  /* The marks in view on a picture still waiting: what its copy and its
+     download have on them, as a sent one's has its own. */
+  shownMarks() {
+    const item = this.markItem();
+    return item && !this.originalShown ? item.marks : [];
+  }
+
+  shownPicture() { return this.swapped ? this.originalImg : this.img; }
+
+  /* A picture with marks in view is saved with them; any other is what the
+     link names. */
+  async saveMarked(event) {
+    const marks = this.shownMarks();
+    if (!marks.length) return;
+    event.preventDefault();
+    try {
+      const url = URL.createObjectURL(await imagePngBlob(this.shownPicture(), marks));
+      const link = el("a");
+      link.href = url;
+      link.download = this.downloadLink.download;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (error) {
+      toast("Could not save the image" + (error && error.message ? " · " + error.message : ""), "bad");
+    }
+  }
+
   /* The picture shown, onto the clipboard as PNG. The write starts inside the
      press - a clipboard takes it only there - with the picture handed over as
      it is drawn; the button says Copied for a moment, and a failure says why. */
@@ -19656,7 +19888,7 @@ class ImageViewer {
     const button = this.copyButton;
     if (!button.isConnected || !this.ready) return;
     try {
-      const png = imagePngBlob(this.img);
+      const png = imagePngBlob(this.shownPicture(), this.shownMarks());
       try {
         await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
       } catch (error) {
@@ -19922,6 +20154,7 @@ class ImageViewer {
      fade where it stands when the thumbnail is out of sight. */
   dismiss() {
     if (this.closed) return;
+    this.showOriginal(false);   // the thumbnail it flies back to shows the marks
     if (this.ready && imageViewerMotion()) this.ghost(imageViewerVisibleBox(this.thumbFor(this.index)));
     this.dialog.close();
   }
@@ -19931,7 +20164,8 @@ class ImageViewer {
     layer.setAttribute("aria-hidden", "true");
     const scrim = el("div", "iv-scrim");
     scrim.style.opacity = this.scrim.style.opacity;
-    const img = this.img, shown = this.rendered();
+    const img = this.shownPicture(), shown = this.rendered();
+    img.classList.remove("iv-original");   // on its own in the ghost, it is the picture
     const marks = this.marksLayer && this.marksLayer.children.length ? this.marksLayer : null;
     const moving = marks ? [img, marks] : [img];
     const left = this.origin.left, top = this.origin.top;
@@ -19970,12 +20204,13 @@ class ImageViewer {
     for (const timer of this.timers) clearTimeout(timer);
     this.timers.clear();
     this.img.onload = this.img.onerror = null;
+    this.originalImg.onload = this.originalImg.onerror = null;
     if (imageViewerOpen === this) imageViewerOpen = null;
   }
 }
 
-/* Open the viewer on `items` ({url, name, thumb}) at `index`, flying from
-   `thumb` when it is on the screen. */
+/* Open the viewer on `items` ({url, name, thumb}, and where a node stores it)
+   at `index`, flying from `thumb` when it is on the screen. */
 function openImageViewer(items, index = 0, thumb = null) {
   const list = (items || []).filter(item => item && item.url && !item.missing &&
     !item.thumb?._previewMissing && !imagePreviewMissing.has(item.url));
@@ -19996,7 +20231,8 @@ function openImageViewerFrom(button) {
        with the marks laid over it again to change */
     const marking = node._marking || null;
     return { url: marking && marking.source ? marking.source : shown, name: img ? img.alt : "", thumb: img,
-             marking, marks: marking ? marking.marks.map(mark => ({ ...mark })) : [] };
+             marking, marks: marking ? marking.marks.map(mark => ({ ...mark })) : [],
+             stored: node._stored || null };
   });
   return openImageViewer(items, Math.max(0, buttons.indexOf(button)));
 }
@@ -24906,6 +25142,8 @@ class SessionView {
             const chip = attachmentChipNode(a, a.preview
               ? (this.composer.sentPreview(a.path) || uploadPreviewUrl(this.tab.bid, a.path))
               : "", false, {checkUrl: uploadPreviewUrl(this.tab.bid, a.path)});
+            const view = chip.querySelector(".attach-view");
+            if (view) view._stored = { bid: this.tab.bid, path: a.path };
             chip.setAttribute("aria-label", `${a.name} · ${a.path}`);
             strip.appendChild(chip);
           }

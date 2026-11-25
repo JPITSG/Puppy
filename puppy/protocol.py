@@ -61,6 +61,12 @@ SYSTEM_PROMPT_CAPABILITY = "system-prompt"
 # GET on an upload id returns the stored image, so a preview outlives the
 # blob URL held by the page.
 UPLOAD_PREVIEW_CAPABILITY = "upload-preview"
+# A marked copy's upload may name the upload it was drawn on (X-Puppy-Original):
+# the node keeps that picture as long as the copy and GET
+# /api/sessions/{sid}/upload/{id}/original says which one it is. An older node
+# ignores the header and keeps no originals, so a console asks only nodes that
+# advertise this.
+UPLOAD_ORIGINALS_CAPABILITY = "upload-originals"
 # Recorded native image-view calls can preview their still-present local file.
 TOOL_IMAGE_FILES_CAPABILITY = "session-tool-image-files"
 # An agent shares one file into its conversation (the turn-bound puppy_files
@@ -387,6 +393,7 @@ BASE_CAPABILITIES = (
     VNC_CONNECT_CANCEL_CAPABILITY,
     RDP_CAPABILITY,
     UPLOAD_PREVIEW_CAPABILITY,
+    UPLOAD_ORIGINALS_CAPABILITY,
     TOOL_IMAGE_FILES_CAPABILITY,
     SHARED_FILES_CAPABILITY,
     ENGINE_AUTO_UPGRADE_CAPABILITY,

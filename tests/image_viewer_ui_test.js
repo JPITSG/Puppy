@@ -92,10 +92,20 @@ function modal(html, className = "", reopen = null) {
    marking bar's colour reaches them */
 const stored = new Map();
 const menus = [];
+const originals = {asked: [], answers: new Map(), toasts: [], supported: () => true,
+  ask(bid, path) {
+    originals.asked.push([bid, path]);
+    const answer = originals.answers.get(path);
+    return answer instanceof Error ? Promise.reject(answer) : Promise.resolve({original: answer || null});
+  }};
 const context = vm.createContext({
   lsGet: key => stored.has(key) ? stored.get(key) : null,
   lsSet: (key, value) => stored.set(key, String(value)),
   openChoiceMenu: (anchor, spec) => { menus.push({anchor, spec}); return {}; },
+  // the node a picture is stored on, as its original is asked for
+  api: (bid, path) => originals.ask(bid, path), toast: (text, tone) => originals.toasts.push([text, tone]),
+  backendSupportsUploadOriginals: bid => originals.supported(bid),
+  uploadPreviewUrl: (bid, path) => "/api/preview" + path,
   document, window, modal, console, Math, Number, Promise, AbortController,
   fetch: async () => ({status: 200}),
   setTimeout: setTimeoutFake, clearTimeout: clearTimeoutFake,
@@ -730,7 +740,9 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
   // the box's thumbnail carries what marking needs; a sent picture does not
   function waiting({markable = true, marks = [], source = ""} = {}) {
     const box = {applied: [], markable: () => markable,
-      applyMarks(attachment, list) { this.applied.push([attachment, plain(list)]); return true; }};
+      applyMarks(attachment, list, original = null) {
+        this.applied.push([attachment, plain(list), original && plain(original)]); return true;
+      }};
     const row = document.createElement("div");
     row.className = "attach-strip";
     const attachment = {name: "pasted.png", path: "/u/p", preview: true};
@@ -756,9 +768,13 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
 
   const {viewer, box} = waiting();
   const bar = viewer.bar.children;
-  assert.deepEqual([...bar].slice(0, 6).map(node => node.className),
+  assert.deepEqual([...bar].slice(0, 2).map(node => node.className), ["iv-tools", "iv-sep"],
+    "the tools lead the bar, set off from the zoom");
+  assert.deepEqual([...bar[0].children].map(node => node.className), ["iv-toolset", "iv-revert"],
+    "in one place they share with the revert");
+  assert.deepEqual([...bar[0].children[0].children].map(node => node.className),
     ["icon-btn iv-tool iv-box", "icon-btn iv-tool iv-arrow", "icon-btn iv-tool iv-line", "icon-btn iv-tool iv-color",
-     "icon-btn iv-tool iv-undo", "iv-sep"], "the tools lead the bar, set off from the zoom");
+     "icon-btn iv-tool iv-undo"]);
   assert.deepEqual([viewer.boxButton, viewer.arrowButton, viewer.lineButton, viewer.colorButton, viewer.undoButton]
     .map(b => b.getAttribute("aria-label")),
     ["Draw a box", "Draw an arrow", "Draw a line", "Mark color: Red", "Undo the last mark"]);
@@ -949,8 +965,235 @@ console.log("PASS: a tool's pictures on its card - a labelled lazy thumbnail in 
 }
 console.log("PASS: marks on a waiting picture - rounded boxes, arrows and lines sized for the picture, the tools leading the bar only for a picture a prompt box waits to send, a box from its drag or a click, an arrow pointing at the press from wherever it is let go, a line between press and release (none from a click, held level by Shift), the standard colours from the shared menu remembered per browser and kept per mark, a pinch never half a mark, undo, and the marks handed to the box on close");
 
-/* ---- Copy: the picture onto the clipboard, offered only where a page may write one ---- */
+/* ---- the original: a marked picture as it was before its marks, to look at and to have back ---- */
 (async () => {
+  const settle = async () => { for (let i = 0; i < 4; i++) await null; };
+  const record = (id, name) => ({upload_id: id, path: "/data/uploads/7/" + id + "/" + name, name, size: 9,
+                                 content_type: "image/jpeg"});
+  const mark = {kind: "box", w: 6, x: 440, y: 340, width: 120, height: 120, r: 20, color: "#ff2b2b"};
+  const A = "1700000000000-aaaaaaaaaa", B = "1700000000001-bbbbbbbbbb", C = "1700000000002-cccccccccc";
+  const shown = viewer => ({pressed: viewer.originalButton.getAttribute("aria-pressed"),
+    off: viewer.originalButton.disabled, hidden: viewer.originalButton.classList.contains("hidden"),
+    original: viewer.m.classList.contains("iv-original-shown"), swapped: viewer.m.classList.contains("iv-swapped"),
+    name: viewer.name.textContent, href: viewer.downloadLink.href});
+  const draw = viewer => {
+    viewer.boxButton.onclick();
+    press(viewer, "pointerdown", 1, 420, 360);
+    press(viewer, "pointermove", 1, 520, 430);
+    press(viewer, "pointerup", 1, 520, 430);
+  };
+  function chips({marks = [], source = "", stored = null, name, marking = true} = {}) {
+    const box = {applied: [], markable() { return !this.applied.length; },
+      applyMarks(attachment, list, original = null) {
+        this.applied.push([plain(list), original && plain(original)]); return true;
+      }};
+    const row = document.createElement("div");
+    row.className = "attach-strip";
+    const chip = api.attachmentChipNode({name: "tunnel-marked.png", preview: true}, "blob:shown");
+    row.appendChild(chip);
+    chip.querySelector("img").onload();
+    const view = chip.querySelector(".attach-view");
+    if (marking) view._marking = {composer: box, attachment: {}, marks, source, name};
+    view._stored = stored;
+    document.body.appendChild(row);
+    view.onclick();
+    const viewer = current();
+    layout(viewer);
+    load(viewer, 2000, 1000);
+    return {viewer, box, row};
+  }
+
+  // waiting, drawn on here: hiding the marks is the original
+  const fresh = chips();
+  assert.deepEqual(shown(fresh.viewer), {pressed: "false", off: true, hidden: false, original: false, swapped: false,
+    name: "tunnel-marked.png", href: "blob:shown"}, "offered at once, alive once there is something to compare");
+  assert.equal(fresh.viewer.originalButton.textContent, "Original");
+  assert.equal(fresh.viewer.head.children[fresh.viewer.head.children.length - 1].className, "icon-btn modal-close");
+  assert.equal(fresh.viewer.head.children[fresh.viewer.head.children.length - 2], fresh.viewer.originalButton,
+    "beside the close button");
+  fresh.viewer.originalButton.onclick();
+  assert.equal(shown(fresh.viewer).pressed, "false", "an unmarked picture has no other side");
+  draw(fresh.viewer);
+  assert.ok(!shown(fresh.viewer).off && fresh.viewer.tool === "box");
+  const place = [fresh.viewer.s, fresh.viewer.x, fresh.viewer.y];
+  fresh.viewer.originalButton.onclick();
+  assert.ok(shown(fresh.viewer).pressed === "true" && shown(fresh.viewer).original && !shown(fresh.viewer).swapped,
+    "no second picture is needed");
+  assert.deepEqual([fresh.viewer.s, fresh.viewer.x, fresh.viewer.y], place, "where it stood, at its zoom");
+  assert.equal(fresh.viewer.tool, "", "nothing draws on marks that are not shown");
+  assert.equal(fresh.viewer.originalImg.src || "", "", "and nothing is fetched");
+  key(fresh.viewer, "o");
+  assert.equal(shown(fresh.viewer).pressed, "false", "the O key flips it");
+  key(fresh.viewer, "O");
+  assert.ok(shown(fresh.viewer).original && !fresh.viewer.revertButton.disabled);
+  // revert, its undo, and marks on top of it
+  fresh.viewer.revertButton.onclick();
+  const item = fresh.viewer.items[0];
+  assert.ok(item.marks.length === 0 && shown(fresh.viewer).off && !shown(fresh.viewer).original, "the picture again");
+  assert.ok(!fresh.viewer.undoButton.disabled, "a revert is undone like a mark");
+  draw(fresh.viewer);
+  assert.equal(item.marks.length, 1);
+  fresh.viewer.originalButton.onclick();
+  fresh.viewer.revertButton.onclick();
+  fresh.viewer.undoButton.onclick();
+  assert.equal(item.marks.length, 1, "the second revert first");
+  fresh.viewer.undoButton.onclick();
+  assert.equal(item.marks.length, 0, "then the mark drawn after the first");
+  key(fresh.viewer, "z", {ctrlKey: true});
+  assert.equal(item.marks.length, 1, "then the first revert");
+  fresh.viewer.undoButton.onclick();
+  assert.ok(item.marks.length === 0 && fresh.viewer.undoButton.disabled);
+  key(fresh.viewer, "z", {ctrlKey: true});
+  fresh.viewer.dialog.close();
+  assert.equal(fresh.box.applied.length, 0, "nothing left to hand over");
+
+  // marks this page drew before, reverted: the box takes its own picture back
+  const earlier = chips({marks: [mark], source: "blob:under", name: "tunnel.jpg"});
+  earlier.viewer.originalButton.onclick();
+  assert.deepEqual([shown(earlier.viewer).name, shown(earlier.viewer).href], ["tunnel.jpg", "blob:under"],
+    "named as it was attached, and saved as that");
+  earlier.viewer.revertButton.onclick();
+  earlier.viewer.dialog.close();
+  assert.deepEqual(earlier.box.applied, [[[], null]]);
+  // looked at and put away: nothing changes
+  const looked = chips({marks: [mark], source: "blob:under", name: "tunnel.jpg"});
+  looked.viewer.originalButton.onclick();
+  looked.viewer.dialog.close();
+  assert.equal(looked.box.applied.length, 0);
+
+  // marked by another page: the node has the original
+  originals.answers.set("sessions/7/upload/" + A + "/original", record(B, "tunnel.jpg"));
+  const at = {bid: 3, path: "/data/uploads/7/" + A + "/tunnel-marked.png"};
+  const other = chips({stored: at});
+  assert.deepEqual(originals.asked, [[3, "sessions/7/upload/" + A + "/original"]], "asked on the node that keeps it");
+  await settle();
+  assert.ok(!shown(other.viewer).off);
+  other.viewer.originalButton.onclick();
+  const layer = other.viewer.originalImg;
+  assert.ok(shown(other.viewer).pressed === "true" && !shown(other.viewer).swapped && other.viewer.revertButton.disabled,
+    "the marked picture stays until the original is there");
+  assert.equal(layer.src, "/api/preview/data/uploads/7/" + B + "/tunnel.jpg");
+  layer.naturalWidth = 2000; layer.naturalHeight = 1000; layer.onload();
+  assert.deepEqual(shown(other.viewer), {pressed: "true", off: false, hidden: false, original: true, swapped: true,
+    name: "tunnel.jpg", href: "/api/preview/data/uploads/7/" + B + "/tunnel.jpg"});
+  assert.deepEqual([layer.style.width, layer.style.height, layer.style.transform],
+    ["2000px", "1000px", other.viewer.img.style.transform], "on the picture's box and transform");
+  key(other.viewer, "+");
+  assert.equal(layer.style.transform, other.viewer.img.style.transform, "at whatever zoom");
+  other.viewer.originalButton.onclick();
+  assert.ok(!shown(other.viewer).swapped && shown(other.viewer).name === "tunnel-marked.png");
+  other.viewer.originalButton.onclick();
+  assert.ok(shown(other.viewer).swapped, "read once");
+  other.viewer.revertButton.onclick();
+  assert.ok(shown(other.viewer).swapped && shown(other.viewer).off && !shown(other.viewer).original,
+    "from here on it is the picture");
+  draw(other.viewer);
+  assert.ok(!shown(other.viewer).off && other.viewer.items[0].marks.length === 1, "and takes marks of its own");
+  other.viewer.undoButton.onclick();
+  other.viewer.undoButton.onclick();
+  assert.ok(!shown(other.viewer).swapped && other.viewer.items[0].onOriginal === false, "back to the marked copy");
+  other.viewer.originalButton.onclick();
+  other.viewer.revertButton.onclick();
+  draw(other.viewer);
+  other.viewer.dialog.close();
+  assert.equal(other.box.applied.length, 1);
+  assert.equal(other.box.applied[0][0].length, 1);
+  assert.deepEqual(other.box.applied[0][1], {url: "/api/preview/data/uploads/7/" + B + "/tunnel.jpg",
+    path: "/data/uploads/7/" + B + "/tunnel.jpg", name: "tunnel.jpg", size: 9, contentType: "image/jpeg"},
+    "the box is told which picture the marks are on");
+
+  // reverted with nothing drawn since: the picture itself is what the box takes back
+  const alone = chips({stored: at});
+  await settle();
+  alone.viewer.originalButton.onclick();
+  alone.viewer.originalImg.naturalWidth = 2000; alone.viewer.originalImg.onload();
+  alone.viewer.revertButton.onclick();
+  alone.viewer.dialog.close();
+  assert.equal(alone.box.applied.length, 1);
+  assert.ok(alone.box.applied[0][0].length === 0 && alone.box.applied[0][1].name === "tunnel.jpg");
+  // opened again from history, a picture the box has let go is only looked at
+  const reopened = dialogs[dialogs.length - 1].reopen();
+  layout(reopened); load(reopened, 2000, 1000);
+  assert.ok(!reopened.m.querySelector(".iv-tool") && reopened.items[0].marking === null);
+  reopened.dialog.close();
+
+  // sent: the same switch, nothing to revert, and the answer remembered
+  originals.asked.length = 0;
+  const sent = chips({stored: at, marking: false});
+  assert.equal(originals.asked.length, 0, "a copy never learns another original");
+  await settle();
+  assert.ok(!shown(sent.viewer).hidden && !shown(sent.viewer).off && !sent.viewer.m.querySelector(".iv-revert"));
+  sent.viewer.originalButton.onclick();
+  sent.viewer.originalImg.naturalWidth = 2000; sent.viewer.originalImg.onload();
+  assert.ok(shown(sent.viewer).swapped && sent.viewer.downloadLink.download === "tunnel.jpg");
+  // putting it away shows the marks again first, as the thumbnail does
+  motion.reduce = false;
+  box(sent.row.querySelector(".attach-thumb"), 100, 600, 40, 40);
+  sent.viewer.dismiss();
+  assert.equal(document.querySelector(".iv-ghost").querySelector(".iv-img"), sent.viewer.img, "the marked picture flies home");
+  motion.reduce = true;
+  advance(1000);
+  document.querySelectorAll(".iv-ghost").forEach(node => node.remove());
+
+  // a picture with no original, a node that keeps none, one out of reach, and a stray path
+  const none = chips({stored: {bid: 0, path: "/data/uploads/7/" + C + "/plain.png"}, marking: false});
+  await settle();
+  assert.ok(shown(none.viewer).hidden, "a picture that was never marked has no switch");
+  none.viewer.originalButton.onclick();
+  key(none.viewer, "o");
+  assert.equal(shown(none.viewer).pressed, "false");
+  none.viewer.dialog.close();
+  originals.asked.length = 0;
+  originals.supported = () => false;
+  const old = chips({stored: {bid: 4, path: "/data/uploads/7/" + A + "/tunnel-marked.png"}, marking: false});
+  await settle();
+  assert.ok(originals.asked.length === 0 && shown(old.viewer).hidden, "an older node is not asked");
+  old.viewer.dialog.close();
+  originals.supported = () => true;
+  const stray = chips({stored: {bid: 0, path: "/somewhere/else.png"}, marking: false});
+  await settle();
+  assert.ok(originals.asked.length === 0 && shown(stray.viewer).hidden);
+  stray.viewer.dialog.close();
+  originals.answers.set("sessions/9/upload/" + A + "/original", new Error("network error"));
+  const away = {bid: 5, path: "/data/uploads/9/" + A + "/tunnel-marked.png"};
+  const failed = chips({stored: away, marking: false});
+  await settle();
+  assert.ok(shown(failed.viewer).hidden);
+  failed.viewer.dialog.close();
+  originals.answers.set("sessions/9/upload/" + A + "/original", record(B, "tunnel.jpg"));
+  originals.asked.length = 0;
+  const again = chips({stored: away, marking: false});
+  await settle();
+  assert.ok(originals.asked.length === 1 && !shown(again.viewer).hidden, "a node out of reach is asked again");
+  // an original that cannot be read says so and leaves the marked picture
+  originals.toasts.length = 0;
+  again.viewer.originalButton.onclick();
+  again.viewer.originalImg.naturalWidth = 0; again.viewer.originalImg.onerror();
+  assert.deepEqual(originals.toasts, [["Could not load the original image", "bad"]]);
+  assert.ok(shown(again.viewer).pressed === "false" && !shown(again.viewer).swapped && !shown(again.viewer).off);
+  // asked while it is on its way, then paged away: the late picture changes nothing
+  again.viewer.originalButton.onclick();
+  const late = again.viewer.originalImg.onload;
+  again.viewer.show(0);
+  load(again.viewer, 2000, 1000);
+  again.viewer.originalImg.naturalWidth = 2000; late();
+  assert.ok(!shown(again.viewer).swapped && shown(again.viewer).pressed === "false");
+  again.viewer.originalButton.onclick();
+  const lost = again.viewer.originalImg.onerror;
+  again.viewer.show(0);
+  load(again.viewer, 2000, 1000);
+  again.viewer.originalButton.onclick();
+  originals.toasts.length = 0;
+  again.viewer.originalImg.naturalWidth = 0; lost();
+  assert.ok(originals.toasts.length === 0 && shown(again.viewer).pressed === "true",
+    "a failure of the picture left behind is not this one's");
+  again.viewer.dialog.close();
+  for (const row of document.querySelectorAll(".attach-strip")) row.remove();
+  console.log("PASS: the original of a marked picture - hidden marks while they are this page's own, the node's picture on the same box and transform where they are not - under its own name and download, flipped by the switch or O with nothing moving, reverted to and undone, handed to the prompt box with what the marks are on, offered for a sent picture without a revert, and never for one with no original");
+})().then(copyChecks).catch(error => { console.error(error); process.exit(1); });
+
+/* ---- Copy: the picture onto the clipboard, offered only where a page may write one ---- */
+async function copyChecks() {
   const native = api.el("div", "tool-card");
   native.innerHTML = '<div class="tool-head"><span class="t-state"></span></div><div class="tool-body"></div>';
   native._toolName = "imageView";
@@ -1064,6 +1307,65 @@ console.log("PASS: marks on a waiting picture - rounded boxes, arrows and lines 
   assert.ok(!button.classList.contains("done"));
   refuse = null;
   viewer.dialog.close();
+
+  // a waiting picture is copied and saved as it is shown: with its marks in view, or as it was
+  const inks = [];
+  FakeElement.prototype.getContext = function () {
+    const canvas = this;
+    return {drawImage: img => draws.push([img, 0, 0, canvas.width, canvas.height]), beginPath() {}, moveTo() {},
+      lineTo() {}, arcTo() {}, closePath() {}, stroke() {}, fill() {}, set fillStyle(_) {}, lineWidth: 0,
+      set strokeStyle(color) { inks.push(color); }};
+  };
+  const saved = [], revoked = [];
+  context.URL = {createObjectURL: blob => { saved.push(blob); return "blob:saved-" + saved.length; },
+                 revokeObjectURL: url => revoked.push(url)};
+  const line = {kind: "line", w: 4, x1: 0, y1: 0, x2: 90, y2: 90, color: "#2f80ff"};
+  const waitingRow = strip(["blob:marked"]);
+  waitingRow.querySelector(".attach-view")._marking = {composer: {markable: () => true, applyMarks() {}},
+    attachment: {}, marks: [line], source: "blob:bare", name: "photo.jpg"};
+  waitingRow.querySelector(".attach-view").onclick(new FakeEvent("click"));
+  const editor = current();
+  layout(editor); load(editor, 640, 480);
+  editor.copyButton.onclick();
+  await settleCopy(); await settleCopy();
+  assert.deepEqual(inks, ["#2f80ff"], "the marks in view are on the copy");
+  const clicked = [];
+  const links = document.createElement;
+  document.createElement = function (tag) {
+    const node = links.call(document, tag);
+    if (tag === "a") node.click = () => clicked.push([node.href, node.download, node.isConnected]);
+    return node;
+  };
+  const pressDownload = async () => {
+    let stopped = false;
+    editor.downloadLink.onclick({preventDefault: () => { stopped = true; }});
+    await settleCopy(); await settleCopy();
+    return stopped;
+  };
+  const base = editor.items[0].name.replace(/\.[^.]*$/, "");
+  assert.equal(editor.downloadLink.download, base + "-marked.png");
+  assert.equal(await pressDownload(), true, "the link alone would save the picture without them");
+  assert.deepEqual(clicked, [["blob:saved-1", base + "-marked.png", true]]);
+  assert.ok(inks.length === 2 && saved[0].width === 640 && document.querySelectorAll("a").every(node =>
+    node.href !== "blob:saved-1"), "saved at the picture's own size, the link gone again");
+  advance(60001);
+  assert.deepEqual(revoked, ["blob:saved-1"]);
+  editor.originalButton.onclick();
+  assert.equal(editor.downloadLink.download, "photo.jpg");
+  assert.equal(await pressDownload(), false, "the original is the link's own file");
+  editor.copyButton.onclick();
+  await settleCopy(); await settleCopy();
+  assert.equal(inks.length, 2, "and is copied with nothing on it");
+  editor.originalButton.onclick();
+  toasts.length = 0;
+  const toBlob = FakeElement.prototype.toBlob;
+  FakeElement.prototype.toBlob = function (done) { done(null); };
+  assert.equal(await pressDownload(), true);
+  assert.deepEqual(toasts, [["Could not save the image · the picture could not be read", "bad"]]);
+  FakeElement.prototype.toBlob = toBlob;
+  document.createElement = links;
+  editor.dialog.close();
+  waitingRow.remove();
   window.isSecureContext = false;
-  console.log("PASS: Copy puts the picture on the clipboard as PNG at its own size - offered only on a secure page, beside the download, from the press or ctrl/cmd+C, never over selected text - with a moment's check and a refusal said once");
-})().catch(error => { console.error(error); process.exit(1); });
+  console.log("PASS: Copy puts the picture on the clipboard as PNG at its own size - offered only on a secure page, beside the download, from the press or ctrl/cmd+C, never over selected text - with a moment's check and a refusal said once; a waiting picture is copied and saved with the marks in view, or as it was with the original shown");
+}
