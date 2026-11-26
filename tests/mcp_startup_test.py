@@ -168,9 +168,10 @@ for engine, servers in (("codex", codex_servers), ("claude", claude_servers),
         assert server["env"]["PUPPY_DATA"] == str(node_data)
         assert (node_data / "config.json").read_bytes() == config_bytes
         assert list(child_cwd.iterdir()) == [], (engine, kind)
-# every engine still hears each policy, and Codex and OpenCode - which do not
-# show a server's instructions the way Claude Code does - the session and file
-# bridges' guidance as well
+# every engine still hears each policy. Codex, like Claude Code, shows each
+# server's instructions itself (as its tool namespace's description, probed on
+# 0.172.0), so the session and file bridges' guidance - those very texts - is
+# not repeated in its prompt; OpenCode, unprobed, still gets them there
 for engine, text in (
         ("codex", CodexDriver().turn_context(session, True, "probe", "startup-test",
                                              **descriptors)["prompt"]),
@@ -179,7 +180,8 @@ for engine, text in (
     for kind in policies:
         assert json.dumps("Node policy for " + kind)[1:-1] in text, (engine, kind)
     for guidance in (session_agent.TOOL_INSTRUCTIONS, files_agent.ENGINE_GUIDANCE):
-        assert json.dumps(guidance.split(". ")[0])[1:-1] in text, (engine, guidance[:40])
+        present = json.dumps(guidance.split(". ")[0])[1:-1] in text
+        assert present == (engine == "opencode"), (engine, guidance[:40])
 assert "--allowedTools" not in codex
 print("MCP startup: seven bridges through all three drivers passed")
 '''

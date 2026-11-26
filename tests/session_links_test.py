@@ -841,6 +841,14 @@ async def agent_calls():
         search.reconcile()
         found = await call("search", {"refs": [rc], "query": "note 17"})
         hit = found["results"][0]["results"][0]["matches"][0]["seq"]
+        # excerpts read as words: the console's highlight marks stay the console's
+        snippets = [match["snippet"] for value in found["results"] for row in value["results"]
+                    for match in row["matches"]]
+        assert snippets and all("\x01" not in text and "\x02" not in text for text in snippets), snippets
+        assert "note 17" in snippets[0], snippets
+        marked = await links.broker(origin, "search", {"refs": [rc], "query": "note 17"})
+        assert "\x01" in marked["results"][0]["results"][0]["matches"][0]["snippet"], \
+            "the console still gets its marks"
         page = (await call("read", {"refs": [rc], "around_seq": hit}))["results"][0]
         seqs = [item["seq"] for item in page["events"]]
         assert seqs == list(range(hit - 4, hit + 5)), seqs

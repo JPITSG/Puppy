@@ -754,7 +754,9 @@ def descriptors():
         argv = codex.build_cmd(session, True, "p", "t", files_mcp=descriptor)
         assert any(arg.startswith("mcp_servers.puppy_files.command=") for arg in argv)
         prompt = codex.turn_context(session, True, "p", "t", files_mcp=descriptor)["prompt"]
-        assert "<puppy_files_policy>\n" + files_agent.ENGINE_GUIDANCE + "\n</puppy_files_policy>" in prompt
+        # Codex shows the server's instructions as its tool namespace's
+        # description, so the prompt does not carry them a second time
+        assert "puppy_files_policy" not in prompt and files_agent.ENGINE_GUIDANCE not in prompt
         assert codex.build_cmd(session, True, "p", "t", files_mcp=descriptor, tool={"tool": "compact"}) \
             == [codex.binary, "app-server", "--stdio"], "a maintenance turn gets no bridges"
         opencode = OpenCodeDriver()
@@ -764,8 +766,8 @@ def descriptors():
             opencode.build_env(session, True, "p", "t", files_mcp=descriptor))
     finally:
         files_agent._server = None
-    print("PASS: claude, codex and opencode carry the file bridge and its guidance; a maintenance "
-          "turn carries none")
+    print("PASS: claude, codex and opencode carry the file bridge, its guidance once each; a "
+          "maintenance turn carries none")
 
 
 async def frame(ws, kind, timeout=20):

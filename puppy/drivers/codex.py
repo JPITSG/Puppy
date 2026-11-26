@@ -129,7 +129,18 @@ def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
     tagged runtime preface keeps any user-configured developer instructions
     intact. The runner persists the original text before build_cmd is called,
     so this context never appears as part of the user's WebUI transcript.
+
+    Codex shows the model each MCP server's own instructions, whole, as the
+    description of that server's tool namespace (probed on 0.172.0, through
+    exec and app-server alike against a loopback stand-in API: 9000
+    characters arrived uncut). Guidance those instructions already carry
+    (``guidance_in_instructions``: the session and file bridges) is not
+    repeated here - it would ride every turn's message into the thread.
     """
+    browser_mcp, terminal_mcp, vnc_mcp, spawn_mcp, session_mcp, task_mcp, files_mcp = (
+        None if (item or {}).get("guidance_in_instructions") else item
+        for item in (browser_mcp, terminal_mcp, vnc_mcp, spawn_mcp, session_mcp,
+                     task_mcp, files_mcp))
     blocks = []
     custom = str(system_prompt or "").strip()
     if custom:

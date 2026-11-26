@@ -256,6 +256,15 @@ still contain a value written before that release.
   agent's `sessions` listing marks them `selected` and says so in
   `selection`. `"[all]"` and `"[this]"`, the notation's spelling, read as
   those words. No stored format or wire capability changes.
+- Since v1.0.662 the agent's session `search` results carry excerpts without
+  the console's `\u0001`/`\u0002` highlight marks (`session_links.for_agent`;
+  the console's own search keeps them for `<mark>`), and the Codex driver no
+  longer repeats in each turn's prompt the guidance of a bridge whose own
+  instructions carry it (`guidance_in_instructions`: session, files): Codex
+  0.172.0 shows every MCP server's instructions to its model, whole, as the
+  description of that server's tool namespace (probed through `exec` and
+  `app-server` against a loopback stand-in API). No route, stored format or
+  capability changes.
 - Since v1.0.661 the session tools' `send` requires `action` (no default
   task) and takes `wait_s` (0-25, waited after the durable send); `wait`,
   `cancel`, `workflow` and `cancel_workflow` take the agent's own

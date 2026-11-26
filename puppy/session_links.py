@@ -784,6 +784,26 @@ def _session_row(row):
     return item
 
 
+# the highlight marks search puts around a matched word, for the console's
+# <mark>; an agent reads them as two stray control characters
+_MARKS = str.maketrans("", "", "\x01\x02")
+
+
+def _search_row(row):
+    """One session's search hits as an agent reads them: its session row
+    lean, and excerpts without the console's highlight marks."""
+    if not isinstance(row, dict):
+        return row
+    row = dict(row)
+    if "session" in row:
+        row["session"] = _session_row(row["session"])
+    if isinstance(row.get("matches"), list):
+        row["matches"] = [dict(match, snippet=match["snippet"].translate(_MARKS))
+                          if isinstance(match, dict) and isinstance(match.get("snippet"), str)
+                          else match for match in row["matches"]]
+    return row
+
+
 def _answer_rows(results, answers=True, sharing=0):
     """A request's per-session results: status, error, and the answer - each
     within its share of the result (``sharing`` answers in all, these by
@@ -863,9 +883,7 @@ def for_agent(method, result):
             if "session" in value:
                 value["session"] = _session_row(value["session"])
             if isinstance(value.get("results"), list):
-                value["results"] = [dict(row, session=_session_row(row["session"]))
-                                    if isinstance(row, dict) and "session" in row else row
-                                    for row in value["results"]]
+                value["results"] = [_search_row(row) for row in value["results"]]
             results.append(value)
         return dict(result, results=results)
     if method in ("send", "wait", "cancel"):
