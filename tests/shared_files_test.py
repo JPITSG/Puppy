@@ -746,7 +746,10 @@ def descriptors():
         claude = ClaudeDriver().build_cmd(session, True, "p", "t", files_mcp=descriptor)
         servers = json.loads(claude[claude.index("--mcp-config") + 1])["mcpServers"]
         assert servers["puppy_files"]["args"] == ["-m", "puppy.files_agent"]
-        assert files_agent.ENGINE_GUIDANCE in claude[claude.index("--append-system-prompt") + 1]
+        # the server's own instructions say it all, and Claude Code shows them in
+        # its system prompt: the guidance is not added a second time there
+        assert "--append-system-prompt" not in claude
+        assert "--allowedTools" not in claude, "sharing a file is never allowed up front"
         codex = CodexDriver()
         argv = codex.build_cmd(session, True, "p", "t", files_mcp=descriptor)
         assert any(arg.startswith("mcp_servers.puppy_files.command=") for arg in argv)

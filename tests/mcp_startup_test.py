@@ -23,7 +23,7 @@ import subprocess
 
 from puppy import (config, browser_agent, terminal_agent, vnc_agent,
                    spawn_agent, session_agent, task_agent, files_agent)
-from puppy.drivers.claude import ClaudeDriver
+from puppy.drivers.claude import ClaudeDriver, MCP_INSTRUCTIONS_LIMIT
 from puppy.drivers.codex import CodexDriver
 from puppy.drivers.opencode import OpenCodeDriver
 
@@ -53,6 +53,36 @@ for kind, module in bridges.items():
 session = {"cwd": str(child_cwd)}
 claude = ClaudeDriver().build_cmd(session, True, "probe", "startup-test", **descriptors)
 claude_servers = json.loads(claude[claude.index("--mcp-config") + 1])["mcpServers"]
+claude_guidance = claude[claude.index("--append-system-prompt") + 1]
+# Claude Code cuts a server's instructions past 4096 characters, every role's
+for kind, module in bridges.items():
+    for role in (("main", "task") if kind == "task" else (None,)):
+        text = module.instructions(role) if role else module.instructions()
+        assert len(text) <= MCP_INSTRUCTIONS_LIMIT, (kind, role, len(text))
+# each policy reaches Claude once, in its system prompt; guidance a server's own
+# instructions carry is not repeated there
+for kind in policies:
+    assert claude_guidance.count("Node policy for " + kind) == 1, kind
+assert session_agent.TOOL_INSTRUCTIONS not in claude_guidance
+assert files_agent.ENGINE_GUIDANCE not in claude_guidance
+# what only looks is allowed up front, so auto mode does not stop to ask; no action is
+allowed = claude[claude.index("--allowedTools") + 1].split(",")
+expected = []
+for kind, module in bridges.items():
+    tools = module.TOOLS["main"] if isinstance(module.TOOLS, dict) else module.TOOLS
+    expected += ["mcp__{}__{}".format(module.SERVER_NAME, tool["name"]) for tool in tools
+                 if tool["annotations"]["readOnlyHint"]]
+assert sorted(allowed) == sorted(expected) and len(allowed) == len(set(allowed)), allowed
+for name in ("mcp__puppy_vnc__screenshot", "mcp__puppy_browser__snapshot",
+             "mcp__puppy_session__read", "mcp__puppy_spawn__wait", "mcp__puppy_tasks__changes"):
+    assert name in allowed, name
+for name in ("mcp__puppy_vnc__click", "mcp__puppy_browser__navigate", "mcp__puppy_session__send",
+             "mcp__puppy_spawn__spawn", "mcp__puppy_files__share_file",
+             "mcp__puppy_terminal__snapshot", "mcp__puppy_terminal__type",
+             "mcp__puppy_tasks__new_task"):
+    assert name not in allowed, name
+task_role = task_agent.turn_mcp(1, "startup-test", role="task")
+assert task_role["read_only_tools"] == ["status", "tasks", "read", "wait"], task_role
 codex = CodexDriver().build_cmd(session, True, "probe", "startup-test", **descriptors)
 codex_servers = {}
 for index, arg in enumerate(codex):
@@ -97,7 +127,7 @@ for engine, servers in (("codex", codex_servers), ("claude", claude_servers),
         instructions = replies[0]["result"]["instructions"]
         assert instructions == module.instructions(), (engine, kind)
         if kind in policies:
-            assert "Node policy for " + kind in instructions, (engine, kind)
+            assert "Node policy for " + kind not in instructions, (engine, kind)
         # the task bridge serves Main's tools by default; a task's are its own
         tools = module.TOOLS["main"] if isinstance(module.TOOLS, dict) else module.TOOLS
         assert {tool["name"] for tool in replies[1]["result"]["tools"]} == {
@@ -105,6 +135,19 @@ for engine, servers in (("codex", codex_servers), ("claude", claude_servers),
         assert server["env"]["PUPPY_DATA"] == str(node_data)
         assert (node_data / "config.json").read_bytes() == config_bytes
         assert list(child_cwd.iterdir()) == [], (engine, kind)
+# every engine still hears each policy, and Codex and OpenCode - which do not
+# show a server's instructions the way Claude Code does - the session and file
+# bridges' guidance as well
+for engine, text in (
+        ("codex", CodexDriver().turn_context(session, True, "probe", "startup-test",
+                                             **descriptors)["prompt"]),
+        ("opencode", json.dumps(OpenCodeDriver().build_env(
+            session, True, "probe", "startup-test", **descriptors)))):
+    for kind in policies:
+        assert json.dumps("Node policy for " + kind)[1:-1] in text, (engine, kind)
+    for guidance in (session_agent.TOOL_INSTRUCTIONS, files_agent.ENGINE_GUIDANCE):
+        assert json.dumps(guidance.split(". ")[0])[1:-1] in text, (engine, guidance[:40])
+assert "--allowedTools" not in codex
 print("MCP startup: seven bridges through all three drivers passed")
 '''
 

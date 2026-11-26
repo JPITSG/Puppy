@@ -61,9 +61,12 @@ TOOL_INSTRUCTIONS = (
 
 
 def instructions() -> str:
-    """MCP initialization guidance, including the node's current browser text."""
-    policy = system_prompts.browser_prompt().strip()
-    return (policy + " " if policy else "") + TOOL_INSTRUCTIONS
+    """The MCP server's instructions: the built-in rules alone. The node's
+    editable policy reaches every engine through its system prompt as this
+    descriptor's engine_guidance, and Claude Code shows these instructions in
+    its system prompt too, cut at 4096 characters: sending the policy here as
+    well said it twice and let a longer policy push these rules off the end."""
+    return TOOL_INSTRUCTIONS
 
 
 def _tool(name, description, properties=None, required=None, read_only=False,
@@ -395,6 +398,10 @@ def turn_mcp(session_id: int, turn_id: str):
         # Drivers use this same policy through their strongest additive channel
         # so tool selection does not depend on MCP initialization presentation.
         "engine_guidance": policy,
+        # Claude Code's allow list: these only look, so its auto mode runs
+        # them without first asking its safety check (drivers/claude.py)
+        "read_only_tools": [tool["name"] for tool in TOOLS
+                            if tool["annotations"]["readOnlyHint"]],
         "env": {
             "PYTHONPATH": _package_search_path(),
             # MCP clients may filter inherited env; the child also changes cwd.

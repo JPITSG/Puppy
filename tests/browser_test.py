@@ -6725,7 +6725,8 @@ async def main() -> None:
             assert "briefly state the concrete reason" in policy
             assert descriptor["env"]["PUPPY_BROWSER_SESSION_ID"] == str(agent_sid)
             assert descriptor["env"]["PUPPY_BROWSER_TURN_ID"] == turn_id
-            expected_instructions = policy + " " + browser_agent.TOOL_INSTRUCTIONS
+            # the policy rides the system prompt alone; the server sends its own rules
+            expected_instructions = browser_agent.TOOL_INSTRUCTIONS
             assert Path(descriptor["env"]["PUPPY_BROWSER_SOCKET"]).stat().st_mode & 0o777 \
                 == 0o600
 
@@ -6739,6 +6740,12 @@ async def main() -> None:
                 descriptor["command"], claude_mcp
             guidance_index = claude_argv.index("--append-system-prompt")
             assert claude_argv[guidance_index + 1] == custom_prompt + "\n\n" + policy
+            # the tools that only look skip auto mode's safety check; actions do not
+            allowed = claude_argv[claude_argv.index("--allowedTools") + 1].split(",")
+            assert allowed == ["mcp__puppy_browser__" + name for name in (
+                "snapshot", "screenshot", "inspect_element", "wait_for", "pages",
+                "console_messages", "network_failures", "downloads", "read_download",
+                "wait")], allowed
             resumed = dict(agent_session, native_session_id="existing-native")
             claude_resume = ClaudeDriver().build_cmd(
                 resumed, False, "again", "unused", browser_mcp=descriptor,
@@ -6841,9 +6848,7 @@ async def main() -> None:
                 assert initialized["result"]["serverInfo"]["version"] == "4"
                 instructions = initialized["result"].get("instructions", "")
                 assert instructions == expected_instructions
-                assert policy in instructions and \
-                    "default for interactive web navigation" in instructions and \
-                    "Do not launch or install Chrome" in instructions and \
+                assert policy not in instructions and \
                     "fresh, isolated" in instructions and \
                     "without taking focus" in instructions and \
                     "explicitly asks" in instructions and \

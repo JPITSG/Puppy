@@ -403,7 +403,11 @@ def check_mcp_protocol() -> None:
     assert "terminal_id" in tools["snapshot"]["inputSchema"]["properties"]
     assert "terminal_id" not in tools["new_terminal"]["inputSchema"]["properties"]
     assert tools["type"]["annotations"]["destructiveHint"] is True
-    assert tools["snapshot"]["annotations"]["readOnlyHint"] is True
+    # looking at a terminal starts a shell when none is linked: never allowed
+    # up front, so Claude Code's auto mode still checks it
+    assert tools["terminals"]["annotations"]["readOnlyHint"] is True
+    assert tools["snapshot"]["annotations"]["readOnlyHint"] is False
+    assert tools["wait_for"]["annotations"]["readOnlyHint"] is False
 
 
 def check_driver_wiring(session_id: int) -> None:

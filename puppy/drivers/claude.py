@@ -513,6 +513,12 @@ def _context_window(model_usage, model) -> int:
     return windows.get(str(model or ""), max(windows.values()))
 
 
+# Claude Code shows each MCP server's instructions in its system prompt and
+# cuts them at 4096 characters (seen on 2.1.332): every Puppy bridge keeps its
+# own under this, which tests/mcp_startup_test.py holds them to.
+MCP_INSTRUCTIONS_LIMIT = 4000
+
+
 class ClaudeDriver(Driver):
     key = "claude"
     label = "Claude Code"
@@ -762,9 +768,20 @@ class ClaudeDriver(Driver):
                 "env": dict(item.get("env") or {}),
             } for item in mcps}}
             argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
+            # Tools that only look are allowed up front: in auto mode the CLI
+            # otherwise asks its safety model before every call - probed on
+            # 2.1.332, 0.34-0.67 s a call in a short conversation, a 6.5 s
+            # median in long ones - and then runs them at once. Actions still
+            # take whatever the session's permission mode decides.
+            allowed = ["mcp__{}__{}".format(item["name"], tool) for item in mcps
+                       for tool in item.get("read_only_tools") or ()]
+            if allowed:
+                argv += ["--allowedTools", ",".join(allowed)]
         guidance = [] if tool_kind else [str(system_prompt or "").strip()]
+        # Claude Code shows each server's own instructions in its system
+        # prompt already; guidance those instructions carry is not repeated
         guidance.extend(str(item.get("engine_guidance") or "").strip()
-                        for item in mcps)
+                        for item in mcps if not item.get("guidance_in_instructions"))
         guidance = "\n\n".join(part for part in guidance if part)
         if guidance:
             # Additive: preserve any system prompt the user or CLI already

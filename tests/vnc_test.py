@@ -1740,8 +1740,8 @@ def check_agent_contract() -> None:
         config.get("system_prompt.terminal"), policy,
         config.get("system_prompt.spawn"))
     try:
-        assert vnc_agent.instructions() == \
-            policy + " " + vnc_agent.TOOL_INSTRUCTIONS
+        # the policy rides the system prompt alone; the server sends its own rules
+        assert vnc_agent.instructions() == vnc_agent.TOOL_INSTRUCTIONS
         session = {"cwd": str(TEST_ROOT)}
         vnc_agent._server = object()
         descriptor = vnc_agent.turn_mcp(1, "contract")

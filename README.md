@@ -1048,6 +1048,11 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
 
 All of this reaches the model through turn-bound MCP bridges Puppy starts for
 each turn, on every engine. Their policy texts live in Settings → System prompt.
+On Claude Code the bridges' tools that only look - screenshots, page and
+screen snapshots, lists, reads and waits - are allowed up front, so in auto
+mode they run at once instead of each waiting for Claude Code's safety check;
+actions such as clicks, typing, sending and spawning still take whatever the
+session's permission mode decides.
 The API-only headless package provides the same bridges without running a web
 UI, including the backend's configured browser, terminal, remote screen,
 spawn and task policies.

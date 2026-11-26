@@ -6696,9 +6696,10 @@ async def main() -> None:
         mcp_result = json.loads(mcp_output.strip())
         assert mcp_result["result"]["serverInfo"]["name"] == "Puppy managed browser"
         assert "four uppercase" in mcp_result["result"]["instructions"]
-        assert "default for interactive web navigation" in \
+        # the editable policy rides each engine's system prompt, never these too
+        assert "default for interactive web navigation" not in \
             mcp_result["result"]["instructions"]
-        assert "repository's own browser test suite" in \
+        assert "repository's own browser test suite" not in \
             mcp_result["result"]["instructions"]
         terminal_mcp_output = subprocess.check_output(
             [sys.executable, "-m", "puppy.terminal_agent"], input=mcp_init,

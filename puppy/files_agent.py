@@ -109,6 +109,13 @@ def turn_mcp(session_id: int, turn_id: str):
         "command": sys.executable,
         "args": ["-m", "puppy.files_agent"],
         "engine_guidance": ENGINE_GUIDANCE,
+        # the server's own instructions already say this, and Claude Code shows
+        # them in its system prompt: only engines that do not need it again
+        "guidance_in_instructions": True,
+        # Claude Code's allow list: these only look, so its auto mode runs
+        # them without first asking its safety check (drivers/claude.py)
+        "read_only_tools": [tool["name"] for tool in TOOLS
+                            if tool["annotations"]["readOnlyHint"]],
         "env": {
             "PYTHONPATH": _package_search_path(),
             # MCP clients may filter inherited env; the child also changes cwd.

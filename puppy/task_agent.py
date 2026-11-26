@@ -108,10 +108,10 @@ TASK_INSTRUCTIONS = (
 
 
 def instructions(role: str = "main") -> str:
-    """MCP initialization guidance, including this node's editable policy."""
-    policy = system_prompts.tasks_prompt().strip()
-    text = TASK_INSTRUCTIONS if role == "task" else MAIN_INSTRUCTIONS
-    return (policy + " " if policy else "") + text
+    """The MCP server's instructions for a role: the built-in rules alone. The
+    node's editable task policy reaches every engine through its system prompt
+    as this descriptor's engine_guidance (see browser_agent.instructions)."""
+    return TASK_INSTRUCTIONS if role == "task" else MAIN_INSTRUCTIONS
 
 
 def _tool(name, description, properties=None, required=None, read_only=False,
@@ -309,6 +309,10 @@ def turn_mcp(session_id: int, turn_id: str, role: str = "main"):
         "command": sys.executable,
         "args": ["-m", "puppy.task_agent"],
         "engine_guidance": system_prompts.tasks_prompt(),
+        # Claude Code's allow list: these only look, so its auto mode runs
+        # them without first asking its safety check (drivers/claude.py)
+        "read_only_tools": [tool["name"] for tool in TOOLS[role]
+                            if tool["annotations"]["readOnlyHint"]],
         "env": {
             "PYTHONPATH": _package_search_path(),
             # MCP clients may filter inherited env; the child also changes cwd.

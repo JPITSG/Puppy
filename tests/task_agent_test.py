@@ -616,7 +616,8 @@ async def stdio_server():
         assert {tool["name"] for tool in replies[1]["result"]["tools"]} == {tool["name"] for tool in names}
         assert replies[2]["error"]["code"] == -32603, "the other role's tool is not served"
     assert "This conversation is a Puppy task" in task_agent.instructions("task")
-    assert config.DEFAULT_TASKS_SYSTEM_PROMPT in task_agent.instructions("main")
+    # the editable policy rides each engine's system prompt, never the instructions too
+    assert config.DEFAULT_TASKS_SYSTEM_PROMPT not in task_agent.instructions("main")
     print("PASS: the stdio server answers each role with its own tools and instructions")
 
 
