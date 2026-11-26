@@ -1526,6 +1526,14 @@ _SCANCODES = {
 }
 for _index in range(10):
     _SCANCODES[0xFFBE + _index] = (0x3B + _index, False)
+# The numeric keypad an agent can name: the navigation keys' scan codes
+# without the extended flag, as a keyboard sends them.
+for _keysym, _code in zip(range(0xFFB0, 0xFFBA),
+                          (0x52, 0x4F, 0x50, 0x51, 0x4B, 0x4C, 0x4D, 0x47, 0x48, 0x49)):
+    _SCANCODES[_keysym] = (_code, False)
+_SCANCODES.update({0xFFAE: (0x53, False), 0xFFAB: (0x4E, False),
+                   0xFFAD: (0x4A, False), 0xFFAA: (0x37, False),
+                   0xFFAF: (0x35, True)})
 _SCANCODES[0xFFC8] = (0x57, False)
 _SCANCODES[0xFFC9] = (0x58, False)
 KEY_PAUSE = 0xFF13
@@ -2059,9 +2067,7 @@ class RdpInstance(vnc.VncInstance):
         damage, self.damage = self.damage, []
         if not damage:
             return
-        self.frame_seq += 1
-        self.frame_wake.set()
-        self.frame_wake.clear()
+        self._note_update([item[:4] for item in damage])
         if not self.viewers:
             return
         head = vnc._FRAME_HEAD
@@ -2143,8 +2149,10 @@ class RdpInstance(vnc.VncInstance):
 
     # ---- who is looking ----
 
-    def _wanted(self) -> bool:
-        return self._streaming() or time.monotonic() < self.attention_until
+    def _current(self) -> bool:
+        """RDP pushes every change itself while its output is not suppressed."""
+        return bool(self.activated and self.wire is not None and self.display_on
+                    and self.caught_up)
 
     def _sync_display(self) -> None:
         """Suppress Output while nobody watches; ask for the screen when they do."""
@@ -2155,6 +2163,7 @@ class RdpInstance(vnc.VncInstance):
             return
         self.display_on = want
         if want:
+            self.caught_up = False
             payload = struct.pack("<B3xHHHH", 1, 0, 0, self.width - 1, self.height - 1)
         else:
             payload = struct.pack("<B3x", 0)
@@ -2170,10 +2179,6 @@ class RdpInstance(vnc.VncInstance):
         except RuntimeError:
             self.attention_handle = None
         self._sync_display()
-
-    def touch(self) -> None:
-        super().touch()
-        self._attend()
 
     def detach_viewer(self, ws) -> None:
         super().detach_viewer(ws)

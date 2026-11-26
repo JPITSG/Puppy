@@ -85,7 +85,8 @@ Updates are applied as they arrive and handed to viewers once nothing more is
 buffered (or every 50 ms during a long burst, which also yields the event
 loop): up to 48 rectangles travel as they are, more collapse into one cut of
 their bounding box, exactly as VNC damage does. Each such hand-over counts one
-applied update for an agent waiting on `sync`.
+applied update for an agent waiting on `sync`, with its rectangles logged for
+waits that watch one region (see the agent tools in `docs/vnc.md`).
 
 Remote Desktop pushes every change itself, so where VNC stops requesting
 frames, RDP sends Suppress Output: with no active viewer and no recent agent

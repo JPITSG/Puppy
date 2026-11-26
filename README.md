@@ -911,8 +911,8 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   merely moved carries no pixels at all. Full-screen refreshes stream in bands
   so large screens remain complete even when they exceed the viewer's delta
   queue limit. With the tab hidden, in a background
-  window, or with no viewer attached, Puppy stops asking the server for frames
-  altogether; the connection is dropped entirely after the unattended timeout,
+  window, or with no viewer attached, and no agent call in the last two minutes,
+  Puppy stops asking the server for frames altogether; the connection is dropped entirely after the unattended timeout,
   and reopening the tab dials again. Every connection has a four-character ID,
   and closing its tab closes it. A server that goes away is reported in the pane
   itself, with the reason and a *Reconnect* button; Puppy redials a few times,
@@ -921,9 +921,15 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   *Connected*; that requires a successful reconnection status from the backend.
   The agent gets the same screen as a toolset: look at it, move, click or tap,
   drag or swipe, scroll, type, press keys and shortcuts, wait for the picture to
-  settle, and connect or disconnect. Screenshots are PNGs Puppy builds from the
-  decoded framebuffer itself, and every coordinate is a remote screen pixel, so
-  the agent works the machine the way you would. `@VNC A8AR` in the chat box
+  settle or to change, and connect or disconnect. Screenshots are PNGs Puppy
+  builds from the decoded framebuffer itself, at most 2000 pixels a side, and
+  every coordinate is a remote screen pixel, so the agent works the machine the
+  way you would. Each action can return its own picture of the result: Puppy
+  waits for the part of the screen the agent last looked at to react, says what
+  changed and where or that nothing did, and answers a picture identical to the
+  last one with a short note. A shortcut can be written as one key
+  (`Control+Alt+Delete`), and an argument a tool does not take is refused
+  rather than ignored. `@VNC A8AR` in the chat box
   points it at an open connection and `@VNC 192.168.1.10:5900 password` at a
   server to dial; the `@` menu's *New VNC connection* wizard builds either for
   you. Passwords included in a prompt are saved with that conversation; to

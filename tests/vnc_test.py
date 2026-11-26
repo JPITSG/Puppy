@@ -10,11 +10,13 @@ engine is invoked.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from pathlib import Path
 import os
 import shutil
 import struct
+import time
 import sys
 import zlib
 from types import SimpleNamespace
@@ -1490,6 +1492,22 @@ async def check_agent_screenshot() -> None:
                                           "height": 900})
     assert (clamped["width"], clamped["height"]) == (1, 1), clamped
 
+    # The rows are a copy taken on the loop: the reader painting the same
+    # buffer afterwards cannot reach into a picture a worker is deflating.
+    copied = instance.agent_rows()
+    instance.frame[0:4] = rgba((255, 255, 255))
+    assert copied["rows"][0][:3] == bytes(colours[0]), copied["rows"][0][:3]
+    instance.frame[0:4] = rgba(colours[0])
+
+    # The image limits models read without rescaling: 2000 px a side and
+    # 3.75 MP, always by a whole factor, measured on what is really sent.
+    assert vnc._picture_step(6720, 1800, 2000) == 4
+    assert vnc._picture_step(1920, 1080, 1920) == 1
+    assert vnc._picture_step(4001, 10, 2000) == 3, "a ceiling, not a floor"
+    assert vnc._picture_step(2000, 2000, 2000) == 2, "3.75 MP at most"
+    assert vnc._picture_step(1936, 1936, 2000) == 1
+    assert vnc._picture_step(1937, 1937, 2000) == 2
+
     # With no viewer the update loop is parked, so the agent turns it by hand.
     before = len(server.requests)
     assert await instance.sync(timeout=0.3) is False, "an idle screen is current"
@@ -1501,6 +1519,141 @@ async def check_agent_screenshot() -> None:
     await instance.close("test")
     await server.stop()
     print("  agent screenshot ok")
+
+
+def later(seconds, function, *args):
+    asyncio.get_event_loop().call_later(seconds, function, *args)
+
+
+async def check_agent_watch() -> None:
+    """Waiting on one region: what counts as a change, and when quiet is."""
+    server = await StubVncServer(width=400, height=300).start()
+    instance = await connected_instance(server)
+    server.queue(update(rect(0, 0, 400, 300, vnc.ENC_RAW,
+                             raw_payload([(5, 5, 5)] * (400 * 300)))))
+    await wait_for(lambda: instance.frame_seq >= 1, label="first frame")
+    region = (200, 150, 100, 100)
+    clock = update(rect(10, 10, 20, 8, vnc.ENC_RAW, raw_payload([(9, 9, 9)] * 160)))
+    inside = update(rect(220, 160, 30, 20, vnc.ENC_RAW,
+                         raw_payload([(1, 2, 3)] * 600)))
+
+    # What changed, where, and only inside the region asked about.
+    seq = instance.frame_seq
+    server.queue(clock)
+    await instance.sync(timeout=2.0)
+    assert instance.damage_since(seq) == (10, 10, 20, 8)
+    assert instance.damage_since(seq, region) is None
+    assert instance.damage_since(seq, (0, 0, 15, 15)) == (10, 10, 5, 5), "clipped"
+    assert instance.damage_since(instance.frame_seq) is None
+
+    # A clock elsewhere ticking all through does not keep a region unstable.
+    for delay in (0.05, 0.15, 0.25, 0.35):
+        later(delay, server.queue, clock)
+    outcome = await instance.watch(region, "stable", quiet_ms=300, timeout_ms=2000)
+    assert outcome["stable"] and outcome["changed"] is None, outcome
+    assert outcome["waited_ms"] < 1000, outcome
+    # ... while the whole screen, watched the same way, never settles.
+    for delay in (0.05, 0.15, 0.25, 0.35, 0.45, 0.55):
+        later(delay, server.queue, clock)
+    outcome = await instance.watch(None, "stable", quiet_ms=300, timeout_ms=500)
+    assert not outcome["stable"] and outcome["changed"] == (10, 10, 20, 8), outcome
+    await asyncio.sleep(0.3)
+    await instance.sync(timeout=0.3)
+
+    # A quiet window longer than the budget is never called stable.
+    outcome = await instance.watch(None, "stable", quiet_ms=1000, timeout_ms=300)
+    assert not outcome["stable"], outcome
+    # Nothing to settle is quick, not the full sync timeout it once took.
+    began = time.monotonic()
+    outcome = await instance.watch(None, "stable", quiet_ms=0, timeout_ms=0)
+    assert outcome["stable"] and time.monotonic() - began < 0.6, outcome
+
+    # Waiting for a change: the region's own, then quiet after it.
+    seq = instance.frame_seq
+    later(0.1, server.queue, clock)
+    later(0.3, server.queue, inside)
+    outcome = await instance.watch(region, "change", quiet_ms=200,
+                                   timeout_ms=2000, since=seq)
+    assert outcome["stable"] and outcome["changed"] == (220, 160, 30, 20), outcome
+    assert 450 <= outcome["waited_ms"] < 1500, outcome
+    # A change that was already applied counts from the moment asked about.
+    seq = instance.frame_seq
+    server.queue(inside)
+    await instance.sync(timeout=2.0)
+    outcome = await instance.watch(region, "change", quiet_ms=100,
+                                   timeout_ms=1000, since=seq)
+    assert outcome["changed"] == (220, 160, 30, 20), outcome
+    # None comes: the whole budget, and nothing changed.
+    began = time.monotonic()
+    outcome = await instance.watch(region, "change", quiet_ms=100, timeout_ms=400)
+    assert not outcome["stable"] and outcome["changed"] is None, outcome
+    assert 0.35 < time.monotonic() - began < 1.0
+    # The pointer drawn where it went is not the change an action waits for.
+    cursor = update(rect(240, 170, 16, 16, vnc.ENC_RAW,
+                         raw_payload([(0, 0, 0)] * 256)))
+    seq = instance.frame_seq
+    later(0.05, server.queue, cursor)
+    outcome = await instance.watch(region, "change", quiet_ms=100, timeout_ms=400,
+                                   since=seq, ignore=[(245, 175)])
+    assert outcome["changed"] is None, outcome
+    seq = instance.frame_seq
+    server.queue(cursor)
+    await instance.sync(timeout=2.0)
+    assert instance.damage_since(seq, region, ignore=[(10, 10)]) == (240, 170, 16, 16)
+
+    # More updates than the log keeps: the whole region counts as changed.
+    seq = instance.frame_seq
+    for _ in range(vnc.AGENT_DAMAGE_LOG + 2):
+        server.queue(clock)
+        await instance.sync(timeout=2.0)
+    assert instance.damage_since(seq, region) == region
+    try:
+        await instance.watch(region, "sideways")
+    except vnc.VncError as exc:
+        assert "until must be" in str(exc), exc
+    else:
+        raise AssertionError("an unknown wait mode was accepted")
+    await instance.close("test")
+    await server.stop()
+    print("  agent watch ok")
+
+
+async def check_agent_attention() -> None:
+    """After an agent's call the picture keeps coming, as for a viewer."""
+    old = vnc.AGENT_ATTENTION
+    vnc.AGENT_ATTENTION = 0.6
+    server = await StubVncServer(width=8, height=4).start()
+    instance = await connected_instance(server)
+    pixel = lambda value: update(rect(0, 0, 1, 1, vnc.ENC_RAW,  # noqa: E731
+                                      raw_payload([(value, value, value)])))
+    try:
+        server.queue(pixel(1))
+        await wait_for(lambda: instance.frame_seq >= 1, label="first frame")
+        assert not instance._current(), "nobody is watching yet"
+        instance.touch()
+        assert not instance.caught_up, "updates had stopped: not current yet"
+        await instance.sync(timeout=0.2)
+        assert instance._current()
+        # While attending, each update asks for the next one by itself.
+        asked = len(server.requests)
+        for value in (2, 3, 4):
+            server.queue(pixel(value))
+            await wait_for(lambda: bytes(instance.frame[:3]) == bytes((value,) * 3),
+                           label="update {} while attending".format(value))
+        assert len(server.requests) >= asked + 3, server.requests[asked:]
+        await asyncio.sleep(0.7)
+        assert not instance._current(), "attention lapses"
+        before = len(server.requests)
+        server.queue(pixel(5))
+        await wait_for(lambda: bytes(instance.frame[:3]) == b"\x05\x05\x05",
+                       label="the request still out is answered")
+        await asyncio.sleep(0.3)
+        assert len(server.requests) == before, "and then the loop parks"
+    finally:
+        vnc.AGENT_ATTENTION = old
+        await instance.close("test")
+        await server.stop()
+    print("  agent attention ok")
 
 
 async def check_agent_input() -> None:
@@ -1574,8 +1727,39 @@ async def check_agent_input() -> None:
     assert server.key_events[2:4] == [(True, 0xFFC2), (False, 0xFFC2)]
     assert server.key_events[4:8] == [(True, ord("a")), (False, ord("a"))] * 2
 
+    # Punctuation by name, the keypad, and a shortcut written as one key.
+    server.key_events.clear()
+    assert await instance.agent_press("minus") == "-"
+    assert await instance.agent_press("Control+minus") == "Control+-"
+    assert await instance.agent_press("ctrl+alt+del") == "Control+Alt+Delete"
+    assert await instance.agent_press("Ctrl++") == "Control++"
+    assert await instance.agent_press("Numpad7") == "Numpad7"
+    assert await instance.agent_press("t", modifiers=["Shift"]) == "Shift+t"
+    assert await instance.agent_press("Alt+Tab", modifiers=["Shift"]) == \
+        "Shift+Alt+Tab"
+    await wait_for(lambda: len(server.key_events) >= 28, label="shortcuts")
+    assert server.key_events[:2] == [(True, 0x2D), (False, 0x2D)]
+    assert server.key_events[2:6] == [(True, 0xFFE3), (True, 0x2D),
+                                      (False, 0x2D), (False, 0xFFE3)]
+    assert server.key_events[6:12] == [
+        (True, 0xFFE3), (True, 0xFFE9), (True, 0xFFFF), (False, 0xFFFF),
+        (False, 0xFFE9), (False, 0xFFE3)]
+    assert server.key_events[12:16] == [(True, 0xFFE3), (True, 0x2B),
+                                        (False, 0x2B), (False, 0xFFE3)]
+    assert server.key_events[16:18] == [(True, 0xFFB7), (False, 0xFFB7)]
+    assert server.key_events[22:28] == [
+        (True, 0xFFE1), (True, 0xFFE9), (True, 0xFF09), (False, 0xFF09),
+        (False, 0xFFE9), (False, 0xFFE1)], server.key_events[22:28]
+    for name, keysym in (("comma", 0x2C), ("slash", 0x2F), ("backslash", 0x5C),
+                         ("bracketleft", 0x5B), ("NumpadAdd", 0xFFAB),
+                         ("numpadenter", 0xFF8D), ("plus", 0x2B)):
+        assert vnc.agent_keysym(name)[0] == keysym, name
+
     # Refusals name the mistake instead of guessing at it.
     for call, expected in (
+            (instance.agent_press("Shift+"), "joined by +"),
+            (instance.agent_press("Control+Enterprise"), "unknown key"),
+            (instance.agent_press("Enter+a"), "not a modifier"),
             (instance.agent_press("Hyperspace"), "unknown key"),
             (instance.agent_press("a", modifiers=["Enter"]), "not a modifier"),
             (instance.agent_click(1, 1, button="thumb"), "button must be"),
@@ -1616,7 +1800,10 @@ async def check_agent_input() -> None:
 
 async def check_agent_bridge(session_id: int) -> None:
     """The turn-bound MCP bridge: identity, selection, tabs and refusals."""
-    server = await StubVncServer(width=8, height=4).start()
+    server = await StubVncServer(width=400, height=300).start()
+    # The first picture a real server sends at once, whole.
+    server.queue(update(rect(0, 0, 400, 300, vnc.ENC_RAW,
+                             raw_payload([(5, 5, 5)] * (400 * 300)))))
     registry = vnc.VncRegistry()
     old_manager = vnc._manager
     vnc._manager = registry
@@ -1665,7 +1852,7 @@ async def check_agent_bridge(session_id: int) -> None:
             [entry.get("session_id") for entry in item.get("instances", [])] == [session_id]
             for item in updates_capture.messages))
         assert opened["image"]["mime_type"] == "image/png"
-        assert "Image is the whole 8x4 screen at 1:1." in opened["text"], opened
+        assert "Image is the whole 400x300 screen at 1:1." in opened["text"], opened
         assert "Lab" in opened["text"]
 
         listed = await call("screens")
@@ -1682,13 +1869,111 @@ async def check_agent_bridge(session_id: int) -> None:
         moved = await call("click", x=3, y=2)
         assert "Left click at 3,2." in moved["text"], moved
         assert "image" not in moved, "a picture is only sent when asked for"
-        pictured = await call("press", key="Enter", screenshot=True)
-        assert "Pressed Enter." in pictured["text"] and pictured["image"]
+        # An action's own picture waits for the screen to react and says so;
+        # one identical to the last this turn received is a short note.
+        pictured = await call("press", key="Enter", screenshot={"timeout_ms": 300})
+        assert "Pressed Enter." in pictured["text"], pictured
+        assert "Nothing changed within" in pictured["text"], pictured
+        assert pictured["text"].count(", the pointer aside.") == 1
+        assert "image" not in pictured, "the same picture is not sent twice"
+        assert "unchanged since the last one you received" in pictured["text"]
+        forced = await call("press", key="Escape",
+                            screenshot={"timeout_ms": 0, "force": True})
+        assert forced["image"] and "Pressed Escape." in forced["text"], forced
+        legacy = await call("press", key="Enter", screenshot=True)
+        assert "Nothing changed" in legacy["text"], "true is still the defaults"
         waited = await call("wait", quiet_ms=50, timeout_ms=800)
         assert "unchanged" in waited["text"], waited
 
+        # A region asked for once is what the next action shows and watches.
+        shot = await call("screenshot",
+                          region={"x": 100, "y": 50, "width": 200, "height": 100})
+        assert "for the region 200x100 at 100,50" in shot["text"], shot
+        later(0.15, server.queue, update(rect(150, 80, 10, 10, vnc.ENC_RAW,
+                                              raw_payload([(7, 8, 9)] * 100))))
+        clicked = await call("click", x=10, y=10, screenshot={})
+        assert "Changed: 10x10 at 150,80, then quiet for 300 ms (" in \
+            clicked["text"], clicked
+        assert "for the region 200x100 at 100,50" in clicked["text"]
+        assert clicked["image"]
+        width, height, rows = png_pixels(base64.b64decode(clicked["image"]["data"]))
+        assert (width, height) == (200, 100)
+        assert rows[30][150:153] == bytes((7, 8, 9)), "the change is in the picture"
+        # A change outside that region is not this action's to wait for.
+        later(0.05, server.queue, update(rect(380, 290, 10, 5, vnc.ENC_RAW,
+                                              raw_payload([(1, 1, 1)] * 50))))
+        missed = await call("click", x=10, y=10,
+                            screenshot={"timeout_ms": 400, "force": True})
+        assert "Nothing changed in the region within" in missed["text"], missed
+        # {} is the whole screen again.
+        whole = await call("move", x=20, y=20,
+                           screenshot={"region": {}, "until": "stable"})
+        assert "Image is the whole 400x300 screen at 1:1." in whole["text"], whole
+        # wait until change: since this chat's last picture.
+        later(0.1, server.queue, update(rect(300, 200, 4, 4, vnc.ENC_RAW,
+                                             raw_payload([(2, 2, 2)] * 16))))
+        changed = await call("wait", until="change", quiet_ms=100, timeout_ms=2000)
+        assert "Changed: 4x4 at 300,200, then quiet" in changed["text"], changed
+        nothing = await call("wait", until="change", quiet_ms=50, timeout_ms=200,
+                             region={"x": 0, "y": 0, "width": 50, "height": 50})
+        assert "Nothing changed in the region within" in nothing["text"], nothing
+        assert "pointer" not in nothing["text"], "a wait moved nothing"
+        slept = await call("wait", until_stable=False, timeout_ms=60)
+        assert "Waited 60 ms." in slept["text"], slept
+
+        # An argument a tool does not take is refused by name, never dropped;
+        # the names agents really wrote are taken as what they meant.
+        scrolled = await call("scroll", x=5, y=5, amount=2)
+        assert "Scrolled down 2 notch(es) at 5,5." in scrolled["text"], scrolled
+        double = await call("click", x=5, y=5, clicks=2)
+        assert "Left click x2 at 5,5." in double["text"], double
+        dragged = await call("drag", from_x=1, from_y=2, to_x=30, to_y=40,
+                             duration_ms=0)
+        assert "Dragged from 1,2 to 30,40." in dragged["text"], dragged
+        assert (await call("screenshot", vnc_id=vnc_id, quiet_ms=0,
+                           force=True))["image"]
+        # An option refused is refused before the action is sent.
+        server.pointer_events.clear()
+        for params in ({"settle_ms": 9000}, {"until": "soon"},
+                       {"max_dimension": "big"}, {"region": {"x": "left"}}):
+            try:
+                await call("click", x=77, y=77, screenshot=params)
+            except vnc_agent.VncAgentError:
+                pass
+            else:
+                raise AssertionError("click took {}".format(params))
+        await asyncio.sleep(0.1)
+        assert not any(event[1:] == (77, 77) for event in server.pointer_events), \
+            server.pointer_events
+        for method, params, expected in (
+                ("scroll", {"x": 1, "y": 1, "pixels": 300},
+                 "scroll does not take pixels. It takes: x, y, direction, "
+                 "clicks, screenshot, screen_id."),
+                ("scroll", {"x": 1, "y": 1, "amount": 500},
+                 "clicks must be between 1 and 50"),
+                ("scroll", {"x": 1, "y": 1, "amount": 2, "clicks": 3},
+                 "clicks was given twice"),
+                ("click", {"x": 1, "y": 1, "screenshot": {"settle": 5}},
+                 "click's screenshot does not take settle"),
+                ("click", {"x": 1, "y": 1, "screenshot": "yes"},
+                 "screenshot takes an object"),
+                ("wait", {"screenshot": {"until": "change"}},
+                 "wait's screenshot does not take until"),
+                ("screenshot", {"settle_ms": 9000}, "settle_ms must be between"),
+                ("wait", {"until": "forever"}, "until must be"),
+                ("connect", {"host": "127.0.0.1", "vnc_id": "ABCD"},
+                 "connect does not take vnc_id")):
+            try:
+                await call(method, **params)
+            except vnc_agent.VncAgentError as exc:
+                assert expected in str(exc), (expected, str(exc))
+            else:
+                raise AssertionError("{} {} was accepted".format(method, params))
+
         # An explicit ID selects; an unknown one is refused, not invented.
-        assert (await call("screenshot", screen_id=vnc_id))["image"]
+        named = await call("screenshot", screen_id=vnc_id, settle_ms=0)
+        assert named["text"].startswith("VNC {} ".format(vnc_id)), named
+        assert "unchanged since the last one" in named["text"], named
         try:
             await call("screenshot", screen_id="ZZZZ")
         except vnc_agent.VncAgentError as exc:
@@ -1849,6 +2134,8 @@ async def main() -> None:
         await check_http_surface(backend_app)
         check_agent_contract()
         await check_agent_screenshot()
+        await check_agent_watch()
+        await check_agent_attention()
         await check_agent_input()
         await check_agent_bridge(db.create_session(
             "vnc agent", "codex", str(TEST_ROOT), "", "", "#7aa2f7",

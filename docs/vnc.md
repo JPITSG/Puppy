@@ -76,9 +76,10 @@ zero readings remain visible. Older backends that do not send the additive
 message leave the throughput pill hidden.
 
 Nobody watching means nobody paying. With every viewer inactive - a hidden
-pane, a backgrounded window, or no viewer at all - the node stops issuing
-`FramebufferUpdateRequest`s entirely, so an unwatched connection costs one idle
-socket. A viewer that returns is settled with the whole screen in bands, and so
+pane, a backgrounded window, or no viewer at all - and no agent tool call in the
+last two minutes (`AGENT_ATTENTION`, the same rule as RDP's Suppress Output),
+the node stops issuing `FramebufferUpdateRequest`s entirely, so an unwatched
+connection costs one idle socket. A viewer that returns is settled with the whole screen in bands, and so
 is one whose backlog had to be dropped. A refresh freezes one complete picture
 and the socket writer sends its bands progressively, outside the 8 MiB delta
 queue budget. Later deltas follow the frozen picture. Overflow discards pending
@@ -152,18 +153,59 @@ same-uid Unix socket into the running node: `screens`, `connect`, `screenshot`,
 Nothing in it speaks RFB - each tool is one high-level action on a connection
 the node already owns, so there is no second path to the server.
 
-An agent has no viewer, so it turns the update loop by hand: `sync()` issues one
-request and waits for the answer, and a server that sends nothing means the
-framebuffer is already current. `settle()` repeats that until the picture is
-quiet, which is what `wait` and the pause before every screenshot use.
+An agent has no viewer, so for two minutes after each of its calls the picture
+keeps coming as if one watched, and between its calls the framebuffer stays the
+screen as it is. `sync()` issues one request by hand and waits for the answer;
+a server that sends nothing means the framebuffer is already current. Every
+applied update is logged with the rectangles it painted (the last 64 updates,
+up to 16 rectangles each, else their bounding box), so `watch()` can wait on
+one region of the screen and pass over a clock on another monitor. Its
+`stable` mode returns once the region has been unchanged for the quiet
+interval - silence proves that only once a whole interval has passed with no
+answer, so a budget shorter than the interval is never called stable - and its
+`change` mode first waits for the region to change and then for quiet. A
+change small enough and close enough to where the pointer was or went (64
+pixels) does not count as that change: the server draws the pointer into the
+picture, since Puppy never asks for the cursor as a separate shape. A log that
+has lost track counts as the whole region changing.
+
+Every action - `move`, `click`, `drag`, `scroll`, `type`, `press` - and `wait`
+takes a `screenshot` option, `{}` for its defaults, so one call acts and shows
+the result. The picture shows the region of the last picture this chat
+received of the screen (or the one passed, `{}` being the whole screen), and
+the action's wait watches that region: by default for a change caused after
+the action - updates that had stopped coming are caught up with first, so a
+change made while nobody watched is not taken for the action's - then for
+`settle_ms` (300) of quiet, within `timeout_ms` (2000). The text says what
+changed and where (`Changed: 10x10 at 150,80`) or that nothing changed beyond
+the pointer, which is a cheap sign the action missed. `screenshot` and `wait`
+take `until: change` as well, meaning a change since the chat's last picture.
+A picture identical to the last one this turn received of the same region and
+scale is answered with a short note instead, unless `force` is set.
+
+An argument a tool does not take is refused by name with the list of those it
+does, never silently dropped; the names agents were seen writing for real
+ones (`amount` and `notches` for scroll's `clicks`, `clicks` for click's
+`count`, `from_x`/`from_y` for drag's start, `vnc_id` for `screen_id`,
+`quiet_ms` and `settle_ms` for each other, wait's old `until_stable`) are
+taken as what they meant. `press` takes a shortcut written as one key
+(`Control+Alt+Delete`, `Ctrl++`), the punctuation keys by name (`minus`,
+`plus`, `comma`, `slash`, ...) and the keypad (`Numpad0`-`Numpad9`,
+`NumpadAdd`, `NumpadEnter`, ...; RDP sends the keypad's own scan codes).
 
 A screenshot is a PNG built from the framebuffer with `zlib` and nothing else.
-The rows are strided out as whole 32-bit pixels through one `memoryview` cast,
-their pad byte is dropped in a single C-level pass, and the result is deflated:
-no image library, and no per-pixel Python, exactly like the decoders. A screen
-larger than `max_dimension` (1920 by default, so 1080p is 1:1) is reduced by a
-whole factor, and the result states the screen size, the image size and the
-factor, because every coordinate an action takes is a remote screen pixel.
+The rows are strided out as whole 32-bit pixels through one `memoryview` cast
+and their pad byte is dropped in a single C-level pass - on the event loop,
+between two updates, because the reader paints into that same buffer and a
+worker reading it meanwhile could mix two frames - and only the deflate of
+that copy runs in the `jobs` pool: no image library, and no per-pixel Python,
+exactly like the decoders. A region larger than `max_dimension` (1920 by
+default, so 1080p is 1:1, and never above 2000) or than 3.75 megapixels is
+reduced by a whole factor - models take up to 2576 pixels, but once a
+conversation holds more than twenty images every side must fit 2000 and the
+area 3.75 MP, and a picture shrunk on the way in would make the stated scale
+wrong. The result states the screen size, the image size and the factor,
+because every coordinate an action takes is a remote screen pixel.
 
 The chat box inserts `@VNC A8AR` for an open connection and
 `@VNC host:port password` for one to dial (`@RDP` likewise, with a user name
@@ -191,7 +233,8 @@ as a toast: a screen that is switched off would otherwise repeat one for every
 redial. Automatic redials back off and stop after five, and reopening the tab or
 pressing Reconnect starts that budget again.
 
-An agent tool refuses the same way: an unknown key, a button that is not
-left/middle/right, a coordinate that is not a number, a view-only connection
-asked for input, or an unbound session asking for a screen it never named are
-all answered with what was wrong and what can be named instead.
+An agent tool refuses the same way: an argument the tool does not take, an
+unknown key, a button that is not left/middle/right, a coordinate that is not
+a number, a view-only connection asked for input, or an unbound session asking
+for a screen it never named are all answered with what was wrong and what can
+be named instead.

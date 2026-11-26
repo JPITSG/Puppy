@@ -1370,6 +1370,11 @@ async def check_input(cert, key) -> None:
             await instance.agent_press("Pause")
             await instance.agent_scroll(5, 6, "right", 1)
             await instance.agent_type("A")
+            # The keypad an agent names is the keypad's own scan codes, the
+            # navigation keys' without their extended flag.
+            await instance.agent_press("Numpad7")
+            await instance.agent_press("NumpadDivide")
+            await instance.agent_press("Control+minus")
             expected = [
                 ("mouse", rdp.PTRFLAGS_MOVE, 10, 20),
                 ("mouse", rdp.PTRFLAGS_BUTTON1 | down, 10, 20), ("mouse", rdp.PTRFLAGS_BUTTON1, 10, 20),
@@ -1379,6 +1384,8 @@ async def check_input(cert, key) -> None:
                 ("scan", 0x1D, 4), ("scan", 0x45, 0), ("scan", 0x1D, 5), ("scan", 0x45, 1),
                 ("mouse", rdp.PTRFLAGS_MOVE, 5, 6), ("mouse", 0x0478, 5, 6),
                 ("unicode", ord("A"), 0), ("unicode", ord("A"), 1),
+                ("scan", 0x47, 0), ("scan", 0x47, 1), ("scan", 0x35, 2), ("scan", 0x35, 3),
+                ("scan", 0x1D, 0), ("scan", 0x0C, 0), ("scan", 0x0C, 1), ("scan", 0x1D, 1),
             ]
             await wait_for(lambda: len(server.events) >= len(expected), label="agent input")
             assert server.events == expected, (fastpath, server.events)

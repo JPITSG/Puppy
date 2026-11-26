@@ -105,9 +105,26 @@ CLIENT_ENCODINGS = (ENC_ZRLE, ENC_HEXTILE, ENC_ZLIB, ENC_RRE, ENC_COPYRECT,
 # The agent surface. An engine turn drives the same connection the console
 # does, so its bounds live beside the viewer's rather than in the bridge.
 AGENT_SYNC_TIMEOUT = 1.5          # a silent server means "nothing changed"
+# After an agent's call the picture keeps coming as if a viewer watched, so
+# between its calls the framebuffer stays the screen as it is (RDP's rule).
+AGENT_ATTENTION = 120.0
+AGENT_QUICK_SYNC = 0.25           # a picture asked for with no settling at all
+AGENT_FIRST_FRAME = 10.0          # the very first picture of a screen
 AGENT_IMAGE_DIMENSION = 1920      # a 1080p screen is answered at 1:1
 AGENT_MIN_DIMENSION = 160
+# Models read up to 2576 px, but once a conversation holds more than twenty
+# images every side must fit 2000 px and the area 3.75 MP: a larger picture
+# is shrunk on the way in, and the scale this tool states would then be wrong.
+AGENT_MAX_DIMENSION = 2000
+AGENT_IMAGE_PIXELS = 3750000
 AGENT_IMAGE_BYTES = 6 << 20       # beyond this the picture is halved again
+# What changed where, for waits that watch one region: the rectangles of the
+# last updates (their bounding box past AGENT_DAMAGE_BOXES of them), and how
+# near the pointer a small change may be the server drawing the pointer.
+AGENT_DAMAGE_LOG = 64
+AGENT_DAMAGE_BOXES = 16
+AGENT_POINTER_REACH = 64
+AGENT_WAIT_MODES = ("stable", "change")
 AGENT_MAX_CLICKS = 5
 AGENT_MAX_STEPS = 64
 AGENT_MAX_WHEEL = 50
@@ -311,7 +328,28 @@ _AGENT_KEY_ALIASES = {
     "numlock": "NumLock", "scrolllock": "ScrollLock", "pause": "Pause",
     "printscreen": "PrintScreen", "print": "PrintScreen",
     "contextmenu": "ContextMenu", "altgraph": "AltGraph", "altgr": "AltGraph",
+    # The punctuation keys by the names a shortcut is written with
+    # ("Control+minus" zooms out), each the one character it types.
+    "minus": "-", "hyphen": "-", "dash": "-", "plus": "+", "equal": "=",
+    "equals": "=", "comma": ",", "period": ".", "dot": ".", "slash": "/",
+    "backslash": "\\", "semicolon": ";", "colon": ":", "quote": "'",
+    "apostrophe": "'", "doublequote": '"', "backquote": "`", "backtick": "`",
+    "grave": "`", "tilde": "~", "bracketleft": "[", "leftbracket": "[",
+    "bracketright": "]", "rightbracket": "]", "braceleft": "{",
+    "braceright": "}", "less": "<", "greater": ">", "question": "?",
+    "exclamation": "!", "at": "@", "hash": "#", "dollar": "$",
+    "percent": "%", "caret": "^", "ampersand": "&", "asterisk": "*",
+    "star": "*", "parenleft": "(", "parenright": ")", "underscore": "_",
+    "pipe": "|",
 }
+# Keys only an agent names: the numeric keypad, which a browser tells apart
+# by its code alone, so the console's table above never sees these names.
+_AGENT_KEYSYMS = {"Numpad{}".format(_digit): 0xFFB0 + _digit
+                  for _digit in range(10)}
+_AGENT_KEYSYMS.update({
+    "NumpadAdd": 0xFFAB, "NumpadSubtract": 0xFFAD, "NumpadMultiply": 0xFFAA,
+    "NumpadDivide": 0xFFAF, "NumpadDecimal": 0xFFAE, "NumpadEnter": 0xFF8D,
+})
 _AGENT_MODIFIER_NAMES = {
     0xFFE1: "Shift", 0xFFE3: "Control", 0xFFE9: "Alt", 0xFFEB: "Meta",
     0xFE03: "AltGraph",
@@ -323,22 +361,39 @@ _AGENT_WHEEL_BITS = {"up": 1 << 3, "down": 1 << 4, "left": 1 << 5,
 
 def agent_keysym(key) -> tuple:
     """Resolve one agent-named key to its keysym and canonical spelling."""
-    name = str(key or "").strip()
+    name = str(key or "").strip() or (" " if key == " " else "")
     if not name:
         raise VncError("supply a key to press")
     canonical = _AGENT_KEY_ALIASES.get(name.lower(), name)
     if len(canonical) > 1:
         canonical = canonical[0].upper() + canonical[1:]
-        for known in _KEYSYMS:
+        for known in list(_KEYSYMS) + list(_AGENT_KEYSYMS):
             if known.lower() == canonical.lower():
                 canonical = known
                 break
-    keysym = keysym_for(canonical)
+    keysym = _AGENT_KEYSYMS.get(canonical) or keysym_for(canonical)
     if not keysym:
         raise VncError(
-            "unknown key: {} (name one key, and put Control, Alt, Shift or "
-            "Meta in modifiers)".format(name[:40]))
+            "unknown key: {} (name one key - Enter, F5, a, minus, Numpad7 - and "
+            "write a shortcut as Control+Alt+Delete or put Control, Alt, Shift "
+            "or Meta in modifiers)".format(name[:40]))
     return keysym, "Space" if canonical == " " else canonical
+
+
+def agent_shortcut(key, modifiers=None) -> tuple:
+    """Split a shortcut written in one string, "Control+Alt+Delete", into
+    the key and the modifiers held for it, after any listed separately."""
+    name = str(key or "").strip()
+    if len(name) < 2 or "+" not in name:
+        return key, modifiers
+    if modifiers is not None and not isinstance(modifiers, (list, tuple)):
+        raise VncError("modifiers must be a list")
+    parts = name[:-2].split("+") + ["+"] if name.endswith("++") else name.split("+")
+    parts = [part.strip() for part in parts]
+    if not all(parts):
+        raise VncError("write a shortcut as modifiers and one key joined by +, "
+                       "such as Control+Shift+Escape")
+    return parts[-1], list(modifiers or []) + parts[:-1]
 
 
 def _agent_modifiers(values) -> list:
@@ -404,6 +459,48 @@ def _agent_region(region, screen_width: int, screen_height: int) -> tuple:
     height = screen_height - y if values["height"] is None else values["height"]
     return (x, y, min(max(width, 1), screen_width - x),
             min(max(height, 1), screen_height - y))
+
+
+def _clip_box(box: tuple, region: tuple):
+    """The part of one rectangle inside another, or None."""
+    left = max(box[0], region[0])
+    top = max(box[1], region[1])
+    right = min(box[0] + box[2], region[0] + region[2])
+    bottom = min(box[1] + box[3], region[1] + region[3])
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right - left, bottom - top
+
+
+def _union_box(first, second: tuple) -> tuple:
+    if first is None:
+        return second
+    left = min(first[0], second[0])
+    top = min(first[1], second[1])
+    right = max(first[0] + first[2], second[0] + second[2])
+    bottom = max(first[1] + first[3], second[1] + second[3])
+    return left, top, right - left, bottom - top
+
+
+def _near_pointer(box: tuple, points) -> bool:
+    """A change small and close enough to a pointer position to be the server
+    drawing the pointer there - it composites it into the picture, since
+    Puppy never asks for the cursor as a separate shape."""
+    reach = AGENT_POINTER_REACH
+    for x, y in points:
+        if box[0] >= x - reach and box[1] >= y - reach and \
+                box[0] + box[2] <= x + reach and box[1] + box[3] <= y + reach:
+            return True
+    return False
+
+
+def _picture_step(width: int, height: int, limit: int) -> int:
+    """The whole factor that fits a region into the image limits."""
+    step = 1
+    while -(-max(width, height) // step) > limit or \
+            (-(-width // step)) * (-(-height // step)) > AGENT_IMAGE_PIXELS:
+        step += 1
+    return step
 
 
 def _rgb_rows(frame, stride: int, x: int, y: int, width: int, height: int,
@@ -794,6 +891,15 @@ class VncInstance:
         # for the next one.
         self.frame_seq = 0
         self.frame_wake = asyncio.Event()
+        # Until when an agent counts as watching, and whether the framebuffer
+        # has caught up with the screen since updates last stopped coming.
+        self.attention_until = 0.0
+        self.caught_up = False
+        # The rectangles each of the last updates painted, so a wait can watch
+        # one region and ignore a clock on another monitor.
+        self.damage_log = collections.deque(maxlen=AGENT_DAMAGE_LOG)
+        # Per session: the picture its agent last received of this screen.
+        self.agent_views = {}
 
     # ---- catalog ----
 
@@ -1083,6 +1189,17 @@ class VncInstance:
     def _streaming(self) -> bool:
         return any(viewer.active for viewer in self.viewers.values())
 
+    def _wanted(self) -> bool:
+        """A visible viewer, or an agent's call within AGENT_ATTENTION."""
+        return self._streaming() or time.monotonic() < self.attention_until
+
+    def _attend(self) -> None:
+        """An agent is at the screen: keep the picture coming, as for a viewer."""
+        if not self._wanted():
+            self.caught_up = False
+        self.attention_until = time.monotonic() + AGENT_ATTENTION
+        self._request_update()
+
     async def attach_viewer(self, ws) -> None:
         await self.ensure_started()
         self._cancel_idle()
@@ -1161,7 +1278,7 @@ class VncInstance:
             return
         if self.update_pending and not full and not force:
             return
-        if not full and not force and not self._streaming():
+        if not full and not force and not self._wanted():
             return
         try:
             self.writer.write(struct.pack(
@@ -1228,6 +1345,7 @@ class VncInstance:
         stream.take(1)
         count = stream.u16()
         rects = []
+        boxes = []
         pixels = 0
         index = 0
         resized = False
@@ -1243,6 +1361,7 @@ class VncInstance:
                 self._broadcast_json({"type": "size", "width": width,
                                       "height": height})
                 rects = []
+                boxes = [(0, 0, width, height)]
                 pixels = 0
                 resized = True
                 continue
@@ -1256,19 +1375,19 @@ class VncInstance:
                 if source_x + width > self.width or source_y + height > self.height:
                     raise VncError("the VNC server sent a copy from off screen")
                 self._copy_rect(x, y, width, height, source_x, source_y)
+                boxes.append((x, y, width, height))
                 rects.append(_FRAME_HEAD.pack(FRAME_COPY, 0, x, y, width, height) +
                              _FRAME_COPY_TAIL.pack(source_x, source_y))
                 continue
             buf = await self._decode(encoding, width, height)
             self._blit(buf, x, y, width, height)
+            boxes.append((x, y, width, height))
             pixels += width * height
             rects.append(_FRAME_HEAD.pack(
                 FRAME_PIXELS, 0, x, y, width, height) + bytes(buf))
         self.update_pending = False
-        if rects or resized:
-            self.frame_seq += 1
-            self.frame_wake.set()
-            self.frame_wake.clear()
+        if boxes:
+            self._note_update(boxes)
         if rects:
             # Many small rectangles cost more in headers and per-frame work
             # than one clean cut out of the freshly updated framebuffer.
@@ -1290,6 +1409,20 @@ class VncInstance:
         width, height = right - left, bottom - top
         return _FRAME_HEAD.pack(FRAME_PIXELS, 0, left, top, width, height) + \
             bytes(self._extract(left, top, width, height))
+
+    def _note_update(self, boxes: list) -> None:
+        """Count one applied update, remember where it painted, and wake
+        whoever waits for the screen."""
+        if len(boxes) > AGENT_DAMAGE_BOXES:
+            union = None
+            for box in boxes:
+                union = _union_box(union, box)
+            boxes = [union]
+        self.frame_seq += 1
+        self.caught_up = True
+        self.damage_log.append((self.frame_seq, tuple(boxes)))
+        self.frame_wake.set()
+        self.frame_wake.clear()
 
     # ---- framebuffer ----
 
@@ -1675,9 +1808,11 @@ class VncInstance:
     # sockets turn, and never introduces a second way to reach the server.
 
     def touch(self) -> None:
-        """Agent attention counts: restart the unattended timer."""
+        """Agent attention counts: restart the unattended timer, and keep the
+        picture coming for AGENT_ATTENTION."""
         if self.connected and not self.viewers:
             self._arm_idle()
+        self._attend()
 
     async def sync(self, timeout: float = AGENT_SYNC_TIMEOUT,
                    full: bool = False) -> bool:
@@ -1694,34 +1829,117 @@ class VncInstance:
         await self._drain()
         loop = asyncio.get_event_loop()
         deadline = loop.time() + max(0.0, float(timeout))
-        while self.connected and self.frame_seq == seq:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return False
-            try:
-                await asyncio.wait_for(self.frame_wake.wait(), remaining)
-            except asyncio.TimeoutError:
-                return False
-        return self.frame_seq != seq
+        try:
+            while self.connected and self.frame_seq == seq:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return False
+                try:
+                    await asyncio.wait_for(self.frame_wake.wait(), remaining)
+                except asyncio.TimeoutError:
+                    return False
+            return self.frame_seq != seq
+        finally:
+            # Answered or not, the server has been asked since anything else.
+            self.caught_up = True
+
+    def _current(self) -> bool:
+        """Whether updates arrive by themselves and have caught up, so the
+        framebuffer already is the screen as it is now."""
+        return self.caught_up and self._wanted()
+
+    def damage_since(self, seq: int, region=None, ignore=()):
+        """The bounding box of what changed after update ``seq`` - inside
+        ``region`` when one is given - or None when nothing did. A small
+        change close to a point in ``ignore`` is passed over: it may be the
+        pointer being drawn there. More updates than the log keeps count as
+        the whole region changing."""
+        if self.frame_seq <= seq:
+            return None
+        whole = region or (0, 0, self.width, self.height)
+        log = self.damage_log
+        if not log or log[0][0] > seq + 1:
+            return whole
+        found = None
+        for entry, boxes in log:
+            if entry <= seq:
+                continue
+            for box in boxes:
+                if ignore and _near_pointer(box, ignore):
+                    continue
+                part = _clip_box(box, whole)
+                if part is not None:
+                    found = _union_box(found, part)
+        return found
+
+    async def watch(self, region=None, until: str = "stable", quiet_ms: int = 400,
+                    timeout_ms: int = 4000, since=None, ignore=()) -> dict:
+        """Wait on the screen, or on one region of it.
+
+        ``stable`` returns once nothing there has changed for ``quiet_ms``.
+        ``change`` first waits for something there to change after update
+        ``since`` - not merely the pointer drawn where it was or went
+        (``ignore``) - and then for quiet. Silence proves quiet only once a
+        whole window has passed unanswered, so a budget too short for it is
+        not called stable. The answer says what was seen: ``stable``,
+        ``changed`` (the bounding box of the region's changes since ``since``,
+        or None) and ``waited_ms``.
+        """
+        if until not in AGENT_WAIT_MODES:
+            raise VncError("until must be stable or change")
+        loop = asyncio.get_event_loop()
+        start = loop.time()
+        deadline = start + max(0, int(timeout_ms)) / 1000.0
+        quiet = max(0, int(quiet_ms)) / 1000.0
+        if not self.frame_seq:
+            # There is nothing to compare with yet: the first picture.
+            await self.sync(AGENT_FIRST_FRAME)
+        seen = self.frame_seq if since is None else int(since)
+        changed = None
+        waiting = until == "change"
+        last = loop.time()
+        # With no viewer the framebuffer holds what the last answer brought,
+        # so at least one request goes out before anything is called quiet.
+        synced = self._current()
+        while True:
+            current = self.frame_seq
+            if current != seen:
+                real = self.damage_since(seen, region, ignore)
+                if real is not None:
+                    changed = _union_box(changed, real)
+                    waiting = False
+                    last = loop.time()
+                elif not waiting and self.damage_since(seen, region) is not None:
+                    last = loop.time()
+                seen = current
+            now = loop.time()
+            if synced and not waiting and now - last >= quiet:
+                stable = True
+                break
+            if synced and now >= deadline:
+                stable = False
+                break
+            window = max(0.0, deadline - now)
+            if not waiting:
+                window = min(window, max(0.0, last + quiet - now))
+            if not synced:
+                window = max(window, AGENT_QUICK_SYNC)
+            await self.sync(max(window, 0.01))
+            synced = True
+            if not self.connected:
+                raise VncError("{} {} is not connected".format(self.kind, self.vnc_id))
+        return {"stable": stable, "changed": changed,
+                "waited_ms": int((loop.time() - start) * 1000)}
 
     async def settle(self, quiet_ms: int = 400, timeout_ms: int = 4000) -> bool:
-        """Wait until the screen stops changing, or the budget runs out."""
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + max(0, int(timeout_ms)) / 1000.0
-        quiet = max(0, int(quiet_ms)) / 1000.0
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return False
-            if not await self.sync(min(quiet, remaining) or 0.01):
-                return True
+        """Wait until the whole screen stops changing, or the budget runs out."""
+        return (await self.watch(None, "stable", quiet_ms, timeout_ms))["stable"]
 
     def frame_snapshot(self) -> tuple:
         """One self-consistent view of the framebuffer and its size.
 
         The reader loop replaces the whole buffer on a desktop resize, so the
-        three values are re-read until they agree; a caller then holds a
-        picture that cannot change size under it, even in a worker thread.
+        three values are re-read until they agree.
         """
         for _attempt in range(4):
             frame, width, height = self.frame, self.width, self.height
@@ -1729,14 +1947,15 @@ class VncInstance:
                 return frame, width, height
         raise VncError("the remote screen has not been received yet")
 
-    def screenshot(self, region=None, max_dimension: int = AGENT_IMAGE_DIMENSION):
-        """Encode the framebuffer, or one region of it, as a PNG.
+    def agent_rows(self, region=None, max_dimension: int = AGENT_IMAGE_DIMENSION,
+                   step: int = 0) -> dict:
+        """Copy one region of the framebuffer out as finished RGB rows.
 
-        No image library is involved and no pixel is touched from Python: the
-        rows are strided out of the framebuffer as whole 32-bit pixels, their
-        pad byte is dropped in one C-level pass, and zlib does the rest. Only
-        the snapshot above is taken from this instance, so the deflate itself
-        is safe to run off the event loop.
+        This runs on the event loop, between two updates, so the picture is
+        one moment of the screen: the reader writes into this same buffer,
+        and a worker reading it meanwhile could mix two frames. The rows are
+        strided out as whole 32-bit pixels and their pad byte is dropped in
+        one C-level pass; only the deflate of this copy runs elsewhere.
         """
         frame, screen_width, screen_height = self.frame_snapshot()
         x, y, width, height = _agent_region(region, screen_width, screen_height)
@@ -1744,22 +1963,31 @@ class VncInstance:
             limit = int(max_dimension)
         except (TypeError, ValueError):
             raise VncError("max_dimension must be a whole number")
-        limit = min(MAX_DIMENSION, max(AGENT_MIN_DIMENSION, limit))
-        step = 1
-        while max(width, height) // step > limit:
-            step += 1
+        limit = min(AGENT_MAX_DIMENSION, max(AGENT_MIN_DIMENSION, limit))
+        step = max(int(step or 0), _picture_step(width, height, limit))
+        rows = _rgb_rows(frame, screen_width, x, y, width, height, step)
+        return {"rows": rows, "x": x, "y": y, "width": width, "height": height,
+                "out_width": len(rows[0]) // 3 if rows else 0,
+                "out_height": len(rows), "step": step,
+                "screen_width": screen_width, "screen_height": screen_height}
+
+    def screenshot(self, region=None, max_dimension: int = AGENT_IMAGE_DIMENSION):
+        """Encode the framebuffer, or one region of it, as a PNG.
+
+        No image library is involved and no pixel is touched from Python:
+        zlib over the rows ``agent_rows`` copies is the whole encoder.
+        """
+        shot = self.agent_rows(region, max_dimension)
         while True:
-            rows = _rgb_rows(frame, screen_width, x, y, width, height, step)
-            out_width = len(rows[0]) // 3 if rows else 0
-            image = _png(rows, out_width, len(rows))
+            image = _png(shot["rows"], shot["out_width"], shot["out_height"])
             # A photographic desktop can defeat any single guess at a useful
             # size. Halving again is cheaper than failing the whole tool call.
-            if len(image) <= AGENT_IMAGE_BYTES or step >= 8:
+            if len(image) <= AGENT_IMAGE_BYTES or shot["step"] >= 8:
                 break
-            step += 1
-        return {"png": image, "x": x, "y": y, "width": width, "height": height,
-                "out_width": out_width, "out_height": len(rows), "step": step,
-                "screen_width": screen_width, "screen_height": screen_height}
+            shot = self.agent_rows(region, max_dimension, shot["step"] + 1)
+        shot.pop("rows")
+        shot["png"] = image
+        return shot
 
     # ---- agent input ----
 
@@ -1869,6 +2097,7 @@ class VncInstance:
 
     async def agent_press(self, key: str, modifiers=None, count: int = 1) -> str:
         self._agent_writable()
+        key, modifiers = agent_shortcut(key, modifiers)
         keysym, name = agent_keysym(key)
         count = _agent_count(count, AGENT_MAX_CLICKS, "count")
         held = _agent_modifiers(modifiers)
