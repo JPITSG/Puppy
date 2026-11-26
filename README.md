@@ -1040,7 +1040,11 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   its stable reference, its four-character ID or the link itself. A read is
   one prompt per row with that turn's final answer unless it asks for the
   messages, and every page is sized to fit one tool result: a long text keeps
-  its start and its end and says how to read it whole. **All sessions** means
+  its start and its end and says how to read it whole. Read as messages, a
+  tool call shows its tool and arguments and a turn's end says how it ended,
+  and a search hit opens with the messages either side of it in one read;
+  looking for a session by name matches every word given, in any order.
+  **All sessions** means
   every session but the one you are typing in. The sessions you mention stay
   the agent's boundary in later messages too, until you mention others: its
   "all" then means those, and a session outside them is refused with the ones
@@ -1053,7 +1057,10 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   session's state and its answer or error. A request's answer is the end of
   the turn that answered it - its earliest messages go first when the turn ran
   long - and the agent lists its requests and workflows newest first, reading
-  their answers one request at a time. A session's name opens it, and
+  their answers one request at a time. A request always says what it is (a
+  question, task, steer or stop), the agent can name one by the id it chose
+  when sending it, and sending or checking a workflow can wait up to 25
+  seconds for the answers in the same call. A session's name opens it, and
   **Stop remaining work** cancels whatever the request still has pending.
 - **The session's own history.** The picker lists the session you are typing
   in first, marked *this session*, and the agent can read and search its own

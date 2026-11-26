@@ -45,6 +45,23 @@ def request_id(source, key):
     return hashlib.sha256((source + ":" + key).encode()).hexdigest()[:32]
 
 
+KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,100}")
+
+
+def named(source, args, prefix, salt=""):
+    """The id of the request (or workflow) a call names: by the id Puppy gave
+    it, or by the request_id the agent sent it with - in ``id`` or in
+    ``request_id`` - which is the id that request_id hashes to."""
+    value = args.get("id", args.get("request_id"))
+    if not isinstance(value, str) or not value:
+        raise links.SessionLinkError("name the request by its id or the request_id you sent it with")
+    if re.fullmatch(r"[a-f0-9]{32}", value) and links.load_record(prefix + value) is not None:
+        return value
+    if KEY_RE.fullmatch(value):
+        return hashlib.sha256((source + ":" + salt + value).encode()).hexdigest()[:32]
+    raise links.SessionLinkError("name the request by its id or the request_id you sent it with")
+
+
 def records(prefix):
     return [json.loads(row["value"]) for row in
             db.query("SELECT value FROM meta WHERE key GLOB ?", (prefix + "*",))]
@@ -194,16 +211,12 @@ async def receive(args):
         _notice(value["target"], "{} from {}: {}".format(
             args["action"].capitalize(), args["source_title"], args["text"][:500]),
                 {"id": rid, "source": args["source"], "target": args["target"]})
-        if args["action"] == "question" and hub.side_question_state(session).get("ready"):
-            state = hub.side_question_state(session)
-            if not state.get("ready"):
-                result = {"error": "This session cannot answer beside its current turn. "
-                          "Use a task request explicitly to queue a conversational answer."}
-            else:
-                value["turn_id"] = state["turn_id"]
-                save(INBOX_PREFIX, value)
-                result = await hub.ask(args["text"], rid, expected_turn_id=state["turn_id"])
-                value["status"] = "answering"
+        state = hub.side_question_state(session) if args["action"] == "question" else {}
+        if state.get("ready"):
+            value["turn_id"] = state["turn_id"]
+            save(INBOX_PREFIX, value)
+            result = await hub.ask(args["text"], rid, expected_turn_id=state["turn_id"])
+            value["status"] = "answering"
         elif args["action"] in ("steer", "stop"):
             expected = args["expected_turn_id"]
             if not expected or hub._active_turn_id != expected or hub.status != "running":
@@ -397,11 +410,15 @@ async def send(source, args, scope=None, workflow=""):
         refs = ["all"]
     if not isinstance(refs, list) or not refs or len(refs) > 512:
         raise links.SessionLinkError("select destination sessions")
-    action = args.get("action", "task")
+    # what is sent is said, never assumed: a task runs work in another session
+    action = args.get("action")
+    if action not in ("task", "question", "steer", "stop"):
+        raise links.SessionLinkError("say the action: question, task, steer or stop")
     text = args.get("text", "")
     timeout = links.integer(args.get("timeout_s", 3600), "timeout_s", 30, 7200)
-    if action not in ("task", "question", "steer", "stop") or not isinstance(text, str) or len(text) > 120000:
-        raise links.SessionLinkError("invalid action or request text")
+    links.integer(args.get("wait_s", 0), "wait_s", 0, 25)
+    if not isinstance(text, str) or len(text) > 120000:
+        raise links.SessionLinkError("invalid request text")
     if action != "stop" and not text.strip():
         raise links.SessionLinkError("request text is empty")
     expected = args.get("expected_turn_ids", {})
@@ -514,22 +531,25 @@ async def operate(source, method, args, scope=None):
         mine = sorted((r for r in records(OUTBOX_PREFIX) if r["source"] == source),
                       key=lambda record: -record["created_at"])
         return {"requests": [_public(r) for r in mine[:100]]}
-    rid = args.get("id")
+    rid = named(source, args, OUTBOX_PREFIX)
     record = get(OUTBOX_PREFIX, rid)
     if record["source"] != source:
         raise links.SessionLinkError("request belongs to another session")
     if method == "cancel":
         return await refresh(record, cancel=True)
     if method == "wait":
-        wait_s = links.integer(args.get("wait_s", 20), "wait_s", 0, 25)
-        until = time.monotonic() + wait_s
-        while True:
-            record = get(OUTBOX_PREFIX, rid)
-            result = await refresh(record)
-            if result["status"] in TERMINAL or time.monotonic() >= until:
-                return result
-            await asyncio.sleep(min(1, max(0, until - time.monotonic())))
+        return await wait_for(rid, links.integer(args.get("wait_s", 20), "wait_s", 0, 25))
     raise links.SessionLinkError("unknown session request operation")
+
+
+async def wait_for(rid, wait_s):
+    """The request as it stands once it has finished, or after ``wait_s``."""
+    until = time.monotonic() + wait_s
+    while True:
+        result = await refresh(get(OUTBOX_PREFIX, rid))
+        if result["status"] in TERMINAL or time.monotonic() >= until:
+            return result
+        await asyncio.sleep(min(1, max(0, until - time.monotonic())))
 
 
 INBOX_KEYS = {"format", "id", "source", "source_title", "target", "action", "text", "deadline", "expected_turn_id", "created_at", "status", "prompt", "turn_id", "start_seq", "end_seq", "answer", "error"}

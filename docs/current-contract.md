@@ -256,6 +256,17 @@ still contain a value written before that release.
   agent's `sessions` listing marks them `selected` and says so in
   `selection`. `"[all]"` and `"[this]"`, the notation's spelling, read as
   those words. No stored format or wire capability changes.
+- Since v1.0.661 the session tools' `send` requires `action` (no default
+  task) and takes `wait_s` (0-25, waited after the durable send); `wait`,
+  `cancel`, `workflow` and `cancel_workflow` take the agent's own
+  `request_id`, in `id` or `request_id` (`session_actions.named`), and
+  `workflow` takes `wait_s`; `sessions` matches every word of its query;
+  `read` takes `around_seq`, which the controller turns into an ordinary
+  events page with that message in the middle (marked `hit`), so any node
+  answers it; and the agent's events view words each event by its kind
+  (`session_links.event_text`) instead of a payload's JSON. Reads take one
+  of the two read places per calling session. Bridge-local: no route,
+  stored format or capability changes.
 - Since v1.0.660 a Claude Code turn's `--mcp-config` carries
   `"alwaysLoad": true` for each Puppy bridge whose tools the session called
   or looked up within its last 5000 events, or that the prompt names with a

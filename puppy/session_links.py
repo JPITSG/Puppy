@@ -48,9 +48,12 @@ MENTION_RE = re.compile(
     r"(all|[a-f0-9]{32}/[1-9][0-9]{0,15})(?![\w/])", re.I)
 MAX_FRAME = 1024 * 1024
 # Turns reading conversations, two at a time: a turn's parallel reads, and its
-# sub-agents', take their turns instead of every thread the console reads with.
+# sub-agents', take their turns instead of every thread the console reads with,
+# and one calling session has one place (relayed reads name no caller).
 READS_WAIT = 20.0
-_reads = workers.Lane(2, waiting=128)
+# the events a read around one message shows: it in the middle, four either side
+AROUND_PAGE = 9
+_reads = workers.Lane(2, per_key=1, waiting=128)
 _app = None
 _relays = {}                 # controller UUID -> backend end of its socket
 _pending = {}                # relay request UUID -> future
@@ -269,6 +272,67 @@ def source_link(ref, seq=0):
     return "/#session={}&seq={}".format(ref, seq)
 
 
+# what a payload carries that tells a reader nothing: identities, native ids,
+# usage figures and timings (a tool's own arguments are always shown)
+_QUIET_KEY = re.compile(r"(^|_)(id|ids|uuid)$|^native_|^usage$|^model_usage$|_ms$|^context_")
+
+
+def _plain(value) -> str:
+    """A value as one line: text as itself, anything else as compact JSON."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(", ", ": "), default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fields(data, quiet=False) -> str:
+    return "\n".join("{}: {}".format(key, _plain(value)) for key, value in data.items()
+                     if value not in (None, "", [], {}) and not (quiet and _QUIET_KEY.search(key)))
+
+
+def event_text(kind, payload) -> str:
+    """An event as an agent reads it: a message its text, a tool call its tool
+    and its arguments a line each, a tool's result its output, a turn's end
+    how it ended - never a payload's JSON with its native ids and usage."""
+    if not isinstance(payload, dict):
+        return search._text_of(payload)
+    if kind == "tool_use":
+        data = payload.get("input")
+        shown = _fields(data) if isinstance(data, dict) else \
+            _plain(data) if data not in (None, "") else ""
+        return str(payload.get("tool") or "tool") + ("\n" + shown if shown else "")
+    if kind == "tool_result":
+        mark = "(interrupted) " if payload.get("interrupted") else \
+            "(failed) " if payload.get("is_error") else ""
+        return mark + search._text_of(payload.get("content"))
+    if kind == "result":
+        error = payload.get("error")
+        words = "The turn completed" if payload.get("ok") else \
+            "The turn failed" + (": " + _plain(error) if error else "")
+        steps = payload.get("num_turns")
+        return words + (" after {} model steps".format(steps)
+                        if type(steps) is int and steps > 0 else "")
+    if kind == "engine_switch":
+        before = ", ".join(str(value) for value in (payload.get("from_model"),
+                                                     payload.get("from_effort")) if value)
+        return "Engine switched from {}{} to {}".format(
+            payload.get("from") or "an engine", " ({})".format(before) if before else "",
+            payload.get("to") or "another")
+    if kind == "side_question":
+        return "Asked beside the turn: " + _plain(payload.get("question") or "")
+    text = payload.get("text")
+    if isinstance(text, str):
+        subtype = payload.get("subtype")
+        tag = "[{}] ".format(subtype) if kind in ("info", "error") and \
+            isinstance(subtype, str) and subtype else ""
+        return tag + text
+    if "content" in payload:
+        return search._text_of(payload["content"])
+    return _fields(payload, quiet=True)
+
+
 def _events(sid, args):
     limit = integer(args.get("limit", EVENTS_PAGE), "limit", 1, 100)
     after = args.get("after_seq")
@@ -296,7 +360,7 @@ def _events(sid, args):
             from puppy import session_tasks
             raw = search._scrub(session_tasks.archive_text(payload))
         else:
-            raw = search._scrub(search._text_of(payload.get("content", payload)))
+            raw = search._scrub(event_text(row["kind"], payload))
         content = raw[offset:offset + min(budget, share)]
         item = {"seq": row["seq"], "kind": row["kind"], "ts": row["ts"],
                 "text": content, "offset": offset,
@@ -414,7 +478,7 @@ async def node_call(method, args, source="", relayed=False):
             info = session_info(sessions[0])
             try:
                 body = await _reads.run(
-                    workers.history, reader, sessions[0]["id"], args,
+                    workers.history, reader, sessions[0]["id"], args, key=source or None,
                     wait=search.RELAYED_WAIT if relayed else READS_WAIT)
             except workers.Busy:
                 raise SessionLinkError("too many reads are waiting here; try again in a "
@@ -460,7 +524,8 @@ def read_view(args):
     character offset)."""
     view = args.get("view")
     if view is None:
-        return "events" if args.get("before_seq") is not None or args.get("offset") else "turns"
+        return "events" if args.get("before_seq") is not None or args.get("offset") or \
+            args.get("around_seq") is not None else "turns"
     return view
 
 
@@ -582,7 +647,14 @@ async def broker(source, method, args, scope=None):
     if method in ("send", "wait", "cancel", "requests"):
         from puppy import session_actions
         operation = session_actions.operate(source, method, args, scope)
-        return await durable_call(operation) if method in ("send", "cancel") else await operation
+        if method == "cancel":
+            return await durable_call(operation)
+        if method != "send":
+            return await operation
+        sent = await durable_call(operation)
+        # the answers a short wait brings; the request itself is already durable
+        wait_s = integer(args.get("wait_s", 0), "wait_s", 0, 25)
+        return await session_actions.wait_for(sent["id"], wait_s) if wait_s else sent
     if method in ("coordinate", "workflow", "workflows", "cancel_workflow"):
         from puppy import session_coordination
         operation = session_coordination.operate(source, method, args, scope)
@@ -604,8 +676,11 @@ async def broker(source, method, args, scope=None):
             # what read, search and send reach: the user's selection
             listed = [dict(row, selected=True) if row["ref"] in scope["refs"] and
                       not row.get("this") else row for row in listed]
-        rows = [s for s in listed if query in
-                (s["title"] + " " + s["cwd"] + " " + s["node_name"] + " " + s["mention"]).lower()]
+        # every word somewhere in the row, in any order ("camera gimbal")
+        words = query.split()
+        rows = [s for s in listed if all(word in (
+            s["title"] + " " + s["cwd"] + " " + s["node_name"] + " " + s["mention"]).lower()
+            for word in words)]
         listing = {"controller": data["controller"], "sessions": rows[offset:offset + limit],
                    "total": len(rows),
                    "next_offset": offset + limit if offset + limit < len(rows) else None}
@@ -656,8 +731,25 @@ async def broker(source, method, args, scope=None):
             groups.setdefault(row["bid"], []).append(ref)
     if method == "read" and len(refs) != 1:
         raise SessionLinkError("read requires exactly one selected reference")
+    around = None
+    if method == "read" and args.get("around_seq") is not None:
+        # a search hit opened in one call: the page whose middle is that event,
+        # as an ordinary forward page - a session's seqs have no gaps - so any
+        # node, an older one too, reads it
+        around = integer(args["around_seq"], "around_seq", 1)
+        if read_view(args) != "events" or any(args.get(key) is not None for key in
+                                               ("after_seq", "before_seq", "offset")):
+            raise SessionLinkError("around_seq reads events on its own, without other cursors")
+        limit = integer(args.get("limit", AROUND_PAGE), "limit", 1, 100)
+        args = {key: value for key, value in args.items() if key != "around_seq"}
+        args.update(view="events", limit=limit, after_seq=max(0, around - 1 - (limit - 1) // 2))
     values = await asyncio.gather(*(remote_call(bid, method, dict(args, refs=items), source=source)
                                     for bid, items in groups.items()), return_exceptions=True)
+    if around is not None:
+        for value in values:
+            for item in (value.get("events") or []) if isinstance(value, dict) else []:
+                if item.get("seq") == around:
+                    item["hit"] = True
     results = []
     for (bid, items), value in zip(groups.items(), values):
         if isinstance(value, Exception):
@@ -950,7 +1042,7 @@ def validate_persisted(connection):
 async def _lifecycle(app):
     global _app, _catalog_task, _catalog_value, _catalog_until, _reads
     _app = app
-    _reads = workers.Lane(2, waiting=128)
+    _reads = workers.Lane(2, per_key=1, waiting=128)
     _catalog_value, _catalog_until = None, 0.0
     validate_persisted(db.connect())
     from puppy import session_agent

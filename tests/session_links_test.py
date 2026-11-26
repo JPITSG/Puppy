@@ -192,7 +192,7 @@ async def communication():
     other = ControlledSession(c)
     try:
         dest.hub.send_message("Unrelated work")
-        args = {"refs": [rb], "text": "Implement endpoint", "request_id": "api", "timeout_s": 100}
+        args = {"action": "task", "refs": [rb], "text": "Implement endpoint", "request_id": "api", "timeout_s": 100}
         sent = await actions.send(origin, args)
         assert len(dest.started) == 1 and len(dest.hub.queue) == 1
         same = await actions.send(origin, args)
@@ -247,7 +247,7 @@ async def communication():
         assert (await actions.operate(origin, "wait", {"id": lost["id"], "wait_s": 0}))["results"][0]["answer"] == "Recovered answer"
         # Active requests cannot form a waiting cycle.
         sent = await actions.send(origin, dict(args, request_id="cycle"))
-        await rejected(actions.send(rb, {"refs": [origin], "text": "loop", "request_id": "loop"}), "cycle")
+        await rejected(actions.send(rb, {"action": "task", "refs": [origin], "text": "loop", "request_id": "loop"}), "cycle")
         dest.finish()
         await actions.operate(origin, "wait", {"id": sent["id"], "wait_s": 0})
         # A stale compare token refuses control without touching a newer turn.
@@ -487,11 +487,11 @@ async def own_history():
     assert links._scopes[(a, "self")]["refs"] == [own]
     mine = await links.dispatch(a, "self", "read", {"view": "turns", "limit": 1})
     assert mine["results"][0]["turns"][0]["prompt"]["seq"] == p1
-    await rejected(links.dispatch(a, "self", "send", {"request_id": "me", "text": "hi"}),
+    await rejected(links.dispatch(a, "self", "send", {"action": "task", "request_id": "me", "text": "hi"}),
                    "other sessions")
-    await rejected(links.dispatch(a, "self", "send", {"refs": ["this"], "request_id": "me2", "text": "hi"}),
+    await rejected(links.dispatch(a, "self", "send", {"action": "task", "refs": ["this"], "request_id": "me2", "text": "hi"}),
                    "cannot send a request to the originating session")
-    await rejected(links.dispatch(a, "self", "send", {"refs": [own], "request_id": "me3", "text": "hi"}),
+    await rejected(links.dispatch(a, "self", "send", {"action": "task", "refs": [own], "request_id": "me3", "text": "hi"}),
                    "cannot send a request to the originating session")
     await rejected(links.dispatch(a, "self", "coordinate", {"request_id": "w", "steps": [
         {"id": "s", "refs": [own], "action": "task", "text": "x", "after": []}]}), "originating session")
@@ -500,7 +500,7 @@ async def own_history():
     try:
         await links.prepare_turn(a, "both", "@Session {node}:{own} @Session {node}:{rb} ask".format(
             node=db.node_uuid(), own=own, rb=rb))
-        sent = await links.dispatch(a, "both", "send", {"request_id": "implicit", "text": "Any open bugs?"})
+        sent = await links.dispatch(a, "both", "send", {"action": "task", "request_id": "implicit", "text": "Any open bugs?"})
         assert [result["target"] for result in sent["results"]] == [rb], sent
         assert len(dest.started) == 1
         dest.finish("None here")
@@ -519,9 +519,10 @@ async def own_history():
 
 async def many_readers():
     """A turn's parallel reads, and its sub-agents', take their turns: two at a
-    time, never the threads the console reads with, and one that has waited too
-    long or finds too many ahead of it is told so. A search of many sessions is
-    one search, and answers each one in the order they were named."""
+    time, one of them a calling session's, never the threads the console reads
+    with, and one that has waited too long or finds too many ahead of it is
+    told so. A search of many sessions is one search, and answers each one in
+    the order they were named."""
     a = session("Reader")
     ids = [session("Read {}".format(index)) for index in range(6)]
     for index, sid in enumerate(ids):
@@ -540,10 +541,19 @@ async def many_readers():
                                                        source="turn"))
                  for ref in refs * 3]
         for _ in range(200):
-            if len(reading) == 2:
+            if reading:
                 break
             await asyncio.sleep(0.01)
         await asyncio.sleep(0.05)
+        # one turn's reads take turns, one at a time
+        assert len(reading) == 1 and links._reads.running == 1, reading
+        # another session's read takes the other place at once
+        calls.append(asyncio.ensure_future(links.node_call(
+            "read", {"refs": [refs[1]], "view": "events"}, source="other")))
+        for _ in range(200):
+            if len(reading) == 2:
+                break
+            await asyncio.sleep(0.01)
         assert len(reading) == 2 and links._reads.running == 2, reading
         assert pools.history.state()["running"] == 2 and not pools.history.state()["waiting"]
         # the console's own reads go past them
@@ -554,7 +564,7 @@ async def many_readers():
             await rejected(links.node_call("read", {"refs": [refs[0]]}, relayed=True), "too many reads")
         gate.set()
         answers = await asyncio.gather(*calls)
-    assert [answer["sid"] for answer in answers] == ids * 3
+    assert [answer["sid"] for answer in answers] == ids * 3 + [ids[1]]
     assert links._reads.running == 0
     # many sessions, one search
     passes = []
@@ -629,7 +639,7 @@ async def agent_results():
     dest = ControlledSession(b)
     try:
         with patch.object(actions, "ANSWER_LIMIT", 3000):
-            sent = await links.dispatch(a, "agent", "send", {
+            sent = await links.dispatch(a, "agent", "send", {"action": "task",
                 "refs": [code], "text": "Write it up", "request_id": "write"})
             assert sent["results"][0]["target"] == rb, sent
             for part in range(5):
@@ -652,7 +662,7 @@ async def agent_results():
         # listed newest first, statuses without answers
         for index in range(3):
             with patch.object(actions.time, "time", lambda index=index: 1000.0 + index):
-                await links.dispatch(a, "agent", "send", {
+                await links.dispatch(a, "agent", "send", {"action": "task",
                     "refs": [rb], "text": "later {}".format(index), "request_id": "later-{}".format(index)})
         listing = await links.dispatch(a, "agent", "requests", {})
         stamps = [item["created_at"] for item in listing["requests"]]
@@ -736,7 +746,7 @@ async def selection_boundary():
     assert listing["sessions"][0].get("this") and "selected" not in listing["sessions"][0]
     assert data["all_mention"] in listing["selection"], listing
     # a send and a workflow stay inside it too, saying the same
-    await rejected(links.dispatch(a, "later", "send", {"refs": [rd], "request_id": "out", "text": "hi"}),
+    await rejected(links.dispatch(a, "later", "send", {"action": "task", "refs": [rd], "request_id": "out", "text": "hi"}),
                    "destination " + rows[rd]["mention"] + " is outside the sessions the user selected")
     await rejected(links.dispatch(a, "later", "coordinate", {"request_id": "wf-out", "steps": [
         {"id": "s", "refs": [rd], "action": "task", "text": "x", "after": []}]}),
@@ -764,6 +774,126 @@ async def selection_boundary():
     print("refs [\"all\"] is the user's selection, refused refs name it, the listing marks it")
 
 
+async def agent_calls():
+    """The rest of the audit's session-tool findings, as a turn calls them: a
+    request or workflow named by the agent's own request_id, never another
+    session's; send refused without its action; a short wait_s on send and
+    workflow; the session list matching every word; read opening around a
+    message in one call on any node; and the events view reading tool calls,
+    results and endings as words rather than their payloads' JSON."""
+    a, b, c = session("Asker of things"), session("Camera gimbal mount"), session("Camera only")
+    other = session("Somebody else")
+    origin, rb, rc = links.reference(a), links.reference(b), links.reference(c)
+    dest = ControlledSession(b)
+    await links.prepare_turn(a, "rest", "plain words")
+    await links.prepare_turn(other, "theirs", "plain words")
+    call = lambda method, args, sid=a, turn="rest": links.dispatch(sid, turn, method, args)
+    try:
+        # the action is said, never assumed; a bad wait_s sends nothing
+        await rejected(call("send", {"refs": [rb], "request_id": "vague", "text": "Fix it"}),
+                       "say the action: question, task, steer or stop")
+        await rejected(call("send", {"refs": [rb], "request_id": "vague", "action": "task",
+                                     "text": "Fix it", "wait_s": 99}), "wait_s")
+        assert links.load_record(actions.OUTBOX_PREFIX + actions.request_id(origin, "vague")) is None
+        # a short wait brings the answer the destination gave meanwhile
+        asyncio.get_running_loop().call_later(0.3, dest.finish, "Mounted it")
+        began = time.monotonic()
+        sent = await call("send", {"refs": [rb], "request_id": "mount", "action": "task",
+                                   "text": "Mount the camera", "wait_s": 5})
+        assert sent["status"] == "completed" and time.monotonic() - began < 4, sent
+        assert sent["results"][0]["answer"].endswith("Mounted it"), sent
+        quick = await call("send", {"refs": [rb], "request_id": "quick", "action": "task",
+                                    "text": "And tilt it"})
+        assert quick["status"] not in actions.TERMINAL, "no wait_s: answered at once"
+        # the agent's own request_id names its request, in id or request_id
+        for args in ({"id": "quick"}, {"request_id": "quick"}, {"id": quick["id"]}):
+            assert (await call("wait", dict(args, wait_s=0)))["id"] == quick["id"], args
+        began = time.monotonic()
+        waited = await call("wait", {"request_id": "quick", "wait_s": 1})
+        assert waited["status"] not in actions.TERMINAL and time.monotonic() - began >= 0.9
+        await rejected(call("wait", {"request_id": "quick"}, sid=other, turn="theirs"), "not found")
+        await rejected(call("wait", {"request_id": "no spaces allowed"}), "name the request")
+        await rejected(call("wait", {}), "name the request")
+        cancelled = await call("cancel", {"request_id": "quick"})
+        assert cancelled["id"] == quick["id"] and cancelled["status"] in ("cancelling", "cancelled")
+        dest.finish()
+        # workflows likewise, and a short wait for one to finish
+        plan = await call("coordinate", {"request_id": "plan-1", "title": "Mount and check",
+                                         "steps": [{"id": "s", "refs": [rb], "action": "task",
+                                                    "text": "Check the mount", "after": []}]})
+        for args in ({"id": "plan-1"}, {"request_id": "plan-1"}, {"id": plan["id"]}):
+            assert (await call("workflow", args))["id"] == plan["id"], args
+        began = time.monotonic()
+        still = await call("workflow", {"request_id": "plan-1", "wait_s": 1})
+        assert still["status"] not in coordination.FINAL and time.monotonic() - began >= 0.9
+        await rejected(call("workflow", {"request_id": "plan-1", "wait_s": 30}), "wait_s")
+        await rejected(call("workflow", {"request_id": "plan-1"}, sid=other, turn="theirs"), "not found")
+        assert (await call("cancel_workflow", {"request_id": "plan-1"}))["id"] == plan["id"]
+        # the session list: every word, in any order, anywhere in the row
+        async def titles(query):
+            return {row["title"] for row in (await call("sessions", {"query": query}))["sessions"]}
+        assert await titles("gimbal camera") == {"Camera gimbal mount"}
+        assert await titles("camera") >= {"Camera gimbal mount", "Camera only"}
+        assert await titles("camera nowhere") == set()
+        # read around a message: the page whose middle it is, on any node
+        for number in range(30):
+            db.add_event(c, "assistant", {"text": "note {}".format(number)})
+        search.reconcile()
+        found = await call("search", {"refs": [rc], "query": "note 17"})
+        hit = found["results"][0]["results"][0]["matches"][0]["seq"]
+        page = (await call("read", {"refs": [rc], "around_seq": hit}))["results"][0]
+        seqs = [item["seq"] for item in page["events"]]
+        assert seqs == list(range(hit - 4, hit + 5)), seqs
+        assert [item["seq"] for item in page["events"] if item.get("hit")] == [hit]
+        small = (await call("read", {"refs": [rc], "around_seq": hit, "limit": 3}))["results"][0]
+        assert [item["seq"] for item in small["events"]] == [hit - 1, hit, hit + 1]
+        first = (await call("read", {"refs": [rc], "around_seq": 2}))["results"][0]
+        assert [item["seq"] for item in first["events"]][:3] == [1, 2, 3]
+        await rejected(call("read", {"refs": [rc], "around_seq": hit, "after_seq": 3}), "around_seq")
+        await rejected(call("read", {"refs": [rc], "around_seq": hit, "view": "turns"}), "around_seq")
+        # the events view: words, never a payload's JSON
+        d = session("Event words")
+        add = lambda kind, data: db.add_event(d, kind, data)["seq"]
+        add("tool_use", {"tool": "Bash", "tool_use_id": "toolu_1",
+                         "input": {"command": "ls -la", "description": "List it", "timeout_ms": 900}})
+        add("tool_result", {"tool_use_id": "toolu_1", "content": "a.txt", "is_error": True})
+        add("result", {"native_session_id": "n-1", "native_tail_id": "t-1", "ok": True,
+                       "num_turns": 3, "usage": {"input_tokens": 5}, "api_duration_ms": 9})
+        add("result", {"native_session_id": "n-1", "ok": False, "error": "Overloaded"})
+        add("info", {"subtype": "task", "task_id": "b1", "text": "Background command finished"})
+        add("engine_switch", {"from": "codex", "to": "claude", "from_model": "m-1", "from_effort": "max"})
+        add("side_question", {"request_id": "ask-1", "turn_id": "t", "question": "How far along?"})
+        add("model_switch", {"state": "substituted", "requested": "big", "served": "small",
+                             "request_id": "x", "native_session_id": "n"})
+        texts = [item["text"] for item in (await call("read", {"refs": [links.reference(d)],
+                                                               "view": "events"}))["results"][0]["events"]]
+        assert texts[0] == "Bash\ncommand: ls -la\ndescription: List it\ntimeout_ms: 900", texts[0]
+        assert texts[1] == "(failed) a.txt"
+        assert texts[2] == "The turn completed after 3 model steps"
+        assert texts[3] == "The turn failed: Overloaded"
+        assert texts[4] == "[task] Background command finished"
+        assert texts[5] == "Engine switched from codex (m-1, max) to claude"
+        assert texts[6] == "Asked beside the turn: How far along?"
+        assert texts[7] == "state: substituted\nrequested: big\nserved: small", texts[7]
+        assert not any("native_" in text or "toolu_" in text for text in texts), texts
+        # what the tools say about it
+        tools = {tool["name"]: tool for tool in session_agent.TOOLS}
+        assert tools["send"]["inputSchema"]["required"] == ["request_id", "action"]
+        assert "default" not in tools["send"]["inputSchema"]["properties"]["action"]
+        assert "turn_id sessions shows" in tools["send"]["inputSchema"]["properties"][
+            "expected_turn_ids"]["description"]
+        for name in ("wait", "cancel", "workflow", "cancel_workflow"):
+            assert {"id", "request_id"} <= set(tools[name]["inputSchema"]["properties"]), name
+            assert "required" not in tools[name]["inputSchema"], name
+        assert "around_seq" in tools["read"]["inputSchema"]["properties"]
+        assert "around_seq" in tools["search"]["description"]
+    finally:
+        dest.patch.stop()
+        links.end_turn(a, "rest")
+        links.end_turn(other, "theirs")
+    print("agent calls: own request_ids, said actions, short waits, every word, around a hit, events as words")
+
+
 async def main():
     config.ensure_dirs()
     await references()
@@ -774,6 +904,7 @@ async def main():
     await workflows()
     await agent_results()
     await selection_boundary()
+    await agent_calls()
     await fleet_and_drivers()
 
 

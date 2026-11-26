@@ -237,7 +237,7 @@ async def operate(source, method, args, scope=None):
         mine = sorted((plan for plan in actions.records(PREFIX) if plan["source"] == source),
                       key=lambda plan: -plan["created_at"])
         return {"workflows": [_public(plan) for plan in mine[:50]]}
-    rid = args.get("id")
+    rid = actions.named(source, args, PREFIX, salt="workflow:")
     plan = actions.get(PREFIX, rid)
     if plan["source"] != source:
         raise links.SessionLinkError("workflow belongs to another session")
@@ -249,6 +249,11 @@ async def operate(source, method, args, scope=None):
                 _save(plan)
         return await advance(rid)
     if method == "workflow":
+        # a short wait for the plan to finish; the worker moves it meanwhile
+        until = time.monotonic() + links.integer(args.get("wait_s", 0), "wait_s", 0, 25)
+        while plan["status"] not in FINAL and time.monotonic() < until:
+            await asyncio.sleep(min(1, max(0, until - time.monotonic())))
+            plan = actions.get(PREFIX, rid)
         return _public(plan)
     raise links.SessionLinkError("unknown workflow operation")
 

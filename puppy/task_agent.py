@@ -991,6 +991,7 @@ async def _read(main_id, sid, params):
     reader = session_links._turns if view == "turns" else session_links._events
     try:
         page = await session_links._reads.run(workers.history, reader, sid, args,
+                                              key="tasks:{}".format(main_id),
                                               wait=session_links.READS_WAIT)
     except workers.Busy:
         raise TaskAgentError("too many reads are waiting here; try again in a moment")

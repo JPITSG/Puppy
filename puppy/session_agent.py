@@ -84,12 +84,19 @@ REFS = {"type": "array", "minItems": 1, "maxItems": 512,
                        "the user selected (every other session only after @Session-All or "
                        "with none selected), [\"this\"] this conversation (read and search "
                        "only). Omit for the user's selection."}
+# a request or workflow is named by the id Puppy gave it or by the agent's own
+# request_id, in either field (session_actions.named)
+REQUEST_FIELDS = {
+    "id": {"type": "string", "description": "The id Puppy gave it, or the request_id you sent it with."},
+    "request_id": {"type": "string", "maxLength": 100, "description": "The request_id you sent it with, instead of id."},
+}
 TOOLS = [
     _tool("sessions", "Find sessions by title, node, or project folder. Returns stable references and availability.",
-          {"query": {"type": "string", "maxLength": 400},
+          {"query": {"type": "string", "maxLength": 400,
+                     "description": "Words a session's title, folder or node holds, all of them, in any order."},
            "offset": {"type": "integer", "minimum": 0},
            "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, read_only=True),
-    _tool("search", "Search the selected session histories, with source links and per-session pagination.",
+    _tool("search", "Search the selected session histories, with source links and per-session pagination. Open a hit with read around_seq=its seq.",
           {"refs": REFS, "query": {"type": "string", "maxLength": 400},
            "offset": {"type": "integer", "minimum": 0},
            "session_offset": {"type": "integer", "minimum": 0},
@@ -97,8 +104,9 @@ TOOLS = [
            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
            "kinds": {"type": "array", "items": {"type": "string", "enum": ["user", "assistant", "tool", "info", "title", "thinking"]}}},
           required=["query"], read_only=True),
-    _tool("read", "Read one selected session, this one included. The turns view (default): its prompts oldest first, each with its turn's final answer and none of the tool output; page with after_seq=next_after_seq (limit counts turns, up to 50); a text cut short names the call that reads it whole. The events view: newest page first, paged by after_seq/before_seq; a long event is read with limit=1, after_seq=seq-1, then its next_offset.",
+    _tool("read", "Read one selected session, this one included. The turns view (default): its prompts oldest first, each with its turn's final answer and none of the tool output; page with after_seq=next_after_seq (limit counts turns, up to 50); a text cut short names the call that reads it whole. The events view: newest page first, paged by after_seq/before_seq; a long event is read with limit=1, after_seq=seq-1, then its next_offset. around_seq opens one message, such as a search hit, with the events either side of it (9 in all unless limit says otherwise).",
           {"refs": REFS, "view": {"type": "string", "enum": ["events", "turns"], "default": "turns"},
+           "around_seq": {"type": "integer", "minimum": 1},
            "after_seq": {"type": "integer", "minimum": 0},
            "before_seq": {"type": "integer", "minimum": 1},
            "offset": {"type": "integer", "minimum": 0},
@@ -107,18 +115,20 @@ TOOLS = [
 
 
 TOOLS.extend([
-    _tool("send", "Send an explicitly requested question, task, steering, or stop to selected sessions. Tasks and queued questions use their existing queues; status and replies remain attributable.",
+    _tool("send", "Send an explicitly requested question, task, steering, or stop to selected sessions. Tasks and queued questions use their existing queues; status and replies remain attributable. wait_s waits that long for the answers first.",
           {"refs": REFS, "request_id": {"type": "string", "maxLength": 100},
-           "action": {"type": "string", "enum": ["question", "task", "steer", "stop"], "default": "task"},
+           "action": {"type": "string", "enum": ["question", "task", "steer", "stop"]},
            "text": {"type": "string", "maxLength": 120000},
            "timeout_s": {"type": "integer", "minimum": 30, "maximum": 7200},
-           "expected_turn_ids": {"type": "object", "additionalProperties": {"type": "string"}}},
-          required=["request_id"], destructive=True),
+           "wait_s": {"type": "integer", "minimum": 0, "maximum": 25, "default": 0},
+           "expected_turn_ids": {"type": "object", "additionalProperties": {"type": "string"},
+                                 "description": "For steer and stop: each target's ref to the turn_id sessions shows for it now."}},
+          required=["request_id", "action"], destructive=True),
     _tool("requests", "List this session's outgoing requests, newest first, with each one's statuses; wait with an id for its answers.", read_only=True),
     _tool("wait", "Wait briefly for a request and return individual statuses and answers. Repeat while pending; held work needs the user's queue control.",
-          {"id": {"type": "string"}, "wait_s": {"type": "integer", "minimum": 0, "maximum": 25}}, required=["id"], read_only=True),
+          dict(REQUEST_FIELDS, wait_s={"type": "integer", "minimum": 0, "maximum": 25}), read_only=True),
     _tool("cancel", "Cancel one outgoing request, including its queued or active work, while preserving other work in the destination sessions.",
-          {"id": {"type": "string"}}, required=["id"], destructive=True),
+          dict(REQUEST_FIELDS), destructive=True),
 ])
 
 
@@ -136,10 +146,10 @@ TOOLS.extend([
                    "after": {"type": "array", "items": {"type": "string"}}}}}},
           required=["request_id", "steps"], destructive=True),
     _tool("workflows", "List this session's coordination workflows, newest first, with their steps' statuses; workflow with an id for its answers.", read_only=True),
-    _tool("workflow", "Read a workflow's current step statuses, requests, and collected results.",
-          {"id": {"type": "string"}}, required=["id"], read_only=True),
+    _tool("workflow", "Read a workflow's current step statuses, requests, and collected results; wait_s waits that long for it to finish first.",
+          dict(REQUEST_FIELDS, wait_s={"type": "integer", "minimum": 0, "maximum": 25, "default": 0}), read_only=True),
     _tool("cancel_workflow", "Cancel a workflow's pending steps and its own active requests. Other session work is preserved.",
-          {"id": {"type": "string"}}, required=["id"], destructive=True),
+          dict(REQUEST_FIELDS), destructive=True),
 ])
 
 _server = None
