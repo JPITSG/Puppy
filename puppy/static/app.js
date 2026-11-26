@@ -16365,14 +16365,18 @@ class Composer {
           throw new Error("Backend unavailable");
         const backend = state.backends.find(b => b.id === Number(this.host.bid));
         const filtered = !this.host.bid || backendHasCapability(backend, "session-prompt-history");
+        /* a question put with Ask is recalled like a prompt, where the node
+           can page the two together */
+        const asks = !this.host.bid || backendHasCapability(backend, "session-prompt-history-asks");
         const limit = filtered ? 50 : 200;
         const cursor = walk.before === null ? "" : `&before_seq=${walk.before}`;
+        const kinds = !filtered ? "" : asks ? "&kind=user&kind=side_question" : "&kind=user";
         walk.controller = new AbortController();
         const timeout = setTimeout(() => walk.controller.abort(), 15000);
         let page;
         try {
           page = await api(this.host.bid,
-            `sessions/${this.host.sid}/events?limit=${limit}${filtered ? "&kind=user" : ""}${cursor}`,
+            `sessions/${this.host.sid}/events?limit=${limit}${kinds}${cursor}`,
             { signal: walk.controller.signal, cache: "no-store" });
         } finally { clearTimeout(timeout); }
         if (this.history !== walk) return;
@@ -16386,8 +16390,7 @@ class Composer {
           previous = ev.seq;
           return false;
         })) throw new Error("Invalid prompt history page");
-        const prompts = events.filter(ev => ev.kind === "user" && ev.data &&
-          typeof ev.data.text === "string" && ev.data.text.length).map(ev => ev.data.text);
+        const prompts = events.map(recalledText).filter(Boolean);
         walk.entries.push(...prompts.reverse());
         if (events.length) walk.before = events[0].seq;
         walk.done = events.length < limit || walk.before === 1;
@@ -18961,6 +18964,17 @@ const ATTACH_IMAGE_SUFFIX = " — view it with your image/file tools]";
 const ATTACH_FILE_PREFIX = "[file attached: ";
 const ATTACH_FILE_SUFFIX = " — inspect it with your file tools]";
 const SENT_THUMBNAIL_LIMIT = 12;   // recall keeps this many sent image previews
+
+/* What Up recalls from one stored event: a prompt's text, steered or not, and
+   a question asked beside a running turn - both are messages the person
+   wrote in this box. Anything else, or an empty one, recalls nothing. */
+function recalledText(event) {
+  const data = event && event.data;
+  if (!data) return "";
+  const text = event.kind === "user" ? data.text :
+    event.kind === "side_question" ? data.question : "";
+  return typeof text === "string" ? text : "";
+}
 
 function baseName(path) {
   const value = String(path || "");

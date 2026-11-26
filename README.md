@@ -428,7 +428,8 @@ top edge, which lights up under the pointer like the sidebar's edge; the
 transcript always keeps a few lines in view. Double-click the edge for the
 box's normal size. The size is for the message being written: once it is sent
 (`Enter`, Steer, Queue or Ask) the box returns to its condensed size.
-Recall reads the session's stored prompts, loading older pages as
+Recall reads the session's stored prompts - and the questions put to a busy
+session with Ask, in their place among them - loading older pages as
 needed with no history limit, all the way back to its first prompt, on any
 device. `↓` at the end walks forward again and restores your unsent draft and
 attachments after the newest prompt. Each new recall walk picks up prompts

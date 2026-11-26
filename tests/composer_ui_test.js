@@ -74,8 +74,8 @@ const promptEvent = (seq, text) => ({ seq, kind: "user", data: { text } });
 function historyPage(route) {
   const query = new URLSearchParams(route.split("?")[1]);
   const before = Number(query.get("before_seq")) || Infinity;
-  const kind = query.get("kind");
-  return { events: storedEvents.filter(e => e.seq < before && (!kind || e.kind === kind))
+  const kinds = query.getAll("kind");
+  return { events: storedEvents.filter(e => e.seq < before && (!kinds.length || kinds.includes(e.kind)))
     .slice(-Number(query.get("limit"))) };
 }
 const state = {
@@ -1050,7 +1050,8 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.equal(firstDevice.ta.value, "prompt 1202");
   assert.equal(secondDevice.ta.value, firstDevice.ta.value);
   assert.ok(calls.api.slice(mark).every(c => c.bid === 7 &&
-    c.route.startsWith("sessions/42/events?limit=50&kind=user") && c.cache === "no-store"));
+    c.route.startsWith("sessions/42/events?limit=50&kind=user") && c.cache === "no-store" &&
+    !c.route.includes("side_question")), "a node that cannot page asks is asked for prompts alone");
   storedEvents.push(promptEvent(5000, "sent from another device"));
   const walk = firstDevice.composer.history;
   firstDevice.composer.replace(firstDevice.composer.value());
@@ -1083,6 +1084,34 @@ const deletes = from => calls.api.slice(from).filter(c => c.method === "DELETE")
   assert.equal(calls.api.length - mark, 4);
   assert.ok(calls.api.slice(mark).every(c => !c.route.includes("kind=")));
   older.composer.destroy();
+
+  /* A question put with Ask is a message written in this box too: Up
+     recalls it in its place among the prompts - here and on a backend that
+     pages the two together, and from an older node's unfiltered pages. */
+  storedEvents = [promptEvent(1, "build the plate"),
+    { seq: 2, kind: "assistant", data: { text: "working on it" } },
+    { seq: 3, kind: "side_question", data: { question: "which screws are you using?" } },
+    { seq: 4, kind: "side_question_result", data: { answer: "M2.5" } },
+    promptEvent(5, "make it thinner"),
+    { seq: 6, kind: "side_question", data: { question: "" } },
+    { seq: 7, kind: "side_question", data: { text: "not a question" } }];
+  for (const [bid, capabilities, route] of [
+      [0, null, "&kind=user&kind=side_question"],
+      [7, ["session-prompt-history", "session-prompt-history-asks"], "&kind=user&kind=side_question"],
+      [7, [], ""]]) {
+    if (capabilities) state.backends[0].capabilities = capabilities;
+    const asking = makeBox({ bid, sid: 42 });
+    mark = calls.api.length;
+    up(asking); await settle();
+    assert.equal(asking.ta.value, "make it thinner", "an empty or malformed question recalls nothing");
+    up(asking); await settle();
+    assert.equal(asking.ta.value, "which screws are you using?", "the asked question, in its place");
+    up(asking); await settle();
+    assert.equal(asking.ta.value, "build the plate");
+    assert.ok(calls.api.slice(mark).every(c => route ? c.route.includes(route) :
+      !c.route.includes("kind=")), bid + " " + route);
+    asking.composer.destroy();
+  }
 
   const offline = makeBox({ bid: 7 });
   offline.composer.replace("offline draft");

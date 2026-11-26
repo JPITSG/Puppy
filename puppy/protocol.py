@@ -164,6 +164,10 @@ SESSION_EVENT_WINDOW_CAPABILITY = "session-event-window"
 # GET /api/sessions/{sid}/events accepts kind=user, filtering before its limit
 # for cursor-paged composer recall across the session's entire stored history.
 SESSION_PROMPT_HISTORY_CAPABILITY = "session-prompt-history"
+# The same route takes kind=side_question too, beside kind=user in one request
+# (kind=user&kind=side_question), so recall walks the questions asked beside a
+# running turn with the prompts. An older node reads only the first kind given.
+SESSION_PROMPT_HISTORY_ASKS_CAPABILITY = "session-prompt-history-asks"
 # GET /api/sessions/{sid}/prompts answers the session's prompt index: one
 # [seq, ts, steered, excerpt] row per prompt (the first line, bounded), oldest
 # first, after an optional after_seq cursor, in pages with ``more`` and the
@@ -419,6 +423,7 @@ BASE_CAPABILITIES = (
     SEARCH_CAPABILITY,
     SESSION_EVENT_WINDOW_CAPABILITY,
     SESSION_PROMPT_HISTORY_CAPABILITY,
+    SESSION_PROMPT_HISTORY_ASKS_CAPABILITY,
     SESSION_PROMPT_INDEX_CAPABILITY,
     SESSION_PROMPT_ANSWERS_CAPABILITY,
     SESSION_TOOLS_CAPABILITY,

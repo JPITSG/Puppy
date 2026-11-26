@@ -856,14 +856,19 @@ def get_events(session_id: int, before_seq=None, limit: int = 200,
     Without a cursor these are the newest events; ``before_seq`` pages back
     from there, and ``after_seq`` pages forward, which lets a console load a
     window of history around one event rather than paging back to it. An
-    optional kind filter applies before the limit, so prompt recall can page
-    through a whole session without transferring its tool output.
+    optional kind filter - one kind, or several - applies before the limit,
+    so prompt recall can page through a whole session's prompts and asked
+    questions without transferring its tool output.
     """
     where = ["session_id=?"]
     args = [session_id]
-    if kind is not None:
+    if isinstance(kind, str):
         where.append("kind=?")
         args.append(kind)
+    elif kind is not None:
+        kinds = sorted(set(kind))
+        where.append("kind IN ({})".format(",".join("?" for _ in kinds)))
+        args.extend(kinds)
     if after_seq is not None:
         where.append("seq>?")
         args.append(after_seq)

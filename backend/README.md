@@ -1140,7 +1140,12 @@ Prompt recall uses the same stored transcript on every device. The additive
 cursors and ascending event order. There is no total history cap or separate
 recall store. The console fetches prompts on demand; older peers use unfiltered
 event pages until upgraded. Queued prompts enter recall when they start and
-become transcript rows; folded task archives are not prompts in Main.
+become transcript rows; folded task archives are not prompts in Main. With the
+additive `session-prompt-history-asks` capability the same route also takes
+`kind=side_question`, alone or beside `kind=user` in one request
+(`?kind=user&kind=side_question`), so recall pages the questions asked beside
+a running turn together with the prompts, in transcript order; any other kind
+is `400`.
 
 The prompt gutter's numbers and its prompt list read the additive
 `session-prompt-index` capability: `GET /api/sessions/{sid}/prompts` answers

@@ -269,6 +269,13 @@ still contain a value written before that release.
   agent's `sessions` listing marks them `selected` and says so in
   `selection`. `"[all]"` and `"[this]"`, the notation's spelling, read as
   those words. No stored format or wire capability changes.
+- Since v1.0.664 prompt recall also walks the questions put with Ask:
+  `session-prompt-history-asks` lets `GET /api/sessions/{sid}/events` take
+  `kind=side_question` beside `kind=user` (repeated `kind` parameters, one
+  page in transcript order, the filter before the limit; any other kind is
+  `400`). The console sends both kinds only to a node that advertises it and
+  recalls a `side_question` event's `question`; an older node is asked for
+  prompts alone. No stored format changes.
 - Since v1.0.663 agents show what they build through previews
   (`session-previews`, above) instead of web servers of their own on the
   network.

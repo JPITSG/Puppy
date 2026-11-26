@@ -1210,11 +1210,18 @@ async def h_session_tool(request: web.Request):
     return web.json_response(result)
 
 
+# What prompt recall pages through: the prompts, and the questions asked
+# beside a running turn (session-prompt-history-asks).
+RECALL_KINDS = ("user", "side_question")
+
+
 async def h_session_events(request: web.Request):
     s = _session_or_404(request)
-    kind = request.query.get("kind")
-    if kind is not None and kind != "user":
-        return web.json_response({"error": "event kind must be user"}, status=400)
+    kinds = request.query.getall("kind", [])
+    if any(kind not in RECALL_KINDS for kind in kinds):
+        return web.json_response({"error": "event kind must be user or side_question"},
+                                 status=400)
+    kind = None if not kinds else kinds[0] if len(set(kinds)) == 1 else tuple(set(kinds))
     before = request.query.get("before_seq")
     after = request.query.get("after_seq")
     try:
