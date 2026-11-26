@@ -234,6 +234,19 @@ still contain a value written before that release.
   final answer and outcome, texts cut at a stated length, `next_after_seq`
   until null. A controller asks a backend for it only behind the additive
   `session-turns-view` capability. No stored format changes.
+- Since v1.0.657 a `read` without `view` is the turns view unless it pages
+  events by their own cursors (`before_seq`, a character `offset`), and the
+  controller names the view it relays: a backend without
+  `session-turns-view` is read by events when the call named none. Pages are
+  bounded (`EVENTS_PAGE`, `EVENT_CHARS`, `EVENTS_BUDGET`; `TURN_PROMPT_CHARS`,
+  `TURN_ANSWER_CHARS`, `TURNS_BUDGET`) and a long text keeps its start and
+  end (`excerpt`) with the events-view call that reads it whole. `refs` take
+  a four-character ID or a mention, resolved on the controller
+  (`expand_refs`). What an agent's tool returns is `for_agent`'s shape -
+  sessions without their channel states, requests and workflows newest first
+  with bounded answers, listings without answers - while the console's routes
+  keep the full records. A request's stored answer keeps the end of the turn
+  that gave it. No stored format or wire capability changes.
 - A session's `background_tasks` rows (snapshot and live) carry three optional
   additive fields: `tool_use_id`, the call the engine said started the task;
   `call_seq`, that call's event in the transcript when this turn wrote it; and

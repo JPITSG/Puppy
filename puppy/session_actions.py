@@ -8,6 +8,7 @@ the exact prompt to its receipt, including held/reordered/retried work.
 from __future__ import annotations
 
 import asyncio
+import collections
 import hashlib
 import json
 import math
@@ -31,6 +32,13 @@ def _id(value):
     if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{32}", value):
         raise links.SessionLinkError("invalid session request id")
     return value
+
+
+# A request's answer as it is kept: the turn's last messages within this many
+# characters (the record allows 121000), the earlier ones said to be left out.
+ANSWER_LIMIT = 120000
+EARLIER_LEFT_OUT = ("[The turn's earlier messages are left out; the linked session has "
+                    "them.]\n\n")
 
 
 def request_id(source, key):
@@ -120,23 +128,26 @@ def turn_finished(sid, prompt, status, user_seq):
     value = _active_inbox(sid, prompt)
     if value is None or value["status"] in TERMINAL:
         return
-    answers, end, total = [], user_seq, 0
+    answers, end, size, dropped = collections.deque(), user_seq, 0, False
     # Read bounded pages through this exact turn, before its successor starts.
+    # A turn's answer is its last word: when its messages run past the limit
+    # the earliest go, never the end.
     while True:
         rows = db.get_events(sid, after_seq=end, limit=200)
         for row in rows:
             end = row["seq"]
             if row["kind"] == "assistant":
                 text = str(row["data"].get("text") or "")
-                total += len(text)
-                if sum(map(len, answers)) < 120000:
-                    answers.append(text[:120000 - sum(map(len, answers))])
+                answers.append(text)
+                size += len(text) + 2
+                while size > ANSWER_LIMIT and len(answers) > 1:
+                    size -= len(answers.popleft()) + 2
+                    dropped = True
         if len(rows) < 200:
             break
-    answer = "\n\n".join(answers)
-    if total > 120000 or len(answer) > 120000:
-        answer = answer[:120000]
-        answer += "\n[Answer shortened; read the linked session for the complete response.]"
+    answer = links.excerpt("\n\n".join(answers), ANSWER_LIMIT)
+    if dropped:
+        answer = EARLIER_LEFT_OUT + answer
     value.update(status="completed" if status == "ok" else
                  "cancelled" if status == "interrupted" else "failed",
                  answer=answer, end_seq=end, start_seq=user_seq,
@@ -496,7 +507,10 @@ async def operate(source, method, args, scope=None):
     if method == "send":
         return await send(source, args, scope)
     if method == "requests":
-        return {"requests": [_public(r) for r in records(OUTBOX_PREFIX) if r["source"] == source][-100:]}
+        # newest first: the ones a turn asks after are the latest
+        mine = sorted((r for r in records(OUTBOX_PREFIX) if r["source"] == source),
+                      key=lambda record: -record["created_at"])
+        return {"requests": [_public(r) for r in mine[:100]]}
     rid = args.get("id")
     record = get(OUTBOX_PREFIX, rid)
     if record["source"] != source:

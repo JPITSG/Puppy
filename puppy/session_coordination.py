@@ -143,9 +143,11 @@ def _dependency_context(plan, step):
         if prior["spec"]["id"] not in step["spec"]["after"]:
             continue
         for result in prior["results"]:
+            answer = result.get("answer", "")
+            # its start and its end: a long answer's conclusion is at its end
             parts.append("\n{} · {}\n{}\nSource: {}".format(
-                prior["spec"]["id"], result["target"], result.get("answer", "")[:8000] +
-                ("\n[Excerpt; read the source for the full answer.]" if len(result.get("answer", "")) > 8000 else ""),
+                prior["spec"]["id"], result["target"], links.excerpt(answer, 8000) +
+                ("\n[Excerpt; read the source for the full answer.]" if len(answer) > 8000 else ""),
                 links.source_link(result["target"], result.get("end_seq", 0))))
     text = "\n".join(parts)
     if len(text) > 120000:
@@ -228,7 +230,9 @@ async def operate(source, method, args, scope=None):
     if method == "coordinate":
         return await create(source, args, scope)
     if method == "workflows":
-        return {"workflows": [_public(plan) for plan in actions.records(PREFIX) if plan["source"] == source][-50:]}
+        mine = sorted((plan for plan in actions.records(PREFIX) if plan["source"] == source),
+                      key=lambda plan: -plan["created_at"])
+        return {"workflows": [_public(plan) for plan in mine[:50]]}
     rid = args.get("id")
     plan = actions.get(PREFIX, rid)
     if plan["source"] != source:

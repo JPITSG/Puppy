@@ -21,13 +21,28 @@ from puppy import backends, config, db, prompt_index, protocol, runner, search, 
 
 log = logging.getLogger("puppy.session_links")
 CAPABILITY = "session-references"
-# read's view "turns": prompts and their turns' final answers, a page at a time
+# What one read answers, sized so a page fits a model's tool result whole
+# (the audit of 2026-11-26 found reads of 50-138 KB, a quarter of them past
+# what Claude Code takes): the events view's page, one message's share of it,
+# and the turns view - the default - with its prompts and final answers.
+EVENTS_PAGE = 20
+EVENT_CHARS = 8000
+EVENTS_BUDGET = 40000
 TURNS_PAGE = 20
 TURNS_MAX = 50
-TURN_PROMPT_CHARS = 3000
-TURN_ANSWER_CHARS = 8000
-TURNS_BUDGET = 100000
+TURN_PROMPT_CHARS = 2000
+TURN_ANSWER_CHARS = 4000
+TURNS_BUDGET = 40000
+# Answers of requests and workflows as an agent reads them: each at most so
+# long, all of a result's together at most so long, a long one as its start
+# and its end around what was left out.
+AGENT_ANSWER_CHARS = 6000
+AGENT_ANSWERS_BUDGET = 40000
+AGENT_LISTED = 50
 REF_RE = re.compile(r"^[a-f0-9]{32}/[1-9][0-9]{0,15}$")
+# A session's four-character ID as the tools take it: bare, or in the
+# @Session-NAME-XXXX mention the user wrote.
+CODE_REF_RE = re.compile(r"(?:@?session-[\w-]*-)?([a-z0-9]{4})", re.I)
 MENTION_RE = re.compile(
     r"(?<!\w)@session\s+(?:([a-f0-9]{32}):)?"
     r"(all|[a-f0-9]{32}/[1-9][0-9]{0,15})(?![\w/])", re.I)
@@ -89,6 +104,45 @@ def parse_ref(value):
         raise SessionLinkError("use a session reference returned by sessions")
     node, sid = value.split("/")
     return node, int(sid)
+
+
+def excerpt(text, limit):
+    """A text cut to ``limit`` characters as its start and its end around
+    what was left out, which it names: a long answer's conclusion is at its
+    end, and its summary often at its start."""
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    room = max(0, int(limit) - 48)
+    head = room // 3
+    tail = room - head
+    return text[:head] + "\n[… {} characters left out …]\n".format(
+        len(text) - head - tail) + (text[-tail:] if tail else "")
+
+
+def expand_refs(refs):
+    """Refs as the tools take them: stable references, "all", "this", or a
+    session's four-character ID - bare, or in its @Session-NAME-XXXX
+    mention - resolved on this controller, which allocated it."""
+    if not isinstance(refs, list):
+        return refs
+    out = []
+    for ref in refs:
+        if isinstance(ref, str):
+            text = ref.strip()
+            # "all" and "this" in any case are those words, never a short ID
+            if text.lower() in ("all", "this") or REF_RE.fullmatch(text.lower()):
+                out.append(text.lower())
+                continue
+            match = CODE_REF_RE.fullmatch(text)
+            if match:
+                try:
+                    out.extend(session_aliases.resolve([match.group(1).upper()]))
+                except ValueError as exc:
+                    raise SessionLinkError(str(exc))
+                continue
+        out.append(ref)     # refused later in the usual words
+    return list(dict.fromkeys(out))
 
 
 def validate_scope(value):
@@ -176,7 +230,7 @@ def source_link(ref, seq=0):
 
 
 def _events(sid, args):
-    limit = integer(args.get("limit", 40), "limit", 1, 100)
+    limit = integer(args.get("limit", EVENTS_PAGE), "limit", 1, 100)
     after = args.get("after_seq")
     before = args.get("before_seq")
     if after is not None:
@@ -191,7 +245,9 @@ def _events(sid, args):
     offset = integer(args.get("offset", 0), "offset", 0, 100000000)
     if offset and limit != 1:
         raise SessionLinkError("character offset requires limit=1")
-    budget = 120000
+    budget = EVENTS_BUDGET
+    # one message read alone takes the whole page; among others, its share
+    share = EVENTS_BUDGET if limit == 1 else EVENT_CHARS
     result = []
     for row in rows:
         payload = row["data"]
@@ -201,7 +257,7 @@ def _events(sid, args):
             raw = search._scrub(session_tasks.archive_text(payload))
         else:
             raw = search._scrub(search._text_of(payload.get("content", payload)))
-        content = raw[offset:offset + min(budget, 16000)]
+        content = raw[offset:offset + min(budget, share)]
         item = {"seq": row["seq"], "kind": row["kind"], "ts": row["ts"],
                 "text": content, "offset": offset,
                 "next_offset": offset + len(content) if offset + len(content) < len(raw) else None,
@@ -257,9 +313,13 @@ def _turns(sid, args):
     def piece(seq, cap):
         kind, payload, ts = messages.get(seq, ("", {}, 0))
         text = _turn_text(kind, payload)
-        return {"seq": seq, "ts": round(float(ts or 0), 3), "text": text[:cap],
+        item = {"seq": seq, "ts": round(float(ts or 0), 3), "text": excerpt(text, cap),
                 "chars": len(text), "truncated": len(text) > cap,
                 "source": source_link(reference(sid), seq)}
+        if item["truncated"]:
+            # the call that reads it whole
+            item["whole"] = {"view": "events", "after_seq": seq - 1, "limit": 1}
+        return item
 
     turns, budget, last = [], TURNS_BUDGET, after
     for seq, _ts, steered, _excerpt, answer_seq, outcome in index["prompts"]:
@@ -306,7 +366,7 @@ async def node_call(method, args, source="", relayed=False):
         if method == "read":
             if len(sessions) != 1:
                 raise SessionLinkError("read one session per call; search accepts several")
-            view = args.get("view", "events")
+            view = read_view(args)
             if view not in ("events", "turns"):
                 raise SessionLinkError("view is events or turns")
             reader = _turns if view == "turns" else _events
@@ -354,6 +414,16 @@ async def node_call(method, args, source="", relayed=False):
     raise SessionLinkError("unknown session operation")
 
 
+def read_view(args):
+    """read's view: as named, else the turns - the conversation's story -
+    unless the call pages events by their own cursors (before_seq, a
+    character offset)."""
+    view = args.get("view")
+    if view is None:
+        return "events" if args.get("before_seq") is not None or args.get("offset") else "turns"
+    return view
+
+
 async def remote_call(bid, method, args, source=""):
     if bid == 0:
         return await node_call(method, args, source=source)
@@ -362,10 +432,15 @@ async def remote_call(bid, method, args, source=""):
         raise SessionLinkError("node is offline")
     if CAPABILITY not in channel["capabilities"]:
         raise SessionLinkError("node does not support session references")
-    if method == "read" and args.get("view", "events") != "events" and \
-            protocol.SESSION_TURNS_VIEW_CAPABILITY not in channel["capabilities"]:
-        raise SessionLinkError("node '{}' cannot read by turns yet - upgrade its Puppy backend, "
-                               "or read its events".format(channel.get("name") or bid))
+    if method == "read":
+        # the node is told the view, whatever its own default is
+        view = read_view(args)
+        if view == "turns" and protocol.SESSION_TURNS_VIEW_CAPABILITY not in channel["capabilities"]:
+            if args.get("view") is not None:
+                raise SessionLinkError("node '{}' cannot read by turns yet - upgrade its Puppy "
+                                       "backend, or read its events".format(channel.get("name") or bid))
+            view = "events"
+        args = dict(args, view=view)
     from puppy.workspace_links import _request_json
     try:
         return await asyncio.wait_for(_request_json(
@@ -455,6 +530,12 @@ async def broker(source, method, args, scope=None):
     """One controller's view of its fleet, also used by remote-origin calls."""
     if not isinstance(args, dict):
         raise SessionLinkError("tool arguments must be an object")
+    if "refs" in args:
+        args = dict(args, refs=expand_refs(args["refs"]))
+    if method == "coordinate" and isinstance(args.get("steps"), list):
+        args = dict(args, steps=[
+            dict(step, refs=expand_refs(step["refs"]))
+            if isinstance(step, dict) and "refs" in step else step for step in args["steps"]])
     if method == "resolve":
         return {"format": 1, "controller": db.node_uuid(),
                 "refs": session_aliases.resolve(args.get("codes"))}
@@ -481,16 +562,20 @@ async def broker(source, method, args, scope=None):
             list(available.values())
         rows = [s for s in listed if query in
                 (s["title"] + " " + s["cwd"] + " " + s["node_name"] + " " + s["mention"]).lower()]
-        return {"controller": data["controller"], "sessions": rows[offset:offset + limit],
-                "total": len(rows), "next_offset": offset + limit if offset + limit < len(rows) else None,
-                "unavailable": data["unavailable"]}
+        listing = {"controller": data["controller"], "sessions": rows[offset:offset + limit],
+                   "total": len(rows),
+                   "next_offset": offset + limit if offset + limit < len(rows) else None}
+        if data["unavailable"]:
+            listing["unavailable"] = data["unavailable"]
+        return listing
     refs = args.get("refs", (scope or {}).get("refs"))
     if refs in ("all", "this"):
         refs = [refs]
     if not isinstance(refs, list) or not refs or len(refs) > 512:
         raise SessionLinkError("select sessions with @Session, supply refs from sessions, "
                                "or pass [\"this\"] for this conversation")
-    if refs == ["all"]:
+    every = refs == ["all"]
+    if every:
         refs = list(available)
     refs = [source if ref == "this" else ref for ref in refs]
     for ref in refs:
@@ -500,11 +585,17 @@ async def broker(source, method, args, scope=None):
         if scope and scope["refs"] != ["all"] and ref not in scope["refs"]:
             raise SessionLinkError("session is outside the selected references")
     groups = {}
-    errors = list(data["unavailable"])
+    # A node that cannot be reached is named where it costs coverage: in a
+    # read or search of every session, or for a session that is not found -
+    # never beside a session that answered.
+    errors = list(data["unavailable"]) if every else []
+    unreached = ", ".join(item["node"] for item in data["unavailable"])
     for ref in dict.fromkeys(refs):
         row = known.get(ref)
         if row is None:
-            errors.append({"ref": ref, "error": "session is deleted, offline, or unavailable"})
+            errors.append({"ref": ref, "error": "session is deleted{}".format(
+                ", or on a node not reached now ({})".format(unreached) if unreached
+                else " or unavailable")})
         else:
             groups.setdefault(row["bid"], []).append(ref)
     if method == "read" and len(refs) != 1:
@@ -517,14 +608,131 @@ async def broker(source, method, args, scope=None):
             errors.append({"refs": items, "error": str(value)})
         else:
             results.append(value)
-    return {"results": results, "unavailable": errors, "selected": len(refs),
-            "next_session_offset": max((value.get("next_session_offset") or 0 for value in results), default=0) or None}
+    answer = {"results": results, "selected": len(refs),
+              "next_session_offset": max((value.get("next_session_offset") or 0
+                                          for value in results), default=0) or None}
+    if errors:
+        answer["unavailable"] = errors
+    return answer
 
 
 async def dispatch(sid, turn_id, method, args):
     scope = _scopes.get((sid, turn_id))
     controller = (scope or {}).get("controller", db.node_uuid())
-    return await _controller_call(sid, turn_id, controller, method, args, scope)
+    return for_agent(method, await _controller_call(sid, turn_id, controller, method, args, scope))
+
+
+_SESSION_NOISE = ("id", "node", "bid", "side_question", "steering")
+
+
+def _session_row(row):
+    """A session as an agent reads it: its ref says its node and number, and
+    its live channels' states are the node's business."""
+    if not isinstance(row, dict):
+        return row
+    item = {key: value for key, value in row.items() if key not in _SESSION_NOISE}
+    if not item.get("turn_id"):
+        item.pop("turn_id", None)
+    return item
+
+
+def _answer_rows(results, answers=True, sharing=0):
+    """A request's per-session results: status, error, and the answer - each
+    within its share of the result (``sharing`` answers in all, these by
+    default), its end kept - with the link to it."""
+    each = max(1500, min(AGENT_ANSWER_CHARS,
+                         AGENT_ANSWERS_BUDGET // max(1, sharing or len(results))))
+    rows = []
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        item = {"target": row.get("target"), "status": row.get("status")}
+        answer = str(row.get("answer") or "")
+        if answer:
+            if answers:
+                item["answer"] = excerpt(answer, each)
+            if not answers or len(answer) > each:
+                item["answer_chars"] = len(answer)
+        if row.get("error"):
+            item["error"] = str(row["error"])[:2000]
+        if row.get("target"):
+            item["source"] = source_link(row["target"], row.get("end_seq") or 0)
+        rows.append(item)
+    return rows
+
+
+def _request_view(record, answers=True):
+    view = {key: record[key] for key in ("id", "action", "status", "created_at", "deadline")
+            if key in record}
+    if record.get("workflow"):
+        view["workflow"] = record["workflow"]
+    view["results"] = _answer_rows(record.get("results") or [], answers)
+    return view
+
+
+def _workflow_view(plan, answers=True):
+    view = {key: plan[key] for key in ("id", "title", "status", "created_at", "deadline")
+            if key in plan}
+    steps = plan.get("steps") or []
+    count = sum(len(step.get("results") or []) for step in steps if isinstance(step, dict))
+    view["steps"] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        spec = step.get("spec") or {}
+        item = {"id": spec.get("id"), "action": spec.get("action"),
+                "after": spec.get("after") or [], "status": step.get("status")}
+        if step.get("request"):
+            item["request"] = step["request"]
+        if step.get("error"):
+            item["error"] = str(step["error"])[:2000]
+        # every step's answers share the one result
+        item["results"] = _answer_rows(step.get("results") or [], answers, count)
+        view["steps"].append(item)
+    return view
+
+
+def _newest(items, limit=AGENT_LISTED):
+    ordered = sorted((item for item in items if isinstance(item, dict)),
+                     key=lambda item: -float(item.get("created_at") or 0))
+    return ordered[:limit], len(ordered)
+
+
+def for_agent(method, result):
+    """A result as the agent's tool returns it: sessions without the fields
+    that say nothing to it, requests and workflows newest first with their
+    answers bounded and their ends kept, listings without answers."""
+    if not isinstance(result, dict):
+        return result
+    if method == "sessions":
+        return dict(result, sessions=[_session_row(row) for row in result.get("sessions") or []])
+    if method in ("read", "search"):
+        results = []
+        for value in result.get("results") or []:
+            if not isinstance(value, dict):
+                continue
+            value = dict(value)
+            if "session" in value:
+                value["session"] = _session_row(value["session"])
+            if isinstance(value.get("results"), list):
+                value["results"] = [dict(row, session=_session_row(row["session"]))
+                                    if isinstance(row, dict) and "session" in row else row
+                                    for row in value["results"]]
+            results.append(value)
+        return dict(result, results=results)
+    if method in ("send", "wait", "cancel"):
+        return _request_view(result)
+    if method == "requests":
+        listed, total = _newest(result.get("requests") or [])
+        return {"requests": [_request_view(item, answers=False) for item in listed],
+                "total": total, "note": "newest first; wait with a request's id for its answers"}
+    if method in ("coordinate", "workflow", "cancel_workflow"):
+        return _workflow_view(result)
+    if method == "workflows":
+        listed, total = _newest(result.get("workflows") or [])
+        return {"workflows": [_workflow_view(item, answers=False) for item in listed],
+                "total": total, "note": "newest first; workflow with an id for its answers"}
+    return result
 
 
 async def _controller_call(sid, turn_id, controller, method, args, scope):

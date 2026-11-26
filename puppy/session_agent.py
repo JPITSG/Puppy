@@ -26,8 +26,8 @@ TOOL_INSTRUCTIONS = (
     "A mention is @Session-NAME-XXXX, where XXXX is a permanent four-character "
     "alphanumeric ID allocated by the selecting controller; NAME is only a label. "
     "Mentions are resolved before the turn; omitted refs reuse that selection. "
-    "Use sessions to discover each mention's short_id and stable ref, and pass "
-    "only the returned node UUID/session number as refs. Older UUID mentions also work. "
+    "refs take a stable ref from sessions, a session's four-character short_id, or "
+    "its mention as written; older UUID mentions also work. "
     "The selected sessions are your reference boundary. "
     "search finds relevant excerpts; "
     "Search pages across sessions with session_offset and within matches with offset. "
@@ -35,19 +35,19 @@ TOOL_INSTRUCTIONS = (
     "Words match from their start, one- and two-letter words only whole; \"quoted phrases\", "
     "OR and -exclusion work. Search with distinctive words, one search at a time: a search "
     "that takes too long is stopped and says so, and is then narrowed, never repeated. "
-    "read retrieves conversation pages, with after_seq/before_seq and character offsets "
-    "for long messages. Follow every next_offset to read a complete long message. "
+
     "All includes archived conversations on connected nodes, every one but this session. "
     "This conversation is yours to read and search as well: pass refs [\"this\"] "
     "(sessions lists it first, marked this, and the user can mention it) for its whole "
-    "history, not only what your context still holds. read with view \"turns\" pages "
-    "through a conversation oldest first, one row per prompt with that turn's final "
-    "answer and none of its tool output or thinking; continue with after_seq set to "
+    "history, not only what your context still holds. read pages a conversation: by "
+    "default its turns, oldest first, one row per prompt with that turn's final answer "
+    "and none of its tool output or thinking; continue with after_seq set to "
     "next_after_seq until it is null. Use it to go through a long history - to list what "
     "was found, decided or left open across it, say - then check each finding against "
     "later turns with search and against the work itself before reporting it, citing "
-    "the source links. Long texts in it are cut and say their length; the events view "
-    "reads a whole message. On a long history keep your running findings somewhere "
+    "the source links. A long text in it keeps its start and end and gives the call "
+    "that reads it whole; view \"events\" reads messages newest page first, a long one "
+    "through every next_offset. On a long history keep your running findings somewhere "
     "durable as you go, since your context may be compacted before you finish. You never "
     "send, steer, stop or coordinate this session itself. "
     "Report unavailable nodes and incomplete coverage. Cite the returned source links "
@@ -78,8 +78,9 @@ def instructions():
 
 REFS = {"type": "array", "minItems": 1, "maxItems": 512,
         "items": {"type": "string"},
-        "description": "Stable refs from sessions; [all] means every other session and [this] "
-                       "this conversation (read and search only). Omit to reuse the user's mentions."}
+        "description": "Stable refs from sessions, short_ids or mentions; [all] means every "
+                       "other session and [this] this conversation (read and search only). "
+                       "Omit to reuse the user's mentions."}
 TOOLS = [
     _tool("sessions", "Find sessions by title, node, or project folder. Returns stable references and availability.",
           {"query": {"type": "string", "maxLength": 400},
@@ -93,8 +94,8 @@ TOOLS = [
            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
            "kinds": {"type": "array", "items": {"type": "string", "enum": ["user", "assistant", "tool", "info", "title", "thinking"]}}},
           required=["query"], read_only=True),
-    _tool("read", "Read one selected session, this one included. The events view (default): newest page first; page forward/backward with sequence cursors. For a truncated event use limit=1, after_seq=seq-1, and its next_offset. The turns view: its prompts oldest first, each with its turn's final answer and none of the tool output; page with after_seq=next_after_seq (limit counts turns, up to 50).",
-          {"refs": REFS, "view": {"type": "string", "enum": ["events", "turns"], "default": "events"},
+    _tool("read", "Read one selected session, this one included. The turns view (default): its prompts oldest first, each with its turn's final answer and none of the tool output; page with after_seq=next_after_seq (limit counts turns, up to 50); a text cut short names the call that reads it whole. The events view: newest page first, paged by after_seq/before_seq; a long event is read with limit=1, after_seq=seq-1, then its next_offset.",
+          {"refs": REFS, "view": {"type": "string", "enum": ["events", "turns"], "default": "turns"},
            "after_seq": {"type": "integer", "minimum": 0},
            "before_seq": {"type": "integer", "minimum": 1},
            "offset": {"type": "integer", "minimum": 0},
@@ -110,7 +111,7 @@ TOOLS.extend([
            "timeout_s": {"type": "integer", "minimum": 30, "maximum": 7200},
            "expected_turn_ids": {"type": "object", "additionalProperties": {"type": "string"}}},
           required=["request_id"], destructive=True),
-    _tool("requests", "List this session's recent outgoing requests and results.", read_only=True),
+    _tool("requests", "List this session's outgoing requests, newest first, with each one's statuses; wait with an id for its answers.", read_only=True),
     _tool("wait", "Wait briefly for a request and return individual statuses and answers. Repeat while pending; held work needs the user's queue control.",
           {"id": {"type": "string"}, "wait_s": {"type": "integer", "minimum": 0, "maximum": 25}}, required=["id"], read_only=True),
     _tool("cancel", "Cancel one outgoing request, including its queued or active work, while preserving other work in the destination sessions.",
@@ -131,7 +132,7 @@ TOOLS.extend([
                    "text": {"type": "string", "maxLength": 60000},
                    "after": {"type": "array", "items": {"type": "string"}}}}}},
           required=["request_id", "steps"], destructive=True),
-    _tool("workflows", "List this session's recent coordination workflows.", read_only=True),
+    _tool("workflows", "List this session's coordination workflows, newest first, with their steps' statuses; workflow with an id for its answers.", read_only=True),
     _tool("workflow", "Read a workflow's current step statuses, requests, and collected results.",
           {"id": {"type": "string"}}, required=["id"], read_only=True),
     _tool("cancel_workflow", "Cancel a workflow's pending steps and its own active requests. Other session work is preserved.",

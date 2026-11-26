@@ -1032,11 +1032,20 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   to avoid ambiguous short IDs; older UUID mentions still work. Alias reservations are included in backups.
   The agent can then read their transcripts, search
   their histories with exact-message links, and, when you ask, send them a
-  question, a task, a steering instruction or a stop. **All sessions** means
-  every session but the one you are typing in. Each request leaves a
+  question, a task, a steering instruction or a stop. It may name a session by
+  its stable reference, its four-character ID or the link itself. A read is
+  one prompt per row with that turn's final answer unless it asks for the
+  messages, and every page is sized to fit one tool result: a long text keeps
+  its start and its end and says how to read it whole. **All sessions** means
+  every session but the one you are typing in. An unreachable backend is
+  named only where it leaves something out - a search of every session, or a
+  session it could not find - never beside sessions that answered. Each request leaves a
   **View request** card in the transcript; its sheet shows the request's state,
   kind, creation time and deadline, then every session it went to with that
-  session's state and its answer or error. A session's name opens it, and
+  session's state and its answer or error. A request's answer is the end of
+  the turn that answered it - its earliest messages go first when the turn ran
+  long - and the agent lists its requests and workflows newest first, reading
+  their answers one request at a time. A session's name opens it, and
   **Stop remaining work** cancels whatever the request still has pending.
 - **The session's own history.** The picker lists the session you are typing
   in first, marked *this session*, and the agent can read and search its own

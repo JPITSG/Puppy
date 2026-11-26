@@ -54,7 +54,8 @@ async def references():
     assert got["selected"] == 1, got
     assert got["results"][0]["results"][0]["sid"] == b
     await rejected(links.dispatch(a, "turn", "read", {"refs": [links.reference(c)]}), "outside")
-    page = await links.dispatch(a, "turn", "read", {"refs": [ref], "after_seq": 1, "limit": 1})
+    page = await links.dispatch(a, "turn", "read", {"refs": [ref], "view": "events",
+                                                    "after_seq": 1, "limit": 1})
     text = page["results"][0]["events"][0]["text"]
     offset = page["results"][0]["events"][0]["next_offset"]
     while offset is not None:
@@ -342,9 +343,18 @@ async def fleet_and_drivers():
             patch.object(links, "remote_call", fake_remote):
         data = await links.catalog()
         assert any(row["ref"] == peer + "/9" and row["archived"] for row in data["sessions"])
-        result = await links.broker(source, "read", {"refs": [peer + "/9"]})
+        result = await links.broker(source, "read", {"refs": [peer + "/9"], "view": "events"})
         assert result["results"][0]["events"][0]["text"] == "remote answer"
-        assert result["unavailable"][0]["node"] == "Offline"
+        # a node that cannot be reached is no news beside a session that answered
+        assert "unavailable" not in result, result
+        # but it is where it costs coverage: a search of every session, a
+        # session not found, and the listing
+        everything = await links.broker(source, "search", {"refs": ["all"], "query": "remote"})
+        assert everything["unavailable"][0]["node"] == "Offline", everything
+        missing = await links.broker(source, "read", {"refs": ["b" * 32 + "/4"]})
+        assert "on a node not reached now (Offline)" in missing["unavailable"][0]["error"], missing
+        listed = await links.broker(source, "sessions", {})
+        assert listed["unavailable"][0]["node"] == "Offline", listed
     from puppy.drivers import get_driver
     descriptor = {"name": "puppy_session", "command": sys.executable,
                   "args": ["-m", "puppy.session_agent"], "env": {}, "engine_guidance": "Session policy marker"}
@@ -424,9 +434,14 @@ async def own_history():
     assert rows[2]["steered"] is True and "answer" not in rows[2]
     assert rows[3]["answer"] == dict(rows[3]["answer"], seq=a4, outcome="bad", text="engine exploded")
     assert rows[4]["prompt"]["truncated"] and rows[4]["prompt"]["chars"] == 5000
-    assert len(rows[4]["prompt"]["text"]) == links.TURN_PROMPT_CHARS
+    # a long text keeps its start and its end, and names the call that reads it whole
+    for piece, cap, letter in ((rows[4]["prompt"], links.TURN_PROMPT_CHARS, "L"),
+                               (rows[4]["answer"], links.TURN_ANSWER_CHARS, "A")):
+        assert len(piece["text"]) <= cap and piece["text"].startswith(letter * 100)
+        assert piece["text"].endswith(letter * 100) and "characters left out" in piece["text"]
+        assert piece["whole"] == {"view": "events", "after_seq": piece["seq"] - 1, "limit": 1}
+    assert "whole" not in rows[0]["prompt"], "a text shown whole needs no call"
     assert rows[4]["answer"]["seq"] == a5 and rows[4]["answer"]["chars"] == 9000
-    assert len(rows[4]["answer"]["text"]) == links.TURN_ANSWER_CHARS
     assert rows[5]["answer"] == dict(rows[5]["answer"], seq=a6, outcome="unfinished", text="Working on it")
     assert rows[0]["answer"]["source"] == links.source_link(own, a1)
     # paged by after_seq, in pages of turns, to the same rows
@@ -438,7 +453,7 @@ async def own_history():
         after = got["next_after_seq"]
     assert seen == [p1, p2, p3, p4, p5, p6], seen
     # a page stops before its text budget, and goes on where it stopped
-    with patch.object(links, "TURNS_BUDGET", 9000):
+    with patch.object(links, "TURNS_BUDGET", 5000):
         cut = (await links.dispatch(a, "own", "read", {"refs": ["this"], "view": "turns"}))["results"][0]
     assert [row["prompt"]["seq"] for row in cut["turns"]] == [p1, p2, p3, p4], cut
     assert cut["next_after_seq"] == p4
@@ -448,8 +463,14 @@ async def own_history():
     await rejected(links.node_call("read", {"refs": [own], "view": "turns", "limit": 51}), "integer")
     await rejected(links.node_call("read", {"refs": [own], "view": "pages"}), "events or turns")
     # the events view and search reach it too, by ["this"] or its own reference
-    events = (await links.dispatch(a, "own", "read", {"refs": [own], "limit": 2}))["results"][0]
+    events = (await links.dispatch(a, "own", "read", {"refs": [own], "view": "events",
+                                                      "limit": 2}))["results"][0]
     assert [event["seq"] for event in events["events"]] == [p6, a6]
+    # the turns are the default view; events' own cursors still mean events
+    assert (await links.dispatch(a, "own", "read", {"refs": [own]}))["results"][0]["view"] == "turns"
+    assert "events" in (await links.dispatch(a, "own", "read", {
+        "refs": [own], "before_seq": a6}))["results"][0]
+    assert links.read_view({"offset": 40}) == "events" and links.read_view({}) == "turns"
     found = await links.dispatch(a, "own", "search", {"refs": ["this"], "query": "double-fires"})
     assert found["results"][0]["results"][0]["sid"] == a
     # past the mentions' boundary: another session mentioned, its own still readable
@@ -515,7 +536,8 @@ async def many_readers():
         gate.wait(10)
         return {"events": [], "sid": sid}
     with patch.object(links, "_events", slow):
-        calls = [asyncio.ensure_future(links.node_call("read", {"refs": [ref]}, source="turn"))
+        calls = [asyncio.ensure_future(links.node_call("read", {"refs": [ref], "view": "events"},
+                                                       source="turn"))
                  for ref in refs * 3]
         for _ in range(200):
             if len(reading) == 2:
@@ -567,6 +589,112 @@ async def many_readers():
     print("many readers: lanes for reads, one pass for many sessions, and what a stopped search says")
 
 
+async def agent_results():
+    """What a turn's tools answer: short IDs and mentions taken as refs, pages
+    that fit a tool result, sessions without the fields that say nothing to
+    an agent, requests and workflows newest first with their answers bounded
+    and their ends kept, and a turn's answer kept by its end."""
+    a, b, c = session("Asker"), session("Writer"), session("Reviewer")
+    origin, rb, rc = links.reference(a), links.reference(b), links.reference(c)
+    data = await links.catalog(force=True)
+    rows = {row["ref"]: row for row in data["sessions"]}
+    code, mention = rows[rb]["short_id"], rows[rb]["mention"]
+    for event in range(30):
+        db.add_event(b, "assistant", {"text": "{} ".format(event) + "w" * 20000})
+    await links.prepare_turn(a, "agent", "look around")
+    # a short ID, its mention or a lower-case one is the session it names
+    for ref in (code, mention, code.lower(), " " + mention + " "):
+        page = await links.dispatch(a, "agent", "read", {"refs": [ref], "view": "events"})
+        assert page["results"][0]["session"]["ref"] == rb, (ref, page)
+    await rejected(links.dispatch(a, "agent", "read", {"refs": ["ZZZZ"]}), "unknown session ID ZZZZ")
+    await rejected(links.dispatch(a, "agent", "read", {"refs": ["Session-plan"]}), "reference")
+    assert links.expand_refs(["this", "all", rb.upper(), code]) == ["this", "all", rb]
+    assert links.expand_refs(["ALL", "This"]) == ["all", "this"]
+    # every page fits a tool result whole, a long message read through its cursor
+    events = await links.dispatch(a, "agent", "read", {"refs": [rb], "view": "events"})
+    assert len(json.dumps(events)) < links.EVENTS_BUDGET + 8000, len(json.dumps(events))
+    assert all(len(item["text"]) <= links.EVENT_CHARS for item in events["results"][0]["events"])
+    alone = await links.dispatch(a, "agent", "read", {"refs": [rb], "view": "events",
+                                                       "after_seq": 1, "limit": 1})
+    assert len(alone["results"][0]["events"][0]["text"]) > links.EVENT_CHARS, "a message alone reads in one page"
+    turns = await links.dispatch(a, "agent", "read", {"refs": [rb]})
+    assert turns["results"][0]["view"] == "turns" and len(json.dumps(turns)) < links.TURNS_BUDGET + 8000
+    # sessions as an agent reads them
+    listed = await links.dispatch(a, "agent", "sessions", {})
+    for row in listed["sessions"] + [events["results"][0]["session"]]:
+        assert not set(row) & {"side_question", "steering", "bid", "id", "node"}, row
+        assert row["ref"] and row["title"]
+    assert "unavailable" not in listed, "no node is unreachable here"
+    # a turn's answer is its end: the earliest messages go when it runs long
+    dest = ControlledSession(b)
+    try:
+        with patch.object(actions, "ANSWER_LIMIT", 3000):
+            sent = await links.dispatch(a, "agent", "send", {
+                "refs": [code], "text": "Write it up", "request_id": "write"})
+            assert sent["results"][0]["target"] == rb, sent
+            for part in range(5):
+                db.add_event(b, "assistant", {"text": "part {} ".format(part) + "p" * 1000})
+            dest.finish("CONCLUSION: ship it")
+        record = actions.get(actions.OUTBOX_PREFIX, sent["id"])
+        kept = await actions.operate(origin, "wait", {"id": sent["id"], "wait_s": 0})
+        answer = kept["results"][0]["answer"]
+        assert answer.startswith(actions.EARLIER_LEFT_OUT) and answer.endswith("CONCLUSION: ship it"), answer[-200:]
+        assert "part 0 " not in answer and len(answer) <= 3000 + len(actions.EARLIER_LEFT_OUT)
+        # a long answer as an agent reads it: its start and its end, and its length
+        with patch.object(links, "AGENT_ANSWER_CHARS", 1500):
+            waited = await links.dispatch(a, "agent", "wait", {"id": sent["id"], "wait_s": 0})
+        result = waited["results"][0]
+        assert result["answer"].endswith("CONCLUSION: ship it") and len(result["answer"]) <= 1500
+        assert "characters left out" in result["answer"] and result["answer_chars"] == len(answer)
+        assert result["source"] == links.source_link(rb, record["results"][0].get("end_seq") or 0) or \
+            result["source"].startswith("/#session=" + rb)
+        assert set(waited) <= {"id", "action", "status", "created_at", "deadline", "workflow", "results"}
+        # listed newest first, statuses without answers
+        for index in range(3):
+            with patch.object(actions.time, "time", lambda index=index: 1000.0 + index):
+                await links.dispatch(a, "agent", "send", {
+                    "refs": [rb], "text": "later {}".format(index), "request_id": "later-{}".format(index)})
+        listing = await links.dispatch(a, "agent", "requests", {})
+        stamps = [item["created_at"] for item in listing["requests"]]
+        assert stamps == sorted(stamps, reverse=True) and listing["total"] == 4, listing
+        assert listing["requests"][0]["id"] == sent["id"], "the newest request comes first"
+        assert all("answer" not in row for item in listing["requests"] for row in item["results"])
+        assert listing["requests"][0]["results"][0]["answer_chars"] == len(answer)
+    finally:
+        dest.patch.stop()
+    # workflows likewise; a dependency hands on an answer's end, not only its start
+    workers = [ControlledSession(sid) for sid in (b, c)]
+    try:
+        for queued in list(workers[0].hub.queue):
+            workers[0].hub.queue.remove(queued)
+        workers[0].hub.status = "idle"
+        workers[0].hub._start_queue_if_ready()
+        while workers[0].hub.status == "running":
+            workers[0].finish("cleared")
+        made = await links.dispatch(a, "agent", "coordinate", {
+            "request_id": "chain", "title": "Write then review", "steps": [
+                {"id": "write", "refs": [code], "action": "task", "text": "Write", "after": []},
+                {"id": "review", "refs": [rows[rc]["mention"]], "action": "task", "text": "Review",
+                 "after": ["write"]}]})
+        assert [step["id"] for step in made["steps"]] == ["write", "review"], made
+        workers[0].finish("w" * 20000 + " FINAL VERDICT")
+        await coordination.advance(made["id"])
+        assert "FINAL VERDICT" in workers[1].started[-1], "the dependency's end is handed on"
+        listed = await links.dispatch(a, "agent", "workflows", {})
+        assert listed["workflows"][0]["id"] == made["id"] and listed["total"] >= 1
+        assert all("answer" not in row for step in listed["workflows"][0]["steps"]
+                   for row in step["results"])
+        one = await links.dispatch(a, "agent", "workflow", {"id": made["id"]})
+        assert one["steps"][0]["results"][0]["answer"].endswith("FINAL VERDICT"), one
+        assert "unavailable" not in one and "source" not in one
+    finally:
+        for worker in workers:
+            worker.patch.stop()
+    links.end_turn(a, "agent")
+    print("agent results: short IDs and mentions as refs, pages that fit, lean sessions, "
+          "requests and workflows newest first, answers kept by their ends")
+
+
 async def main():
     config.ensure_dirs()
     await references()
@@ -575,6 +703,7 @@ async def main():
     await own_history()
     await many_readers()
     await workflows()
+    await agent_results()
     await fleet_and_drivers()
 
 
