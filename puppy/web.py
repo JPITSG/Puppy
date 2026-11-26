@@ -19,7 +19,7 @@ from puppy import (__version__, agent_notes, auth, backends, backup_schedule, bi
                    cli_upgrade, config, db, engine_defaults, host_metrics, listener_handoff, notices, notify, operations,
                    places, project_move, prompt_index, spelling, token_usage,
                    live_websockets, localization, protocol, runner, schedules, search, session_git,
-                   shared_files,
+                   previews, shared_files,
                    snapshots, session_titles, spawn_exec,
                    state_stream, system_prompts, terminal, timeouts, uploads, vnc,
                    usage_refresh, workers, workspace_links, workspace_sync, workspaces)
@@ -2256,6 +2256,8 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
         runner.validate_persisted_queues(db.connect())
         # an unreadable background task limit refuses to start, unrepaired
         timeouts.validate_persisted(db.connect())
+        # and so does an unreadable preview policy (previews check their own)
+        system_prompts.validate_persisted(db.connect())
     app.on_startup.append(validate_records)
     operations.register(app)
     host_metrics.register(app)
@@ -2315,6 +2317,7 @@ def register_execution_api(app: web.Application, include_terminal: bool = True) 
     vnc.register(app)
     uploads.register(app)
     shared_files.register(app)
+    previews.register(app)
     workspace_sync.register(app)
     spawn_exec.register(app)
     from puppy import session_links
@@ -2359,6 +2362,8 @@ def build_app(runtime_web: dict = None,
 
     auth.register(app)
     backends.register(app)
+    # the console's frames and windows: a preview's token is its sign-in
+    previews.register_public(app)
     workspace_links.register(app)
     app.on_startup.append(backends.start_health_worker)
     app.on_startup.append(backends.start_latency_worker)

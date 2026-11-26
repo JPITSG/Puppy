@@ -139,6 +139,19 @@ still contain a value written before that release.
   copy, travels with a task's adopted attachments and in backups, and is read
   exactly or refused, never repaired. A node without the capability ignores the
   header. No event, database or snapshot shape changes.
+- `session-previews` adds GET `/api/sessions/{sid}/previews` (the session's
+  previews with their secret tokens), DELETE `/api/sessions/{sid}/previews/{id}`
+  and GET/HEAD `/api/previews/{token}/{path}`, which serves a preview's file
+  sandboxed (`Content-Security-Policy: sandbox ...; frame-ancestors 'self'`,
+  `nosniff`, `no-referrer`, `Access-Control-Allow-Origin: *`, ETag, gzip) behind
+  the node's own authentication for a controller to relay at its public
+  `/preview/<backend>/<token>/` route. The turn-bound `puppy_preview` bridge
+  records previews in the exact `session_previews.<sid>` meta record and sends
+  the session's sockets an ephemeral `preview_activity` event (`preview_id`,
+  `event`, optional `closed` and `name`). The preview policy is the optional
+  exact `preview_guidance` meta record, carried in the system prompt payload as
+  `previews`/`previews_default`. No config.json shape changes. See
+  [Previews](previews.md).
 - `session-shared-files` adds GET `/api/sessions/{sid}/files` (the session's
   shares, newest first) and GET/HEAD `/api/sessions/{sid}/files/{id}` for one
   file an agent shared through the turn-bound `puppy_files` bridge, served only
@@ -256,6 +269,9 @@ still contain a value written before that release.
   agent's `sessions` listing marks them `selected` and says so in
   `selection`. `"[all]"` and `"[this]"`, the notation's spelling, read as
   those words. No stored format or wire capability changes.
+- Since v1.0.663 agents show what they build through previews
+  (`session-previews`, above) instead of web servers of their own on the
+  network.
 - Since v1.0.662 the agent's session `search` results carry excerpts without
   the console's `\u0001`/`\u0002` highlight marks (`session_links.for_agent`;
   the console's own search keeps them for `<mark>`), and the Codex driver no

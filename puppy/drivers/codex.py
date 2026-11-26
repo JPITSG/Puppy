@@ -122,7 +122,8 @@ def _notification(method: str, params=None) -> dict:
 
 def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
                            terminal_mcp=None, vnc_mcp=None, spawn_mcp=None,
-                           session_mcp=None, task_mcp=None, files_mcp=None) -> str:
+                           session_mcp=None, task_mcp=None, files_mcp=None,
+                           preview_mcp=None) -> str:
     """Add node and turn-scoped guidance without replacing native user config.
 
     Codex's developer_instructions config value is replacement-oriented. A
@@ -137,10 +138,11 @@ def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
     (``guidance_in_instructions``: the session and file bridges) is not
     repeated here - it would ride every turn's message into the thread.
     """
-    browser_mcp, terminal_mcp, vnc_mcp, spawn_mcp, session_mcp, task_mcp, files_mcp = (
+    (browser_mcp, terminal_mcp, vnc_mcp, spawn_mcp, session_mcp, task_mcp, files_mcp,
+     preview_mcp) = (
         None if (item or {}).get("guidance_in_instructions") else item
         for item in (browser_mcp, terminal_mcp, vnc_mcp, spawn_mcp, session_mcp,
-                     task_mcp, files_mcp))
+                     task_mcp, files_mcp, preview_mcp))
     blocks = []
     custom = str(system_prompt or "").strip()
     if custom:
@@ -172,6 +174,10 @@ def _with_runtime_guidance(prompt: str, system_prompt: str, browser_mcp,
     files_policy = str((files_mcp or {}).get("engine_guidance") or "").strip()
     if files_policy:
         blocks.append("<puppy_files_policy>\n" + files_policy + "\n</puppy_files_policy>")
+    preview_policy = str((preview_mcp or {}).get("engine_guidance") or "").strip()
+    if preview_policy:
+        blocks.append("<puppy_preview_policy>\n" + preview_policy +
+                      "\n</puppy_preview_policy>")
     if not blocks:
         return prompt
     return "{}\n\n{}".format("\n\n".join(blocks), prompt)
@@ -1034,11 +1040,13 @@ class CodexDriver(Driver):
 
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                   system_prompt="", terminal_mcp=None, vnc_mcp=None,
-                  spawn_mcp=None, session_mcp=None, task_mcp=None, files_mcp=None, tool=None):
+                  spawn_mcp=None, session_mcp=None, task_mcp=None,
+                  files_mcp=None, preview_mcp=None, tool=None):
         argv = [self.binary, "app-server", "--stdio"]
         # a tool turn only addresses the existing thread: no agent bridges
         bridges = () if tool_name(tool) else (browser_mcp, terminal_mcp, vnc_mcp,
-                                              spawn_mcp, session_mcp, task_mcp, files_mcp)
+                                              spawn_mcp, session_mcp, task_mcp, files_mcp,
+                                              preview_mcp)
         for mcp in (item for item in bridges if item):
             prefix = "mcp_servers." + mcp["name"]
             argv += ["-c", prefix + ".command=" + json.dumps(mcp["command"]),
@@ -1055,7 +1063,8 @@ class CodexDriver(Driver):
 
     def turn_context(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                      system_prompt="", terminal_mcp=None, vnc_mcp=None,
-                     spawn_mcp=None, session_mcp=None, task_mcp=None, files_mcp=None, tool=None):
+                     spawn_mcp=None, session_mcp=None, task_mcp=None,
+                     files_mcp=None, preview_mcp=None, tool=None):
         return {
             "quota_identity": _quota_identity(),
             "tool": tool_name(tool),
@@ -1083,7 +1092,7 @@ class CodexDriver(Driver):
                            self.default_permission()),
             "prompt": _with_runtime_guidance(
                 prompt, system_prompt, browser_mcp, terminal_mcp, vnc_mcp,
-                spawn_mcp, session_mcp, task_mcp, files_mcp),
+                spawn_mcp, session_mcp, task_mcp, files_mcp, preview_mcp),
             "usage": {},
             "items": {},
             "item_seq": 0,

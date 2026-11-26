@@ -2303,6 +2303,132 @@ async def _proxy_download(request: web.Request, backend: dict, urls: list,
     return _unavailable_response(backend)
 
 
+# A backend's preview (previews): relayed as a stream for the public
+# /preview/<bid>/<token>/ route, with this controller's own sandbox headers.
+# Only the headers a page's loads need cross, each checked; a compressed body
+# crosses as it is (no client-side decompression, where aiohttp can say so).
+_PREVIEW_TYPE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*(; charset=utf-8)?$")
+_PREVIEW_ETAG = re.compile(r'^(W/)?"[A-Za-z0-9-]{1,120}"$')
+_PREVIEW_STATUSES = (200, 301, 304, 404, 413, 503)
+try:
+    import inspect as _inspect
+    _RAW_BODIES = "auto_decompress" in _inspect.signature(
+        aiohttp.ClientSession._request).parameters
+except (TypeError, ValueError):     # pragma: no cover - an unusual aiohttp
+    _RAW_BODIES = False
+
+
+def _preview_location(value: str) -> str:
+    """A relayed redirect: only the relative "name/" a preview gives."""
+    if not value or len(value) > 1024 or "//" in value or ":" in value.split("/")[0] or \
+            value.startswith(("/", "\\")) or any(char in value for char in "\r\n\x00"):
+        return ""
+    return value
+
+
+async def relay_preview(request: web.Request, bid: int, token: str, path: str):
+    """A backend's preview file, streamed through this controller.
+
+    The public route answers without a sign-in, so nothing here names the
+    backend: an unknown one is the preview's own 404, an unavailable one a
+    plain 503. A node from before previews answers 404 and so is no
+    preview."""
+    from urllib.parse import quote
+    from puppy import previews
+    backend = get_backend(bid)
+    if backend is None or previews.request_parts(path) is None:
+        return previews.not_found()
+    if not backend_is_online(bid):
+        return previews.unavailable()
+    urls = _ordered_backend_urls(backend)
+    if not urls:
+        if _mark_backend_offline(bid, "backend has no configured URL"):
+            _broadcast_backends()
+        return previews.unavailable()
+    headers = {"X-Puppy-Token": backend["token"]}
+    wanted = request.headers.get("If-None-Match")
+    if wanted and len(wanted) <= 1024:
+        headers["If-None-Match"] = wanted
+    if _RAW_BODIES and "gzip" in request.headers.get("Accept-Encoding", "").lower():
+        headers["Accept-Encoding"] = "gzip"
+    else:
+        headers["Accept-Encoding"] = "identity"
+    tail = "previews/{}/{}".format(token, quote(path, safe="/"))
+    timeout = aiohttp.ClientTimeout(
+        total=None, connect=FAILOVER_CONNECT_TIMEOUT,
+        sock_connect=FAILOVER_CONNECT_TIMEOUT, sock_read=PROXY_DOWNLOAD_IDLE_TIMEOUT)
+    extra = {"auto_decompress": False} if _RAW_BODIES else {}
+    last_error = None
+    for index, url in enumerate(urls):
+        target = "{}/api/{}".format(url, tail)
+        try:
+            async with client().request(request.method, target, headers=headers,
+                                        timeout=timeout, allow_redirects=False,
+                                        ssl=_ssl_pin(backend["tls_fingerprint"]),
+                                        **extra) as r:
+                changed = _remember_active_url(bid, url, _backend_urls(backend))
+                changed = _mark_backend_online(bid) or changed
+                if changed:
+                    _broadcast_backends()
+                if r.status not in _PREVIEW_STATUSES:
+                    return previews.not_found() if r.status in (401, 403) else \
+                        previews.unavailable()
+                out = dict(previews.PREVIEW_HEADERS)
+                # what the node said not to keep (a listing, a redirect, an
+                # error) is not kept here either
+                if r.status not in (200, 304) or \
+                        str(r.headers.get("Cache-Control") or "") == "no-store":
+                    out["Cache-Control"] = "no-store"
+                kind = str(r.headers.get("Content-Type") or "").lower()
+                if r.status != 304 and _PREVIEW_TYPE.fullmatch(kind):
+                    out["Content-Type"] = kind
+                elif r.status != 304:
+                    out["Content-Type"] = "application/octet-stream"
+                etag = str(r.headers.get("ETag") or "")
+                if _PREVIEW_ETAG.fullmatch(etag):
+                    out["ETag"] = etag
+                    out["Vary"] = "Accept-Encoding"
+                if r.status == 301:
+                    location = _preview_location(str(r.headers.get("Location") or ""))
+                    if not location:
+                        return previews.not_found()
+                    out["Location"] = location
+                encoding = str(r.headers.get("Content-Encoding") or "").lower()
+                if encoding == "gzip" and _RAW_BODIES:
+                    out["Content-Encoding"] = "gzip"
+                elif encoding and encoding != "identity":
+                    return previews.unavailable()
+                length = str(r.headers.get("Content-Length") or "")
+                if length.isdigit() and r.status != 304:
+                    out["Content-Length"] = length
+                response = web.StreamResponse(status=r.status, headers=out)
+                try:
+                    await response.prepare(request)
+                    if request.method != "HEAD" and r.status != 304:
+                        async for chunk in r.content.iter_chunked(256 * 1024):
+                            await response.write(chunk)
+                    await response.write_eof()
+                except Exception as exc:
+                    # as a shared file's: a cut is a failed load, never a short one
+                    log.info("preview relay from backend %s ended early: %s",
+                             bid, _connection_error(exc))
+                    if request.transport is not None:
+                        request.transport.close()
+                return response
+        except Exception as exc:
+            last_error = exc
+            can_retry = _failed_before_request(exc) or isinstance(
+                exc, (aiohttp.ClientConnectionError, asyncio.TimeoutError))
+            if index + 1 < len(urls) and can_retry:
+                continue
+            break
+    _advance_url_cursor(bid, len(urls))
+    detail = _connection_error(last_error) if last_error else "no URL is available"
+    if _mark_backend_offline(bid, detail):
+        _broadcast_backends()
+    return previews.unavailable()
+
+
 async def _proxy_ws(request: web.Request, backend: dict, urls: list,
                     tail: str, headers: dict):
     bid = int(backend["id"])

@@ -520,7 +520,8 @@ class OpenCodeDriver(Driver):
 
     def build_cmd(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                   system_prompt="", terminal_mcp=None, vnc_mcp=None,
-                  spawn_mcp=None, session_mcp=None, task_mcp=None, files_mcp=None, tool=None):
+                  spawn_mcp=None, session_mcp=None, task_mcp=None,
+                  files_mcp=None, preview_mcp=None, tool=None):
         if driver_base.tool_name(tool):
             return serve_command(self.resolved_binary() or self.binary)
         return [self.resolved_binary() or self.binary,
@@ -528,12 +529,14 @@ class OpenCodeDriver(Driver):
 
     def build_env(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                   system_prompt="", terminal_mcp=None, vnc_mcp=None,
-                  spawn_mcp=None, session_mcp=None, task_mcp=None, files_mcp=None, tool=None):
+                  spawn_mcp=None, session_mcp=None, task_mcp=None,
+                  files_mcp=None, preview_mcp=None, tool=None):
         maintenance = bool(driver_base.tool_name(tool))
         guidance = [] if maintenance else [str(system_prompt or "").strip()]
         guidance.extend(str(item.get("engine_guidance") or "").strip()
                         for item in (browser_mcp, terminal_mcp, vnc_mcp,
-                                     spawn_mcp, session_mcp, task_mcp, files_mcp)
+                                     spawn_mcp, session_mcp, task_mcp, files_mcp,
+                                     preview_mcp)
                         if item and not maintenance)
         agent = {
             "description": "Puppy managed interactive coding session",
@@ -558,10 +561,11 @@ class OpenCodeDriver(Driver):
 
     def _mcp_servers(self, browser_mcp, terminal_mcp=None, vnc_mcp=None,
                      spawn_mcp=None, session_mcp=None, task_mcp=None,
-                     files_mcp=None, session=None) -> list:
+                     files_mcp=None, preview_mcp=None, session=None) -> list:
         servers = []
         for mcp in (item for item in (browser_mcp, terminal_mcp, vnc_mcp,
-                                      spawn_mcp, session_mcp, task_mcp, files_mcp)
+                                      spawn_mcp, session_mcp, task_mcp, files_mcp,
+                                      preview_mcp)
                     if item):
             environment = []
             for name, value in self.mcp_env(mcp, session).items():
@@ -575,7 +579,8 @@ class OpenCodeDriver(Driver):
 
     def turn_context(self, session, first_turn, prompt, pinned_id, browser_mcp=None,
                      system_prompt="", terminal_mcp=None, vnc_mcp=None,
-                     spawn_mcp=None, session_mcp=None, task_mcp=None, files_mcp=None, tool=None):
+                     spawn_mcp=None, session_mcp=None, task_mcp=None,
+                     files_mcp=None, preview_mcp=None, tool=None):
         if driver_base.tool_name(tool):
             return {"tool": driver_base.tool_name(tool),
                     "transport": NativeCompaction(session)}
@@ -589,6 +594,7 @@ class OpenCodeDriver(Driver):
             "effort": str(session.get("effort") or ""),
             "mcp_servers": self._mcp_servers(browser_mcp, terminal_mcp, vnc_mcp,
                                              spawn_mcp, session_mcp, task_mcp, files_mcp,
+                                             preview_mcp,
                                              session=session),
             "session_method": "",
             "session_id": "",

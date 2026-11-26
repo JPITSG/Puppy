@@ -1381,6 +1381,30 @@ the session's storage and its backups, and move to Main when a task is folded.
 A controller relays a backend's share as a stream and imposes those download
 headers itself.
 
+The additive `session-previews` capability covers previews: a folder an agent
+built (a page, a model viewer, a diagram) shown to the user in a tab beside the
+chat instead of a web server of the agent's own. Every prompt turn carries the
+`puppy_preview` stdio MCP bridge (`python -m puppy.preview_agent`, turn-bound
+through a mode-0600 same-uid socket under `data/previews/`) with
+`show_preview(path, name?, root?)`, `previews` and `close_preview(preview_id)`;
+its editable policy is the optional exact `preview_guidance` meta record
+(`{format:1, text}`, absent = the default) edited with the other system
+prompts. A preview is one folder inside the session's execution folder or the
+system temporary folder, recorded in the exact `session_previews.<sid>` meta
+record (`{format:1, items:[{id, token, base, root, entry, name, created_at,
+shown_at}]}`, at most 20, validated at startup and in backups, never
+repaired, deleted with the session) and served live through `places`:
+`GET /api/sessions/{sid}/previews` lists them with their secret tokens,
+`DELETE /api/sessions/{sid}/previews/{id}` ends one, and `GET|HEAD
+/api/previews/{token}/{path}` serves a file - behind this node's API token
+here - with `Content-Security-Policy: sandbox` (no `allow-same-origin`) and
+`frame-ancestors 'self'`, `nosniff`, `no-referrer`, `Access-Control-Allow-Origin:
+*`, ETag revalidation and gzip; hidden names, Puppy's data folder, the CLI
+homes, system locations and links leading out are 404. A controller serves its
+public `/preview/<backend>/<token>/` route by relaying that one as a stream
+under its own headers. Each `show_preview` call and close sends the session's
+sockets an ephemeral `preview_activity` event.
+
 Controllers stream remote uploads rather than buffering them and preserve TLS
 pinning, token authentication, redirect rejection, and the receiving node's
 authority over the limit. Active transfers temporarily make upgrade readiness

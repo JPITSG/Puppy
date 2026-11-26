@@ -91,7 +91,7 @@ const reset = () => {
   toasts.length = 0;
 };
 
-/* The sanitizer keeps exactly DOMPurify's own rule plus the one scheme. */
+/* The sanitizer keeps exactly DOMPurify's own rule plus the two schemes. */
 {
   const allowed = context.MD_URI_PATTERN;
   for (const ok of ["https://example.test/x", "http://a", "mailto:x@y", "tel:1", "#frag", "/abs",
@@ -101,9 +101,10 @@ const reset = () => {
                      "puppy-files:" + ID, "blob:https://x/y"])
     assert.ok(!allowed.test(bad), bad);
   const vendored = fs.readFileSync(path.join(__dirname, "../puppy/static/vendor/purify.min.js"), "utf8");
-  assert.ok(vendored.includes(String(allowed).replace("|puppy-file", "").replace(/\/i$/, "/i")),
-    "the vendored DOMPurify's own pattern, with puppy-file the only addition");
-  console.log("PASS: the sanitizer keeps DOMPurify's own link rule with puppy-file the one addition");
+  assert.ok(vendored.includes(String(allowed).replace("|puppy-file|puppy-preview", "")
+    .replace(/\/i$/, "/i")),
+    "the vendored DOMPurify's own pattern, with puppy-file and puppy-preview the only additions");
+  console.log("PASS: the sanitizer keeps DOMPurify's own link rule with puppy-file and puppy-preview the only additions");
 }
 
 /* A link in words that have a session is that session's download. */

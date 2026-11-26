@@ -22,7 +22,8 @@ from pathlib import Path
 import subprocess
 
 from puppy import (config, browser_agent, terminal_agent, vnc_agent,
-                   spawn_agent, session_agent, task_agent, files_agent)
+                   spawn_agent, session_agent, task_agent, files_agent,
+                   preview_agent, system_prompts)
 from puppy.drivers.claude import ClaudeDriver, MCP_INSTRUCTIONS_LIMIT
 from puppy.drivers.codex import CodexDriver
 from puppy.drivers.opencode import OpenCodeDriver
@@ -35,14 +36,17 @@ config.set_value("browser.enabled", True)
 bridges = {
     "spawn": spawn_agent, "browser": browser_agent,
     "terminal": terminal_agent, "vnc": vnc_agent, "session": session_agent,
-    "task": task_agent, "files": files_agent,
+    "task": task_agent, "files": files_agent, "preview": preview_agent,
 }
-# each bridge's editable policy; the session and file bridges have none
+# each bridge's editable policy; the session and file bridges have none, and
+# the preview bridge's is an optional record beside config.json's
 policies = {"spawn": "spawn", "browser": "browser", "terminal": "terminal",
-            "vnc": "vnc", "task": "tasks"}
+            "vnc": "vnc", "task": "tasks", "preview": "previews"}
 descriptors = {}
 for kind, module in bridges.items():
-    if kind in policies:
+    if kind == "preview":
+        system_prompts._set_preview_prompt("Node policy for " + kind)
+    elif kind in policies:
         config.set_value("system_prompt." + policies[kind], "Node policy for " + kind)
     assert module.turn_mcp(1, "startup-test") is None
     # Socket/turn ownership is exercised by the bridge suites. This test only
@@ -79,8 +83,10 @@ for name in ("mcp__puppy_vnc__screenshot", "mcp__puppy_browser__snapshot",
 for name in ("mcp__puppy_vnc__click", "mcp__puppy_browser__navigate", "mcp__puppy_session__send",
              "mcp__puppy_spawn__spawn", "mcp__puppy_files__share_file",
              "mcp__puppy_terminal__snapshot", "mcp__puppy_terminal__type",
-             "mcp__puppy_tasks__new_task"):
+             "mcp__puppy_tasks__new_task", "mcp__puppy_preview__show_preview",
+             "mcp__puppy_preview__close_preview"):
     assert name not in allowed, name
+assert "mcp__puppy_preview__previews" in allowed
 task_role = task_agent.turn_mcp(1, "startup-test", role="task")
 assert task_role["read_only_tools"] == ["status", "tasks", "read", "wait"], task_role
 codex = CodexDriver().build_cmd(session, True, "probe", "startup-test", **descriptors)
@@ -183,7 +189,7 @@ for engine, text in (
         present = json.dumps(guidance.split(". ")[0])[1:-1] in text
         assert present == (engine == "opencode"), (engine, guidance[:40])
 assert "--allowedTools" not in codex
-print("MCP startup: seven bridges through all three drivers passed")
+print("MCP startup: eight bridges through all three drivers passed")
 '''
 
 

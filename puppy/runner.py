@@ -15,6 +15,7 @@ import time
 import uuid
 
 from puppy import (agent_notes, browser_agent, config, db, engine_defaults, files_agent, handoff, notify,
+                   preview_agent,
                    places, spawn_agent,
                    system_prompts, task_agent, terminal_agent, vnc_agent,
                    session_agent, session_directories, session_git, session_links, uploads, workspace_sync,
@@ -1320,6 +1321,26 @@ class SessionHub:
         self._vnc_activity_announced.add(vnc_id)
         payload = {"type": "vnc_activity", "turn_id": turn_id,
                    "vnc_id": vnc_id}
+        self.broadcast(payload)
+        broadcast_update({**payload, "session_id": self.id})
+        return True
+
+    def preview_activity(self, turn_id: str, preview_id: str, closed: bool = False,
+                         name: str = "") -> bool:
+        """Announce a preview shown (or reloaded, or closed) for this session.
+
+        Unlike a browser's, every call is announced: showing a preview again
+        is how an agent reloads the user's tab after changing its files. The
+        event id lets a console that hears it over both of its sockets act
+        once. A console's own close carries no turn."""
+        if turn_id and not self.tool_turn_active(turn_id):
+            return False
+        payload = {"type": "preview_activity", "turn_id": turn_id,
+                   "preview_id": preview_id, "event": uuid.uuid4().hex[:16]}
+        if closed:
+            payload["closed"] = True
+        if name:
+            payload["name"] = name      # the tab's title before the tab is shown
         self.broadcast(payload)
         broadcast_update({**payload, "session_id": self.id})
         return True
@@ -3621,6 +3642,7 @@ class SessionHub:
             vnc_mcp = None if tool else vnc_agent.turn_mcp(self.id, pinned)
             spawn_mcp = None if tool else spawn_agent.turn_mcp(self.id, pinned)
             files_mcp = None if tool else files_agent.turn_mcp(self.id, pinned)
+            preview_mcp = None if tool else preview_agent.turn_mcp(self.id, pinned)
             if not tool:
                 await session_links.prepare_turn(self.id, pinned, text)
                 from puppy import session_actions
@@ -3632,7 +3654,7 @@ class SessionHub:
             if not tool and driver.defers_mcp_tools:
                 await tool_loading.mark(self.id, text, (
                     browser_mcp, terminal_mcp, vnc_mcp, spawn_mcp, session_mcp,
-                    task_mcp, files_mcp))
+                    task_mcp, files_mcp, preview_mcp))
             system_prompt_text = "" if tool else system_prompts.turn_prompt(
                 remote_workspace=descriptor is not None)
             if not tool:
@@ -3653,6 +3675,8 @@ class SessionHub:
                 driver_kwargs["task_mcp"] = task_mcp
             if files_mcp:
                 driver_kwargs["files_mcp"] = files_mcp
+            if preview_mcp:
+                driver_kwargs["preview_mcp"] = preview_mcp
             if tool:
                 driver_kwargs["tool"] = tool_fields
             argv = driver.build_cmd(session, first_turn, prompt, pinned, **driver_kwargs)

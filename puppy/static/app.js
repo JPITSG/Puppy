@@ -824,6 +824,42 @@ function vncIcon(size) {
   return svg;
 }
 
+/* A page in its window: the one drawn mark for a preview, sized and stroked
+   like the globe and the screen it shares every tab and menu with. */
+function previewIcon(size) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.4");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<rect x="1.7" y="2.2" width="12.6" height="11.6" rx="1.4"/>' +
+    '<path d="M1.7 5.4h12.6M4.4 8.4h4.2M4.4 10.9h7.2"/>';
+  return svg;
+}
+
+/* A box with an arrow leaving it: opens something in a window of its own. */
+function openWindowIcon(size = 14) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.3");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<path d="M9.25 2.25h4.5v4.5M13.5 2.5 7.75 8.25"/>' +
+    '<path d="M12 9.5v3a1.25 1.25 0 0 1-1.25 1.25h-7.5A1.25 1.25 0 0 1 2 12.5V5' +
+    'a1.25 1.25 0 0 1 1.25-1.25H6.5"/>';
+  return svg;
+}
+
 function searchIcon(size) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -3233,11 +3269,12 @@ function wsUrl(bid, path) {
   return proto + location.host + apiPath(bid, path);
 }
 
-/* DOMPurify's own allowed-URI rule plus the puppy-file: scheme an agent's
-   shared file is linked by, so that one link survives sanitizing for
-   decorateMarkdownLinks to turn into a download - or, anywhere it has no
-   session to download from, back into plain words. */
-const MD_URI_PATTERN = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|puppy-file):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
+/* DOMPurify's own allowed-URI rule plus the puppy-file: and puppy-preview:
+   schemes an agent's shared file and preview are linked by, so that those
+   links survive sanitizing for decorateMarkdownLinks to turn into a download
+   or a preview's tab - or, anywhere there is no session to reach, back into
+   plain words. */
+const MD_URI_PATTERN = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|puppy-file|puppy-preview):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
 
 function md(text) {
   try {
@@ -3252,15 +3289,23 @@ function md(text) {
    references. Those targets are meaningful to a local IDE, not to this web
    page, where clicking them only produces a bogus same-origin request. Keep
    genuine web URLs clickable and unwrap every other link back to its contents.
-   The one exception is a file the agent shared (`puppy-file:<id>`), which
-   becomes a download of that session's own copy where `source` ({bid, sid})
-   names the session the words belong to. */
+   The exceptions are a file the agent shared (`puppy-file:<id>`), which
+   becomes a download of that session's own copy, and a preview it showed
+   (`puppy-preview:<ID>`), which opens that preview's tab, where `source`
+   ({bid, sid}) names the session the words belong to. */
 function decorateMarkdownLinks(root, source = null) {
   root.querySelectorAll("a").forEach(a => {
     const shared = SHARED_FILE_LINK.exec(a.getAttribute("href") || "");
     if (shared) {
       if (source && Number(source.sid) > 0 && sharedFilesEnabledFor(Number(source.bid) || 0))
         sharedFileLinkInto(a, source, shared[1]);
+      else a.replaceWith(...a.childNodes);
+      return;
+    }
+    const preview = PREVIEW_LINK.exec(a.getAttribute("href") || "");
+    if (preview) {
+      if (source && Number(source.sid) > 0 && previewsEnabledFor(Number(source.bid) || 0))
+        previewLinkInto(a, source, preview[1]);
       else a.replaceWith(...a.childNodes);
       return;
     }
@@ -3484,6 +3529,170 @@ function sharedFileChipsInto(card, body, source, shares) {
     button.addEventListener("click", event => sharedFileClick(event, record, button));
     head.insertBefore(button, head.querySelector(".t-state"));
     noteSharedFileLink(record, button, first.id);
+  }
+}
+
+/* ================= links to previews =================
+   show_preview hands the agent `[name](puppy-preview:K3QZ)` to write. The
+   link opens the preview's tab beside the chat; a middle or modified click
+   opens its page in a browser tab of its own, which is why the link carries
+   the real address once one read of the session's previews (`GET sessions/
+   {sid}/previews`, the token included, behind the sign-in) has given it. A
+   link to a preview that is no longer open says so instead. */
+const PREVIEW_LINK = /^puppy-preview:([A-Za-z0-9]{4})$/;
+const PREVIEW_MENTION = /\[((?:\\.|[^\]\\\n]){0,400})\]\(puppy-preview:([A-Za-z0-9]{4})\)/g;
+const previewSessions = new Map();
+
+function previewRecord(bid, sid) {
+  const key = `${bid}:${sid}`;
+  let record = previewSessions.get(key);
+  if (!record) {
+    record = { bid, sid, previews: null, links: new Set(), loading: false, queued: false,
+      stale: false };
+    previewSessions.set(key, record);
+  }
+  return record;
+}
+
+/* The previews a tool result names, each with the name its link carries. */
+function previewsIn(text) {
+  const found = new Map();
+  for (const match of String(text || "").matchAll(PREVIEW_MENTION)) {
+    const id = match[2].toUpperCase();
+    if (!found.has(id)) found.set(id, match[1].replace(/\\(.)/g, "$1"));
+  }
+  return [...found].map(([id, name]) => ({ id, name: name || `Preview ${id}` }));
+}
+
+function notePreviewLink(record, node, id) {
+  node._previewId = id;
+  record.links.add(node);
+  if (record.previews && !record.stale) { paintPreviewLink(record, node); return; }
+  /* every link drawn in one pass - a whole page of history - joins one read */
+  if (record.loading || record.queued) return;
+  record.queued = true;
+  Promise.resolve().then(() => { record.queued = false; if (!record.loading) loadPreviews(record); });
+}
+
+async function loadPreviews(record) {
+  if (record.bid && !backendConnectionAllowed(record.bid)) return;
+  record.loading = true;
+  record.stale = false;
+  let answer = null;
+  try { answer = await api(record.bid, `sessions/${record.sid}/previews`, { timeoutMs: 15000 }); }
+  catch (_) { /* the links stay as they are; a press still tries */ }
+  record.loading = false;
+  if (answer && Array.isArray(answer.previews))
+    record.previews = new Map(answer.previews
+      .filter(item => item && PREVIEW_ID.test(String(item.id || "")))
+      .map(item => [item.id, item]));
+  for (const node of [...record.links]) {
+    if (node.isConnected) paintPreviewLink(record, node);
+    else record.links.delete(node);
+  }
+  if (record.stale) loadPreviews(record);
+}
+
+/* A preview shown, reloaded or closed: the links to it are read again. */
+function refreshPreviewLinks(bid, sid) {
+  const record = previewSessions.get(`${bid}:${sid}`);
+  if (!record) return;
+  record.stale = true;
+  if (!record.loading && record.links.size) loadPreviews(record);
+}
+
+function paintPreviewLink(record, node) {
+  const id = node._previewId;
+  const item = record.previews ? record.previews.get(id) : null;
+  const missing = !!record.previews && !item;
+  node.classList.toggle("unavailable", missing);
+  if (item) {
+    node.setAttribute("href", previewUrl(record.bid, item.token, item.entry));
+    node.removeAttribute("aria-disabled");
+    node.title = `Open ${item.name} · Preview ${id}`;
+  } else {
+    node.removeAttribute("href");
+    if (missing) node.setAttribute("aria-disabled", "true");
+    node.title = missing ? "This preview is no longer open" : `Preview ${id}`;
+  }
+  const name = node.querySelector(".attach-file-name");
+  if (name && item) name.textContent = item.name;
+  const size = node.querySelector(".attach-file-size");
+  if (size) size.textContent = missing ? "No longer open" : "Preview";
+}
+
+/* A plain press opens the tab; a middle or modified one is the browser's
+   own, on the real address, once the link has one. */
+function previewClick(event, record, node) {
+  event.stopPropagation();
+  if (node.getAttribute("href") && (event.ctrlKey || event.metaKey || event.shiftKey ||
+      event.button === 1)) return;
+  event.preventDefault();
+  if (record.bid && !backendConnectionAllowed(record.bid)) {
+    toast(`${backendName(record.bid)}: Could not open the preview · the backend is unavailable`,
+      "bad");
+    return;
+  }
+  if (node.classList.contains("unavailable")) {
+    toast("Could not open the preview · it is no longer open", "warn");
+    return;
+  }
+  const item = record.previews ? record.previews.get(node._previewId) : null;
+  const place = previewPlace(record.bid, record.sid);
+  openPreviewTab(record.bid, node._previewId, record.sid, place.groupId,
+    { afterTabId: place.afterTabId, name: item ? item.name : "" });
+}
+
+function previewLinkInto(a, source, id) {
+  const bid = Number(source.bid) || 0, sid = Number(source.sid);
+  id = id.toUpperCase();
+  const record = previewRecord(bid, sid);
+  a.className = "md-file md-preview";
+  a.removeAttribute("href");
+  a.setAttribute("target", "_blank");
+  a.rel = "noopener noreferrer";
+  if (!a.textContent.trim()) a.setAttribute("aria-label", `Open Preview ${id}`);
+  /* the glyph stays with the link's last word, as a shared file's does */
+  const icon = el("span", "md-file-icon");
+  icon.append(document.createTextNode("\u2060"), previewIcon(12));
+  a.appendChild(icon);
+  a.addEventListener("click", event => previewClick(event, record, a));
+  a.addEventListener("auxclick", event => { if (event.button === 1) event.stopPropagation(); });
+  notePreviewLink(record, a, id);
+}
+
+/* show_preview's own card: the preview in its head, there while the card is
+   folded, and under the result the card a shared file wears. */
+function previewChipsInto(card, body, source, shown) {
+  const bid = Number(source.bid) || 0, sid = Number(source.sid);
+  const record = previewRecord(bid, sid);
+  const strip = el("div", "attach-strip shared-files previews");
+  for (const item of shown) {
+    const chip = el("a", "attach-chip file shared-file preview-chip");
+    chip.setAttribute("target", "_blank");
+    chip.rel = "noopener noreferrer";
+    const icon = el("span", "attach-file-icon");
+    icon.appendChild(previewIcon(14));
+    const copy = el("span", "attach-file-copy");
+    copy.appendChild(el("span", "attach-file-name", item.name));
+    copy.appendChild(el("span", "attach-file-size", "Preview"));
+    chip.append(icon, copy);
+    chip.addEventListener("click", event => previewClick(event, record, chip));
+    strip.appendChild(chip);
+    notePreviewLink(record, chip, item.id);
+  }
+  body.appendChild(strip);
+  const head = card.querySelector(".tool-head");
+  if (head && !head.querySelector(".t-file")) {
+    const first = shown[0];
+    const button = el("a", "t-file t-preview");
+    button.setAttribute("target", "_blank");
+    button.rel = "noopener noreferrer";
+    button.setAttribute("aria-label", `Open ${first.name}`);
+    button.appendChild(previewIcon(12));
+    button.addEventListener("click", event => previewClick(event, record, button));
+    head.insertBefore(button, head.querySelector(".t-state"));
+    notePreviewLink(record, button, first.id);
   }
 }
 
@@ -4378,6 +4587,7 @@ function saveTabs() {
       tabs: state.tabs.map(t => ({
         id: t.id, type: t.type, bid: t.bid, sid: t.sid, title: t.title,
         browserId: t.browserId, terminalId: t.terminalId, vncId: t.vncId,
+        previewId: t.previewId,
         vncHost: t.vncHost, vncPort: t.vncPort, vncLabel: t.vncLabel,
         cmd: t.cmd, cwd: t.cwd, engine: t.engine, ended: t.ended === true,
       })),
@@ -4395,7 +4605,8 @@ function storedTabs(value) {
   for (const item of value) {
     if (!item || typeof item !== "object" || typeof item.id !== "string" ||
         !item.id || item.id.length > 512 || seen.has(item.id) ||
-        !["session", "term", "browser", "vnc", "settings", "search"].includes(item.type)) continue;
+        !["session", "term", "browser", "vnc", "preview", "settings", "search"]
+          .includes(item.type)) continue;
     const tab = { id: item.id, type: item.type };
     if (typeof item.bid === "number" && Number.isFinite(item.bid)) tab.bid = item.bid;
     if (typeof item.sid === "number" && Number.isFinite(item.sid)) tab.sid = item.sid;
@@ -4415,6 +4626,13 @@ function storedTabs(value) {
       if (typeof item.vncPort === "number" && Number.isFinite(item.vncPort))
         tab.vncPort = item.vncPort;
       if (typeof item.vncLabel === "string") tab.vncLabel = item.vncLabel.slice(0, 120);
+    }
+    /* A preview tab names its preview and the session it belongs to; the
+       node holds the rest - its folder, and the token its address carries. */
+    if (item.type === "preview") {
+      if (typeof item.previewId !== "string" || !/^[A-Z0-9]{4}$/.test(item.previewId) ||
+          !(tab.sid > 0)) continue;
+      tab.previewId = item.previewId;
     }
     if (typeof item.title === "string") tab.title = item.title.slice(0, 1000);
     if (typeof item.cmd === "string") tab.cmd = item.cmd.slice(0, 10000);
@@ -4814,6 +5032,8 @@ function handleUpdatesMessage(d) {
     handleTerminalActivity(0, d.session_id, d.turn_id, d.terminal_id);
   } else if (d.type === "vnc_activity") {
     handleVncActivity(0, d.session_id, d.turn_id, d.vnc_id);
+  } else if (d.type === "preview_activity") {
+    handlePreviewActivity(0, d.session_id, d.preview_id, d.event, d.closed === true, d.name);
   } else if (d.type === "workspace_links" && Array.isArray(d.links)) {
     state.workspaceLinks = d.links;
     renderSidebar();
@@ -11846,6 +12066,7 @@ let pendingTabScrollFocus = null;
 const browserActivityTurns = new Map();
 const terminalActivityTurns = new Map();
 const vncActivityTurns = new Map();
+const previewActivityEvents = new Map();
 
 function findSessionMeta(bid, sid) {
   return sessionsFor(bid).find(s => s.id === sid);
@@ -12126,6 +12347,123 @@ function handleVncActivity(bid, sid, turnId, vncId = "") {
   openVncTab(bid, vncId, sessionPane ? sessionPane.id : null,
     { activate: false, afterTabId: sessionTabId, sid, protocol: known.protocol,
       host: known.host, port: known.port, label: known.label });
+}
+
+/* ================= previews =================
+   What an agent built, shown beside its chat: the puppy_preview bridge names
+   a folder in the session's project, and the node serves it through Puppy
+   (previews.py) - sandboxed, at an address whose secret token is the only
+   key, which the signed-in console alone reads (GET sessions/{sid}/
+   previews). A preview tab is the managed browser's surfaces around a frame
+   of that address. Preview IDs are node-scoped like browser, terminal and
+   screen IDs; a preview lasts until it is closed or its session goes. */
+const PREVIEW_ID = /^[A-Z0-9]{4}$/;
+const PREVIEW_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals " +
+  "allow-downloads allow-pointer-lock allow-presentation";
+
+function previewsEnabledFor(bid) {
+  if (!bid) return true;
+  const backend = state.backends.find(item => item.id === bid);
+  return !!backend && backendHasCapability(backend, "session-previews");
+}
+
+/* The preview's own name, which the node keeps; its ID until it is known. */
+function previewTabTitle(tab) {
+  const name = tab && tab.title ? tab.title : `Preview ${tab ? tab.previewId : ""}`.trim();
+  return `${name} @ ${backendName(tab ? tab.bid || 0 : 0)}`;
+}
+
+/* Its address on this controller: /preview/<backend>/<token>/<entry>. */
+function previewUrl(bid, token, entry = "") {
+  const path = String(entry || "").split("/").map(encodeURIComponent).join("/");
+  return `/preview/${Number(bid) || 0}/${encodeURIComponent(token)}/${path}`;
+}
+
+function openPreviewTab(bid, previewId, sid, groupId = null, options = {}) {
+  bid = Number(bid) || 0;
+  sid = Number(sid) || 0;
+  previewId = String(previewId || "").toUpperCase();
+  if (!PREVIEW_ID.test(previewId) || !sid) return null;
+  /* a session's own window holds its session alone: the console it came
+     from opens the preview */
+  if (POPOUT) {
+    const main = openingConsole();
+    if (main) {
+      try { main.openPreviewTab(bid, previewId, sid, null, options); main.focus(); }
+      catch (_) {}
+    } else toast("Open the preview from Puppy's main window", "warn");
+    return null;
+  }
+  const id = `p:${bid}:${previewId}`;
+  let tab = state.tabs.find(item => item.id === id);
+  if (!tab) {
+    tab = { id, type: "preview", bid, sid, previewId,
+      title: options.name ? String(options.name).slice(0, 120) : "" };
+    state.tabs.push(tab);
+    if (options.afterTabId) putTabAfter(id, options.afterTabId, groupId);
+    else putTabInPane(id, groupId);
+  }
+  if (options.activate === false) {
+    syncTabOrderFromLayout();
+    renderTabs();
+  } else {
+    activateTab(id);
+  }
+  return tab;
+}
+
+/* Beside the chat a conversation belongs to, as Browser, Terminal and VNC
+   tabs open: its Main's tab for a task. */
+function previewPlace(bid, sid) {
+  const owner = liveViews().find(view => view && view.tab && view.tab.type === "session" &&
+    view.tab.bid === bid && view.tab.sid === sid);
+  const meta = owner && owner.session ? owner.session : findSessionMeta(bid, sid);
+  const parent = meta && meta.task ? meta.task.parent : sid;
+  const sessionTabId = `s:${bid}:${parent}`;
+  const sessionPane = workspacePaneForTab(sessionTabId);
+  return { groupId: sessionPane ? sessionPane.id : null,
+    afterTabId: state.tabs.some(tab => tab.id === sessionTabId) ? sessionTabId : null };
+}
+
+/* The node announces every show_preview call - showing a preview again is
+   how an agent reloads it after a change - and every close. A local
+   session's console hears each over both of its sockets: the event id makes
+   it once. A new preview opens beside its chat without taking focus; an open
+   one reloads where it stands. */
+function handlePreviewActivity(bid, sid, previewId, eventId = "", closed = false, name = "") {
+  if (POPOUT) {   // as handleBrowserActivity: the console it came from shows it
+    const main = popoutOwns(bid, sid) && openingConsole();
+    if (main) try { main.handlePreviewActivity(bid, sid, previewId, eventId, closed, name); } catch (_) {}
+    return;
+  }
+  name = typeof name === "string" ? name.slice(0, 120) : "";
+  bid = Number(bid) || 0;
+  sid = Number(sid) || 0;
+  previewId = String(previewId || "").toUpperCase();
+  if (!sid || !PREVIEW_ID.test(previewId)) return;
+  if (eventId) {
+    const key = `${bid}:${sid}:${eventId}`;
+    if (previewActivityEvents.has(key)) return;
+    previewActivityEvents.set(key, Date.now());
+    while (previewActivityEvents.size > 256)
+      previewActivityEvents.delete(previewActivityEvents.keys().next().value);
+  }
+  refreshPreviewLinks(bid, sid);
+  const tab = state.tabs.find(item => item.id === `p:${bid}:${previewId}`);
+  const view = tab && state.views[tab.id];
+  if (closed) {
+    if (view) view.ended();
+    return;
+  }
+  if (tab) {
+    if (name && tab.title !== name) { tab.title = name; renderTabs(); }
+    /* a view not made yet loads afresh when it is first shown */
+    if (view) view.reload();
+    return;
+  }
+  const place = previewPlace(bid, sid);
+  openPreviewTab(bid, previewId, sid, place.groupId,
+    { activate: false, afterTabId: place.afterTabId, name });
 }
 
 /* ================= console navigation ================= */
@@ -12510,6 +12848,7 @@ function ensureTabView(tab) {
     else if (tab.type === "term") view = new TermView(tab);
     else if (tab.type === "browser") view = new BrowserView(tab);
     else if (tab.type === "vnc") view = new VncView(tab);
+    else if (tab.type === "preview") view = new PreviewView(tab);
     else if (tab.type === "search") view = new SearchView(tab);
     else view = new SettingsView(tab);
     state.views[tab.id] = view;
@@ -12649,6 +12988,7 @@ function renderTabNode(t, pane, tabsRoot) {
   } else if (t.type === "term") dotCls = "term";
   else if (t.type === "browser") dotCls = "browser";
   else if (t.type === "vnc") dotCls = "vnc";
+  else if (t.type === "preview") dotCls = "preview";
   else if (t.type === "search") dotCls = "search";
   const tdot = el("span", "t-dot " + dotCls);
   if (dotColor) tdot.style.color = dotColor;
@@ -12658,12 +12998,14 @@ function renderTabNode(t, pane, tabsRoot) {
   else if (t.type === "term") tdot.appendChild(terminalIcon(12));
   else if (t.type === "browser") tdot.appendChild(globeIcon(12));
   else if (t.type === "vnc") tdot.appendChild(vncIcon(12));
+  else if (t.type === "preview") tdot.appendChild(previewIcon(12));
   tab.appendChild(tdot);
   const titling = t.type === "session" && titlePending(findSessionMeta(t.bid, t.sid));
   tab.appendChild(el("span", "t-title" + (titling ? " titling" : ""),
     (t.type === "term") ? terminalTabTitle(t) :
     (t.type === "browser") ? browserTabTitle(t) :
-    (t.type === "vnc") ? vncTabTitle(t) : (t.title || "tab")));
+    (t.type === "vnc") ? vncTabTitle(t) :
+    (t.type === "preview") ? previewTabTitle(t) : (t.title || "tab")));
   if (t.type === "session") {
     suppressContextGestureActivation(tab);
     tab.addEventListener("contextmenu", (event) => {
@@ -13169,10 +13511,49 @@ function renderWorkspacePane(pane) {
     const view = pane.active === id ? ensureTabView(tab) : state.views[id];
     if (!view) continue;
     view.root.classList.toggle("on", pane.active === id);
-    host.appendChild(view.root);
+    /* a view kept alive takes its place only once the new tree is in the
+       page: a node moves without a reset only within one document */
+    if (view.keepAlive && movesAlive() && view.root.isConnected) {
+      const slot = el("div", "view-slot");
+      slot.hidden = true;
+      host.appendChild(slot);
+      keptViewSlots.push([slot, view.root]);
+    } else host.appendChild(view.root);
   }
   root.appendChild(host);
   return root;
+}
+
+/* Every change to the workspace rebuilds it, and a frame taken out of the
+   page loses the page it held: a preview's 3D model would forget its angle
+   at every tab switch. A view that must outlive the rebuild says so
+   (keepAlive); where the browser moves a node without resetting it
+   (Element.moveBefore) its root waits in a hidden parking place in the page
+   and moves to its new place, never detached. Elsewhere it is detached and
+   reloads, as before. */
+const keptViewSlots = [];
+function movesAlive() {
+  return typeof Element !== "undefined" && typeof Element.prototype.moveBefore === "function";
+}
+function viewParking() {
+  let parking = $("view-parking");
+  if (!parking) {
+    parking = el("div");
+    parking.id = "view-parking";
+    parking.hidden = true;
+    document.body.appendChild(parking);
+  }
+  return parking;
+}
+function placeKeptViews() {
+  for (const [slot, root] of keptViewSlots.splice(0)) {
+    if (!slot.parentNode) continue;
+    if (root.isConnected && slot.isConnected) {
+      try { slot.parentNode.moveBefore(root, slot); }
+      catch (_) { slot.parentNode.insertBefore(root, slot); }
+    } else slot.parentNode.insertBefore(root, slot);
+    slot.remove();
+  }
 }
 
 function renderWorkspaceNode(node) {
@@ -13250,10 +13631,15 @@ function renderTabs(focusTabId = null) {
   const scrolls = new Map();
   for (const [id, view] of Object.entries(state.views)) {
     if (view && typeof view.captureScroll === "function") scrolls.set(id, view.captureScroll());
-    if (view.root && view.root.parentNode) view.root.remove();
+    if (view.root && view.root.parentNode) {
+      if (view.keepAlive && movesAlive() && view.root.isConnected)
+        viewParking().moveBefore(view.root, null);
+      else view.root.remove();
+    }
   }
   tree.innerHTML = "";
   tree.appendChild(renderWorkspaceNode(state.layout));
+  placeKeptViews();
   for (const [id, saved] of scrolls) {
     const view = state.views[id];
     if (view && typeof view.restoreScroll === "function") view.restoreScroll(saved);
@@ -17697,6 +18083,7 @@ function toolIconNode(tool) {
   if (TOOL_ICON_DRAWERS[tool]) return TOOL_ICON_DRAWERS[tool]();
   const name = String(tool || "").toLowerCase();
   if (/share_file$/.test(name)) return downloadIcon(12);   // Puppy's puppy_files bridge, any engine's spelling
+  if (/puppy_preview/.test(name)) return previewIcon(12);   // and its puppy_preview bridge
   if (isQuestionTool(tool) || /question/.test(name)) return askActionIcon(12);
   if (/(web|search|browse|fetch|url)/.test(name)) return globeIcon(12);
   if (/(read|view|image)/.test(name)) return attachmentFileIcon(12);
@@ -18085,6 +18472,11 @@ function fillToolResultInto(card, d, endedAt, source = null, resultSeq = 0) {
     /share_file$/.test(String(card._toolName || "")) &&
     sharedFilesEnabledFor(Number(source.bid) || 0) ? sharedFilesIn(text) : [];
   if (shares.length) sharedFileChipsInto(card, body, source, shares);
+  /* and show_preview's names the preview it showed: its tab, folded or not */
+  const shown = source && Number(source.sid) > 0 && !d.is_error && !d.interrupted &&
+    /show_preview$/.test(String(card._toolName || "")) &&
+    previewsEnabledFor(Number(source.bid) || 0) ? previewsIn(text) : [];
+  if (shown.length) previewChipsInto(card, body, source, shown);
 }
 
 /* ================= tool images =================
@@ -23801,6 +24193,10 @@ class SessionView {
       case "vnc_activity":
         handleVncActivity(this.tab.bid, this.tab.sid, d.turn_id, d.vnc_id);
         break;
+      case "preview_activity":
+        handlePreviewActivity(this.tab.bid, this.tab.sid, d.preview_id, d.event,
+          d.closed === true, d.name);
+        break;
     }
     const runningKinds = { user: 1, assistant: 1, thinking: 1, tool_use: 1, tool_result: 1 };
     if (!remoteStoppingMessage(this.tab.bid) &&
@@ -28428,6 +28824,259 @@ const VNC_ERROR_REPEAT_MS = 10000;
    overlay. What differs is entirely under the surface - the node decodes RFB
    and sends damage rectangles, so this paints them straight into a canvas
    with putImageData and never runs a decoder of its own. */
+/* A preview's tab: the managed browser's surfaces (br-bar, br-meta, br-ident,
+   br-owner, br-stats, br-stage, term-dead) around a sandboxed frame of the
+   preview's address. The bar says what the preview shows and offers a
+   reload, a window of its own and Stop; the frame is kept alive across the
+   workspace's rebuilds where the browser can move it (keepAlive), so a tab
+   switch never reloads the page under the reader. */
+class PreviewView {
+  constructor(tab) {
+    this.tab = tab;
+    this.closed = false;
+    this.started = false;
+    this.visible = false;
+    this.keepAlive = true;
+    this.record = null;
+    this.loadSerial = 0;
+    this.stopping = false;
+    this.root = el("div", "view preview");
+    this.root.innerHTML = `
+      <div class="br-bar">
+        <button class="icon-btn pv-reload" type="button" aria-label="Reload the preview"></button>
+        <span class="pv-where" aria-label="What the preview shows"></span>
+        <a class="icon-btn pv-open" target="_blank" rel="noopener noreferrer"
+          aria-label="Open in a window of its own" aria-disabled="true"></a>
+        <button class="icon-btn pv-stop" type="button" aria-label="Stop this preview"></button>
+      </div>
+      <div class="br-meta edge-scroll-viewport"><div class="br-meta-scroll">
+        <div class="br-ident" aria-label="Preview identity">
+          <span class="br-ident-label">Preview</span>
+          <span class="br-id"></span>
+          <button class="icon-btn br-copy-id" type="button" aria-label="Copy preview ID"></button>
+        </div>
+        <button class="br-owner pv-owner" type="button" disabled>
+          <span class="sess-dot br-owner-dot hidden"></span>
+          <span class="br-owner-text"></span>
+        </button>
+        <span class="br-stats pv-state">
+          <span class="sess-dot pv-dot busy"></span>
+          <span class="state-word pv-state-text busy">Loading…</span>
+        </span>
+      </div></div>
+      <div class="br-stage pv-stage"></div>`;
+    this.reloadBtn = this.root.querySelector(".pv-reload");
+    this.reloadBtn.appendChild(refreshIcon(14));
+    this.whereText = this.root.querySelector(".pv-where");
+    this.openLink = this.root.querySelector(".pv-open");
+    this.openLink.appendChild(openWindowIcon(14));
+    this.stopBtn = this.root.querySelector(".pv-stop");
+    this.stopBtn.appendChild(stopSquareIcon(12));
+    this.meta = this.root.querySelector(".br-meta");
+    this.stopMetadataScrolling = wireMetadataScrolling(this.meta);
+    this.idText = this.root.querySelector(".br-id");
+    this.copyIdBtn = wireCopyButton(this.root.querySelector(".br-copy-id"),
+      () => String(this.tab.previewId || "").toUpperCase(), "Copy preview ID");
+    this.ownerBtn = this.root.querySelector(".pv-owner");
+    this.ownerDot = this.root.querySelector(".br-owner-dot");
+    this.ownerText = this.root.querySelector(".br-owner-text");
+    this.stateDot = this.root.querySelector(".pv-dot");
+    this.stateText = this.root.querySelector(".pv-state-text");
+    this.stage = this.root.querySelector(".pv-stage");
+    this.frame = null;
+    this.reloadBtn.onclick = () => this.reload();
+    this.stopBtn.onclick = () => this.stop();
+    this.ownerBtn.onclick = () => {
+      if (this.tab.sid) openSessionTab(this.tab.bid || 0, this.tab.sid);
+    };
+    this.openLink.addEventListener("click", event => {
+      if (this.openLink.getAttribute("aria-disabled") === "true") event.preventDefault();
+    });
+    this.renderIdentity();
+  }
+
+  onShow() {
+    this.visible = true;
+    if (!this.started) { this.started = true; this.load(true); }
+    this.renderIdentity();
+  }
+  onVisibility(visible) { this.visible = !!visible; }
+
+  url() {
+    return this.record ? previewUrl(this.tab.bid || 0, this.record.token, this.record.entry) : "";
+  }
+
+  setState(text, tone, title = "") {
+    this.stateText.textContent = text;
+    this.stateText.className = `state-word pv-state-text ${tone}`;
+    this.stateDot.className = `sess-dot pv-dot ${tone}`;
+    this.stateText.parentNode.title = title;
+  }
+
+  renderIdentity() {
+    const id = String(this.tab.previewId || "").toUpperCase();
+    this.idText.textContent = id || "—";
+    const record = this.record;
+    /* the folder in full, as an address bar names its page */
+    const shown = record ? `${String(record.folder).replace(/\/+$/, "")}/${record.entry}` : "";
+    this.whereText.textContent = shown;
+    this.whereText.title = shown;
+    const url = this.url();
+    if (url && !this.isDead()) {
+      this.openLink.setAttribute("href", url);
+      this.openLink.removeAttribute("aria-disabled");
+    } else {
+      this.openLink.removeAttribute("href");
+      this.openLink.setAttribute("aria-disabled", "true");
+    }
+    this.stopBtn.disabled = !record || this.isDead() || this.stopping;
+    this.reloadBtn.disabled = this.stopping || this.tab.previewGone === true;
+    const owner = this.tab.sid ? findSessionMeta(this.tab.bid || 0, this.tab.sid) : null;
+    const name = owner ? (owner.name || `Session ${this.tab.sid}`) : `Session ${this.tab.sid}`;
+    this.ownerText.textContent = name;
+    this.ownerBtn.disabled = !owner;
+    this.ownerBtn.setAttribute("aria-label", owner ? `Open ${name}` : name);
+    this.ownerDot.classList.toggle("hidden", !owner);
+    if (owner) this.ownerDot.style.color = owner.color || "var(--txt3)";
+  }
+
+  isDead() { return !!this.root.querySelector(".pv-dead"); }
+
+  /* Reads the preview afresh - its name, folder and address - and loads the
+     page again. A new frame each time: setting the old one's address would
+     add a step to the browser's own history. */
+  async load(frame = true) {
+    const serial = ++this.loadSerial;
+    const bid = this.tab.bid || 0;
+    if (bid && !backendConnectionAllowed(bid)) {
+      this.showDead(backendStateNote(remoteAvailability(bid), false) || "Backend unavailable", false);
+      return;
+    }
+    this.setState("Loading…", "busy");
+    let answer = null;
+    try {
+      answer = await api(bid, `sessions/${this.tab.sid}/previews`, { timeoutMs: 15000 });
+    } catch (error) {
+      if (this.closed || serial !== this.loadSerial) return;
+      if (error.status === 404) this.ended();
+      else this.showDead(`Could not open the preview · ${error.message}`, false);
+      return;
+    }
+    if (this.closed || serial !== this.loadSerial) return;
+    const id = String(this.tab.previewId || "").toUpperCase();
+    const item = Array.isArray(answer && answer.previews) ?
+      answer.previews.find(entry => entry && entry.id === id) : null;
+    if (!item || typeof item.token !== "string") { this.ended(); return; }
+    this.record = item;
+    this.tab.previewGone = false;
+    this.clearDead();
+    if (item.name && item.name !== this.tab.title) {
+      this.tab.title = String(item.name).slice(0, 120);
+      saveTabs();
+      renderTabs();
+    }
+    if (frame || !this.frame) this.showFrame();
+    this.renderIdentity();
+  }
+
+  showFrame() {
+    const frame = document.createElement("iframe");
+    frame.className = "pv-frame";
+    frame.setAttribute("sandbox", PREVIEW_SANDBOX);
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    frame.setAttribute("allow", "fullscreen");
+    frame.title = `Preview ${this.tab.previewId}: ${this.record.name}`;
+    frame.addEventListener("load", () => {
+      if (this.frame === frame && !this.isDead())
+        this.setState("Live", "ok", "Read from its folder at every load");
+    });
+    frame.src = this.url();
+    if (this.frame) this.frame.replaceWith(frame);
+    else this.stage.appendChild(frame);
+    this.frame = frame;
+  }
+
+  reload() {
+    if (this.closed || this.stopping) return;
+    if (!this.started) return;  // shown later, it loads afresh then
+    this.load(true);
+  }
+
+  /* The node no longer has it: closed by the agent or here, or its session
+     is gone. The link in the chat says so too. */
+  ended() {
+    this.record = null;
+    this.tab.previewGone = true;
+    if (this.frame) { this.frame.remove(); this.frame = null; }
+    this.showDead("Preview ended", true);
+    this.renderIdentity();
+  }
+
+  showDead(message, ended) {
+    this.setState(ended ? "Ended" : "Unavailable", "bad");
+    let dead = this.root.querySelector(".pv-dead");
+    if (!dead) {
+      dead = el("div", "term-dead br-dead pv-dead");
+      dead.appendChild(el("div", "term-dead-message"));
+      dead.appendChild(el("div", "term-dead-actions"));
+      this.stage.appendChild(dead);
+    }
+    dead.querySelector(".term-dead-message").textContent = message;
+    const actions = dead.querySelector(".term-dead-actions");
+    actions.innerHTML = "";
+    const close = el("button", "btn", "Close");
+    close.type = "button";
+    close.onclick = () => closeTab(this.tab.id);
+    /* a dialog's row: the way out first, the primary last */
+    actions.appendChild(close);
+    if (!ended) {
+      const again = el("button", "btn btn-pri", "Retry");
+      again.type = "button";
+      again.onclick = () => { this.clearDead(); this.load(true); };
+      actions.appendChild(again);
+    }
+    this.renderIdentity();
+  }
+
+  clearDead() {
+    const dead = this.root.querySelector(".pv-dead");
+    if (dead) dead.remove();
+  }
+
+  async stop() {
+    const record = this.record;
+    if (!record || this.stopping) return;
+    const id = String(this.tab.previewId || "").toUpperCase();
+    const confirmed = await modalConfirm(`Stop Preview ${id}?`,
+      `${record.name} stops being served: its tab and its link in the chat stop working. ` +
+      "The files stay where they are.",
+      { confirmLabel: "Stop preview", destructive: true });
+    if (!confirmed || this.closed) return;
+    this.stopping = true;
+    this.renderIdentity();
+    try {
+      await api(this.tab.bid || 0, `sessions/${this.tab.sid}/previews/${encodeURIComponent(id)}`,
+        { method: "DELETE", timeoutMs: 15000 });
+      this.stopping = false;
+      this.ended();
+      refreshPreviewLinks(this.tab.bid || 0, this.tab.sid);
+      toast(`Preview ${id}: Stopped`, "ok");
+    } catch (error) {
+      this.stopping = false;
+      if (error.status === 404) { this.ended(); return; }
+      this.renderIdentity();
+      toast(`Preview ${id}: Could not stop it · ${error.message}`, "bad", TOAST_LONG);
+    }
+  }
+
+  destroy() {
+    this.closed = true;
+    this.loadSerial++;
+    if (this.stopMetadataScrolling) this.stopMetadataScrolling();
+    if (this.frame) { this.frame.remove(); this.frame = null; }
+  }
+}
+
 class VncView {
   constructor(tab) {
     this.tab = tab;
@@ -31539,6 +32188,29 @@ class SettingsView {
     tasksSection.appendChild(tasksText);
     card.appendChild(tasksSection);
 
+    /* drawn only for a backend whose payload carries it, like Task guidance */
+    const previewsSection = el("section",
+      "system-prompt-section system-prompt-previews hidden");
+    const previewsHead = el("div", "system-prompt-section-head");
+    const previewsCopy = el("div", "system-prompt-section-copy");
+    previewsCopy.appendChild(el("h3", "", "Preview guidance"));
+    previewsCopy.appendChild(el("p", "",
+      "Sent with every model turn on this backend; it governs how the agent shows you " +
+      "pages, models and other files it builds - in a preview beside the chat rather " +
+      "than a web server of its own."));
+    const previewsReset = el("button", "btn btn-sm btn-ghost system-prompt-reset",
+      "Reset to default");
+    previewsReset.type = "button";
+    previewsHead.appendChild(previewsCopy);
+    previewsHead.appendChild(previewsReset);
+    const previewsText = document.createElement("textarea");
+    previewsText.className = "system-prompt-textarea config-textarea";
+    previewsText.rows = 3;
+    previewsText.setAttribute("aria-label", "Preview system prompt");
+    previewsSection.appendChild(previewsHead);
+    previewsSection.appendChild(previewsText);
+    card.appendChild(previewsSection);
+
     /* the card's row like every other card's: the primary first, its
        status beside it */
     const actions = el("div", "system-prompt-actions");
@@ -31567,9 +32239,15 @@ class SettingsView {
       if (!Number.isInteger(maxChars) || maxChars < 1)
         throw new Error("backend returned an invalid system prompt limit");
       const hasTasks = typeof prompt.tasks === "string" && typeof prompt.tasks_default === "string";
+      const hasPreviews = typeof prompt.previews === "string" &&
+        typeof prompt.previews_default === "string";
       return {
         loaded: true,
         hasTasks,
+        hasPreviews,
+        previews: hasPreviews ? prompt.previews : "",
+        previewsDraft: hasPreviews ? prompt.previews : "",
+        previewsDefault: hasPreviews ? prompt.previews_default : "",
         tasks: hasTasks ? prompt.tasks : "",
         tasksDraft: hasTasks ? prompt.tasks : "",
         tasksDefault: hasTasks ? prompt.tasks_default : "",
@@ -31614,6 +32292,7 @@ class SettingsView {
        record.vncDraft !== record.vnc ||
        record.spawnDraft !== record.spawn ||
        (record.hasTasks && record.tasksDraft !== record.tasks) ||
+       (record.hasPreviews && record.previewsDraft !== record.previews) ||
        record.remoteWorkspaceDraft !== record.remoteWorkspace);
     const stash = () => {
       const record = records.get(activeBid);
@@ -31625,6 +32304,7 @@ class SettingsView {
       record.vncDraft = vncText.value;
       record.spawnDraft = spawnText.value;
       if (record.hasTasks) record.tasksDraft = tasksText.value;
+      if (record.hasPreviews) record.previewsDraft = previewsText.value;
       record.saved = false;
     };
     const paint = () => {
@@ -31638,6 +32318,7 @@ class SettingsView {
       vncText.disabled = !editable;
       spawnText.disabled = !editable;
       tasksText.disabled = !editable;
+      previewsText.disabled = !editable;
       remoteText.disabled = !editable;
       /* a reset is offered only while its field's text truly differs from
          Puppy's default for it, as the text stands now, saved or not */
@@ -31649,6 +32330,9 @@ class SettingsView {
       spawnReset.disabled = !offDefault("spawn");
       tasksReset.disabled = !(editable && record.hasTasks && offDefault("tasks"));
       tasksSection.classList.toggle("hidden", !(canUse && record && record.loaded && record.hasTasks));
+      previewsReset.disabled = !(editable && record.hasPreviews && offDefault("previews"));
+      previewsSection.classList.toggle("hidden",
+        !(canUse && record && record.loaded && record.hasPreviews));
       save.disabled = !canUse || unavailable || (!!record && record.saving);
       status.classList.remove("bad", "dirty");
       if (!canUse) {
@@ -31694,6 +32378,9 @@ class SettingsView {
         tasksText.maxLength = record.maxChars;
         if (record.hasTasks && document.activeElement !== tasksText)
           tasksText.value = record.tasksDraft;
+        previewsText.maxLength = record.maxChars;
+        if (record.hasPreviews && document.activeElement !== previewsText)
+          previewsText.value = record.previewsDraft;
         save.textContent = record.saving ? "Saving…" : "Save prompt";
         if (unavailable) {
           status.textContent = backendStateNote(backendStatus, true, "prompt settings");
@@ -31772,9 +32459,10 @@ class SettingsView {
     vncText.oninput = edited;
     spawnText.oninput = edited;
     tasksText.oninput = edited;
+    previewsText.oninput = edited;
     /* the multi-line editor contract: Ctrl/Cmd+Enter saves, as in agent notes */
     for (const area of [custom, remoteText, browserText, terminalText, vncText,
-                        spawnText, tasksText])
+                        spawnText, tasksText, previewsText])
       area.addEventListener("keydown", event => {
         if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !save.disabled) {
           event.preventDefault();
@@ -31829,6 +32517,14 @@ class SettingsView {
       paint();
       tasksText.focus();
     };
+    previewsReset.onclick = () => {
+      const record = records.get(activeBid);
+      if (!record || !record.loaded || record.saving || !record.hasPreviews) return;
+      previewsText.value = record.previewsDefault;
+      stash();
+      paint();
+      previewsText.focus();
+    };
     save.onclick = async () => {
       let record = records.get(activeBid);
       if (!record || !record.loaded) { await load(true); return; }
@@ -31846,6 +32542,7 @@ class SettingsView {
         body.vnc = record.vncDraft;
         body.spawn = record.spawnDraft;
         if (record.hasTasks) body.tasks = record.tasksDraft;
+        if (record.hasPreviews) body.previews = record.previewsDraft;
         const result = await api(bid, "system-prompt", {
           method: "PATCH",
           body,

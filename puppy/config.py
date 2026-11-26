@@ -124,6 +124,27 @@ DEFAULT_VNC_SYSTEM_PROMPT = (
     "clearly authorizes them."
 )
 
+# Model-visible on every turn where the node offers the preview bridge, which
+# is every node: Puppy serves what an agent built through the console, so the
+# default steers agents away from web servers of their own on the network.
+# Kept beside the other defaults, but persisted outside config.json: the
+# optional exact ``preview_guidance`` meta record (system_prompts), absent
+# while the default stands, so adding it changed no node's config shape.
+DEFAULT_PREVIEW_SYSTEM_PROMPT = (
+    "When the Puppy preview tools are available and you have built something the "
+    "user looks at in a browser - an HTML page or mockup, a 3D model viewer, a "
+    "diagram, a report, a set of images - show it with show_preview and put the "
+    "link it returns in your answer. Do not start a web server of your own for "
+    "that (python -m http.server, npx serve, a static server in a script): a "
+    "preview is served through the signed-in Puppy console instead of to "
+    "everybody on the network, and it opens beside this chat. After changing "
+    "what a preview shows, call show_preview again with the same path so the "
+    "user's tab reloads. A project's own development server remains "
+    "appropriate when the user asks for it or the work needs one; bind it to "
+    "127.0.0.1 unless the user asks otherwise, and stop it when you are done. "
+    "Close a preview the user no longer needs when they ask you to."
+)
+
 # This is model-visible on every turn because the spawn bridge is always
 # offered, so the default keeps the tools firmly opt-in: spawning another
 # engine burns real subscription quota and must stay an explicit user request.

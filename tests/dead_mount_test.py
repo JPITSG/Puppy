@@ -45,7 +45,8 @@ os.environ["PUPPY_DATA"] = str(ROOT / "data")
 import aiohttp  # noqa: E402
 from aiohttp import web  # noqa: E402
 from puppy import (backup_schedule, cli_releases, config, db, files_agent, host_metrics,  # noqa: E402
-                   place_scout, places, runner, schedules, search, session_directories, session_git,
+                   place_scout, places, preview_agent, previews, runner, schedules, search,
+                   session_directories, session_git,
                    session_links, session_tasks, task_agent, workers, workspace_sync)
 from puppy.drivers import get_driver  # noqa: E402
 from puppy.web import build_app  # noqa: E402
@@ -173,6 +174,10 @@ class Site:
         db.add_event(self.there, "tool_use", {"tool": "view_image", "tool_use_id": "v1",
                                               "input": {"path": str(PROJECT / "picture.png")}})
         self.picture = db.add_event(self.there, "tool_result", {"tool_use_id": "v1", "content": "ok"})["seq"]
+        # a preview of the drive's project, recorded while it answers
+        self.preview = previews.remember(self.there, {
+            "base": "cwd", "root": "", "entry": "", "real_root": str(PROJECT), "folder": True},
+            "Drive page")[0]
         runner.broadcast_sessions()
         await until(lambda: session_directories.record(str(PROJECT)) is True)
         await until(lambda: session_directories.notes(str(LINKED)) == ["CLAUDE.md"])
@@ -221,6 +226,9 @@ class Site:
         yield "events", lambda: self.ask("GET", "/api/sessions/{}/events".format(sid)), ok
         yield "tasks", lambda: self.ask("GET", "/api/sessions/{}/tasks".format(self.main)), ok
         yield "shared files", lambda: self.ask("GET", "/api/sessions/{}/files".format(sid)), ok
+        yield "previews", lambda: self.ask("GET", "/api/sessions/{}/previews".format(sid)), ok
+        yield "agent's previews", lambda: self.agent(preview_agent, sid, "previews", {}), \
+            lambda answer: "Drive page" in answer["text"]
         yield "upload", lambda: self.ask("POST", "/api/sessions/{}/upload?name=x.txt".format(sid), data=b"x"), ok
         yield "session socket", lambda: self.frame("/api/ws/session/{}".format(sid)), lambda kind: kind == "snapshot"
         yield "update stream", lambda: self.frame("/api/ws/updates"), bool
@@ -290,6 +298,11 @@ class Site:
         yield "agent's share", lambda: self.agent(files_agent, sid, "share_file", {"path": "a.txt"}), failed
         yield "agent's share by its path", lambda: self.agent(files_agent, self.here, "share_file", {
             "path": project + "/a.txt"}), failed
+        yield "agent's preview", lambda: self.agent(preview_agent, sid, "show_preview", {"path": "."}), failed
+        yield "agent's preview by its path", lambda: self.agent(preview_agent, self.here, "show_preview", {
+            "path": project}), failed
+        yield "preview's page", lambda: self.ask("GET", "/api/previews/{}/".format(self.preview["token"])), \
+            lambda answer: answer[0] == 503 and GONE in answer[1].decode()
         yield "link a workspace", lambda: self.ask("POST", "/api/workspace/leases", json={"root": project}), refused
         lease = "/api/workspace/leases/{}/".format(self.lease)
         yield "workspace manifest", lambda: self.ask("GET", lease + "manifest"), refused
@@ -302,6 +315,9 @@ class Site:
                                                          json={"destination": project + "/moved"}), refused
         if self.full:
             yield "backups onto it", lambda: self.ask("PUT", "/api/snapshot/backups", json=self.backups()), said(400)
+            yield "preview's public page", lambda: self.ask(
+                "GET", "/preview/0/{}/".format(self.preview["token"])), \
+                lambda answer: answer[0] == 503 and GONE in answer[1].decode()
 
     @staticmethod
     def backups(enabled=False):

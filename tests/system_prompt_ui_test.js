@@ -47,19 +47,20 @@ const settle = async () => { for (let i = 0; i < 6; i++) await new Promise(resol
 const DEFAULTS = {
   remote_workspace: "Remote workspace default", browser: "Browser default",
   terminal: "Terminal default", vnc: "Remote screen default", spawn: "Spawn default",
-  tasks: "Task default",
+  tasks: "Task default", previews: "Preview default",
 };
 const SECTIONS = {
   remote_workspace: ".system-prompt-remote-workspace", browser: ".system-prompt-browser",
   terminal: ".system-prompt-terminal", vnc: ".system-prompt-vnc", spawn: ".system-prompt-spawn",
-  tasks: ".system-prompt-tasks",
+  tasks: ".system-prompt-tasks", previews: ".system-prompt-previews",
 };
 /* a payload whose fields are the defaults, as a backend answers it, with the
    overrides as stored there */
-const payload = (overrides = {}, withTasks = true) => {
+const payload = (overrides = {}, withTasks = true, withPreviews = true) => {
   const value = { custom: "", max_chars: 32768 };
   for (const [key, text] of Object.entries(DEFAULTS)) {
     if (key === "tasks" && !withTasks) continue;
+    if (key === "previews" && !withPreviews) continue;
     value[key] = text;
     value[key + "_default"] = text;
   }
@@ -83,7 +84,7 @@ const type = (card, key, text) => {
   /* ---- only a field whose text is not its default offers a reset ---- */
   let card = settings.systemPromptCard(nodes, payload({ spawn: "Spawn policy from an older Puppy" }), 1);
   document.body.appendChild(card);
-  assert.equal(card.querySelectorAll(".system-prompt-reset").length, 6);
+  assert.equal(card.querySelectorAll(".system-prompt-reset").length, 7);
   assert.deepEqual(offered(card), ["spawn"],
     "a policy stored from an older default is the one field that can be reset");
   assert.equal(status(card), "Up to 32,768 characters per field");
@@ -119,6 +120,7 @@ const type = (card, key, text) => {
   assert.equal(requests[0].opts.method, "PATCH");
   assert.equal(requests[0].opts.body.spawn, "Spawn default", "the reset is saved like any edit");
   assert.equal(requests[0].opts.body.terminal, "Terminal, my way");
+  assert.equal(requests[0].opts.body.previews, "Preview default", "a field the backend has is sent");
   assert.deepEqual(offered(card), [], "nothing can be reset while a save is on its way");
   release({ system_prompt: payload({ terminal: "Terminal, my way" }) });
   await settle();
@@ -163,7 +165,30 @@ const type = (card, key, text) => {
   assert.ok(card.querySelector(".system-prompt-tasks").classList.contains("hidden"));
   assert.ok(reset(card, "tasks").disabled, "a backend from before the task tools offers no task reset");
   card.remove();
-  assert.deepEqual(notices.map(item => item.tone), ["ok"], "one save, one notice");
+
+  /* ---- Preview guidance's follows the payload too ---- */
+  card = settings.systemPromptCard(nodes, payload({ previews: "My preview policy" }), 1);
+  document.body.appendChild(card);
+  assert.ok(!card.querySelector(".system-prompt-previews").classList.contains("hidden"));
+  assert.deepEqual(offered(card), ["previews"]);
+  reset(card, "previews").click();
+  assert.equal(field(card, "previews").value, "Preview default");
+  assert.equal(document.activeElement, field(card, "previews"));
+  assert.deepEqual(offered(card), []);
+  card.remove();
+  requests.length = 0;
+  answer = { system_prompt: payload({}, true, false) };
+  card = settings.systemPromptCard(nodes, payload({}, true, false), 1);
+  document.body.appendChild(card);
+  assert.ok(card.querySelector(".system-prompt-previews").classList.contains("hidden"));
+  assert.ok(reset(card, "previews").disabled, "a backend from before previews offers no reset");
+  type(card, "browser", "Browser, mine");
+  card.querySelector(".system-prompt-actions .btn-pri").click();
+  await settle();
+  assert.equal(requests.length, 1);
+  assert.ok(!("previews" in requests[0].opts.body), "nor a field it would refuse");
+  card.remove();
+  assert.deepEqual(notices.map(item => item.tone), ["ok", "ok"], "two saves, two notices");
   console.log("PASS: Settings → System prompt offers each Reset to default only while its field " +
     "differs from the default - stored, typed or saved - greys it again once the text is the " +
     "default, and offers none while a backend cannot be edited or a save is on its way");

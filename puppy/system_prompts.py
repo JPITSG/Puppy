@@ -1,6 +1,7 @@
 """Node-owned model prompt settings and their shared execution API."""
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from puppy import config
@@ -66,6 +67,51 @@ def tasks_prompt() -> str:
         return config.DEFAULT_TASKS_SYSTEM_PROMPT
 
 
+PREVIEW_KEY = "preview_guidance"
+PREVIEW_FORMAT = 1
+
+
+def _preview_record(value) -> str:
+    """The text of a ``preview_guidance`` record, or ValueError: exact shape,
+    never repaired."""
+    if not isinstance(value, dict) or set(value) != {"format", "text"} or \
+            type(value["format"]) is not int or value["format"] != PREVIEW_FORMAT:
+        raise ValueError("invalid preview guidance record")
+    text = config.normalize_system_prompt(value["text"], "preview system prompt")
+    if text != value["text"]:
+        raise ValueError("invalid preview guidance record")
+    return text
+
+
+def preview_prompt(connection=None) -> str:
+    """The editable preview policy: the optional exact ``preview_guidance``
+    meta record (``{format:1, text}``), Puppy's default while there is none.
+    A meta record rather than a config.json key, so adding it changed no
+    node's config shape; one of any other shape is refused at startup and in
+    a backup."""
+    sql = "SELECT value FROM meta WHERE key=?"
+    if connection is not None:
+        row = connection.execute(sql, (PREVIEW_KEY,)).fetchone()
+    else:
+        from puppy import db
+        row = db.query_one(sql, (PREVIEW_KEY,))
+    if row is None:
+        return config.DEFAULT_PREVIEW_SYSTEM_PROMPT
+    return _preview_record(json.loads(row[0]))
+
+
+def validate_persisted(connection) -> None:
+    preview_prompt(connection)
+
+
+def _set_preview_prompt(text: str) -> None:
+    from puppy import db
+    if text == config.DEFAULT_PREVIEW_SYSTEM_PROMPT:
+        db.meta_apply(delete_keys=(PREVIEW_KEY,))
+    else:
+        db.meta_apply({PREVIEW_KEY: {"format": PREVIEW_FORMAT, "text": text}})
+
+
 def remote_workspace_prompt() -> str:
     """Return remote-workspace guidance, falling back to Puppy's default."""
     value = config.get(
@@ -101,6 +147,8 @@ def payload() -> dict:
         "spawn_default": config.DEFAULT_SPAWN_SYSTEM_PROMPT,
         "tasks": tasks_prompt(),
         "tasks_default": config.DEFAULT_TASKS_SYSTEM_PROMPT,
+        "previews": preview_prompt(),
+        "previews_default": config.DEFAULT_PREVIEW_SYSTEM_PROMPT,
         "max_chars": config.MAX_SYSTEM_PROMPT_CHARS,
     }
 
@@ -119,7 +167,7 @@ async def h_patch(request: web.Request):
     if not isinstance(body, dict):
         return web.json_response({"error": "system prompt request must be an object"}, status=400)
     unknown = set(body) - {"custom", "remote_workspace", "browser", "terminal",
-                           "vnc", "spawn", "tasks"}
+                           "vnc", "spawn", "tasks", "previews"}
     if unknown:
         return web.json_response(
             {"error": "unknown system prompt field: {}".format(sorted(unknown)[0])},
@@ -137,8 +185,27 @@ async def h_patch(request: web.Request):
         tasks = body.get("tasks", tasks_prompt())
         if not isinstance(tasks, str):
             raise ValueError("task system prompt must be text")
-        config.set_system_prompts(custom, remote_workspace, browser, terminal,
-                                  vnc, spawn, tasks)
+        previous = preview_prompt()
+        preview = config.normalize_system_prompt(
+            body.get("previews", previous), "preview system prompt")
+        # every field is checked before either store is written, and the
+        # preview record is put back when config.json refuses the rest
+        for value, path in ((custom, "custom system prompt"),
+                            (remote_workspace, "remote workspace system prompt"),
+                            (browser, "browser system prompt"),
+                            (terminal, "terminal system prompt"),
+                            (vnc, "VNC system prompt"), (spawn, "spawn system prompt"),
+                            (tasks, "task system prompt")):
+            config.normalize_system_prompt(value, path)
+        if preview != previous:
+            _set_preview_prompt(preview)
+        try:
+            config.set_system_prompts(custom, remote_workspace, browser, terminal,
+                                      vnc, spawn, tasks)
+        except Exception:
+            if preview != previous:
+                _set_preview_prompt(previous)
+            raise
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     return web.json_response({"ok": True, "system_prompt": payload()})

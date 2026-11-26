@@ -728,6 +728,16 @@ def _validate_database(path: Path):
             schedules.validate_persisted(connection)
         except (ValueError, TypeError) as exc:
             raise SnapshotError("snapshot schedule state is not current") from exc
+        from puppy import previews, system_prompts
+        try:
+            previews.validate_persisted(connection)
+        except (ValueError, TypeError) as exc:
+            raise SnapshotError("snapshot database contains invalid previews") from exc
+        try:
+            system_prompts.validate_persisted(connection)
+        except (ValueError, TypeError) as exc:
+            raise SnapshotError(
+                "snapshot database contains invalid preview guidance") from exc
         transport_row = connection.execute(
             "SELECT value FROM meta WHERE key=?", (web_tls.STATE_KEY,)).fetchone()
         if transport_row is None:

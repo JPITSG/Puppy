@@ -644,6 +644,27 @@ sign-ins and keys live) and system locations such as `/etc/shadow` or `/proc`
 are never shared. The design is described in
 [docs/shared-files.md](docs/shared-files.md).
 
+**Previews of what the agent built** open beside the chat. When an agent
+builds something you look at in a browser - an HTML mockup, a 3D model viewer,
+a wiring diagram, a set of images - it calls Puppy's `show_preview` tool on
+the folder instead of starting a web server of its own, and the page opens in
+a Preview tab beside its chat without taking focus, with a link in its answer
+that opens the tab again (a middle click opens the page in a browser tab of its
+own). The tab is the managed browser's bar around the page: the folder it
+serves, Reload, a window of its own, and Stop, which asks first. Files are read
+from disk at every load, so after a change the agent shows the preview again
+and your tab reloads, keeping its ID and link; switching tabs leaves the page
+as it was in browsers that can move a frame without reloading it (current
+Chromium-based ones). A preview serves one folder inside the session's working
+folder or the system's temporary folder - its `index.html`, or a listing when
+it has none - and never hidden files, Puppy's own data folder, the engines'
+CLI homes or system locations; a link out of the folder leads nowhere. Its page
+runs in a sandbox: its scripts, its own files, WebGL and downloads work, while
+cookies, local storage and the console itself are out of its reach. A preview
+lasts until the agent or you stop it, or its session is deleted, across
+restarts; a session on another backend is served through the controller. The
+design is described in [docs/previews.md](docs/previews.md).
+
 Engines that keep working after answering are handled too: Claude Code's
 background commands, agents and monitors keep their turn alive until they end.
 Their completion, failure and stop updates are labeled and left-aligned, attached
@@ -1491,8 +1512,9 @@ backend name stays readable; long button labels wrap within the button.
   limit keeps its other timeouts editable with that row disabled.
 - **System prompt** – a custom text added to every turn on that backend, and the
   conditional guidance for remote workspaces, browsers, terminals, remote
-  screens, spawned agents and tasks, each with a reset to Puppy's default that
-  is offered only while that field's text differs from the default.
+  screens, spawned agents, tasks and previews, each with a reset to Puppy's
+  default that is offered only while that field's text differs from the
+  default.
 - **Backends** – add, edit, test, upgrade and auto-upgrade paired machines.
 - **Security** – change your password.
 - **Backup & restore** – export and import the full-instance archive.
@@ -1576,6 +1598,18 @@ built-in browser APIs and require no additional libraries.
   both the password's key and the certificate's key; without it, the password
   rides TLS to a certificate nobody verified, so check the fingerprint the
   tab shows.
+- **Previews are sandboxed and reached by a secret token.** A preview's page
+  runs in a sandbox with an origin of its own (`Content-Security-Policy:
+  sandbox` without `allow-same-origin`), so neither it nor anything it loads
+  from the internet can read the console's cookies or storage, touch its page
+  or call its API; only the console may frame it. Because such a page's own
+  requests carry no cookie, its address carries a random 192-bit token instead
+  - `/preview/<backend>/<token>/` - which only the signed-in console reads from
+  the session's previews and the transcript never holds; anyone given that
+  address could open the preview until it is stopped, so treat it like the
+  session's own link. A wrong token is a plain 404 that names nothing, and the
+  headless backend serves preview files only behind its API token, for the
+  controller to relay.
 - **Shared files are copies, served only as downloads.** A link an agent
   shares names an unguessable id, never a path, and resolves only inside its
   own session, behind the console's sign-in. The bytes are always sent as an
@@ -1623,6 +1657,8 @@ python3 tests/upload_originals_test.py # the picture under a marked copy: storag
 node tests/image_viewer_ui_test.js   # the image viewer, and the pictures on tool cards
 python3 tests/shared_files_test.py   # files an agent shares: what may be shared, storage, routes, the relay, the tool
 node tests/shared_files_ui_test.js   # shared-file links in answers and on the share tool's card
+python3 tests/previews_test.py       # previews: what may be shown, the record, serving, the relay, the bridge
+node tests/previews_ui_test.js       # preview tabs, announcements, links, the pane and kept-alive frames
 node tests/session_request_ui_test.js # the session request and workflow sheet
 node tests/prompt_gutter_ui_test.js   # the prompt gutter: pins, numbers, plates, steps, the prompt list and its answer marks
 python3 tests/prompt_index_test.py   # the prompt index: one line per prompt and its turn's end, paged, on both runtimes

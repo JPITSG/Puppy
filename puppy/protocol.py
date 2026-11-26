@@ -73,6 +73,12 @@ TOOL_IMAGE_FILES_CAPABILITY = "session-tool-image-files"
 # bridge); GET|HEAD /api/sessions/{sid}/files/{id} serves it back only as a
 # download, and GET /api/sessions/{sid}/files lists a session's shares.
 SHARED_FILES_CAPABILITY = "session-shared-files"
+# An agent shows a folder it built (the turn-bound puppy_preview bridge): GET
+# /api/sessions/{sid}/previews lists a session's previews with their secret
+# tokens, DELETE .../previews/{id} ends one, and GET /api/previews/{token}/
+# {path} serves a preview's files, sandboxed, for a controller to relay at
+# its public /preview/<backend>/<token>/ route.
+PREVIEWS_CAPABILITY = "session-previews"
 # A headless node sends one best-effort ``node_stopping`` event to its update
 # and session WebSockets before graceful shutdown waits for/interrupts turns.
 # Full WebUI runtimes do not advertise this: only the separately managed
@@ -396,6 +402,7 @@ BASE_CAPABILITIES = (
     UPLOAD_ORIGINALS_CAPABILITY,
     TOOL_IMAGE_FILES_CAPABILITY,
     SHARED_FILES_CAPABILITY,
+    PREVIEWS_CAPABILITY,
     ENGINE_AUTO_UPGRADE_CAPABILITY,
     ENGINE_DEFAULTS_CAPABILITY,
     TIMER_SETTINGS_CAPABILITY,

@@ -8,7 +8,7 @@ There is no extra entry trapping the reader at the console's starting page.
 
 | Surface or action | History behavior |
 | --- | --- |
-| Open or select a session, Settings, Search, terminal, browser or VNC tab | One destination; Back changes the selected view and keeps other tabs and running work alive |
+| Open or select a session, Settings, Search, terminal, browser, VNC or preview tab | One destination; Back changes the selected view and keeps other tabs and running work alive |
 | Focus another split pane, or move a tab into another pane | Records the selected destination; traversal uses the tab's current pane and preserves the edited layout |
 | Main and task tabs, including tasks opened from the Tasks sheet | Records the selected conversation, including hidden task tabs reopened by history |
 | Refresh from Main in a task's menu | A command with no destination entry; Back/Forward never refresh again. Back on delayed progress requests cancellation and waits for cleanup |
@@ -30,6 +30,8 @@ There is no extra entry trapping the reader at the console's starting page.
 | Scroll, load more results/messages, expand a tool/task card, unfold a queue, sidebar disclosure/filter/archive controls (including CPU, Disk, Latency and Processes inside Host activity, which every opening starts shut except where the status is not green), choice/context menus, browser/VNC typing controls, notices arriving in an open Notifications box | Local presentation and input controls; no additional stop. Menus dismiss when history changes |
 | Type a draft, recall a prompt, change a model/permission, send/steer/ask/stop, save/reset a setting, apply/delete/sync, clear the notification history, reorder/resize layout, toggle theme/alerts | Commands and preferences are not undone or replayed by history |
 | Embedded browser's own Back/Forward buttons | Continue navigating that browser's website history; the enclosing console's history selects console views |
+| A preview opened by its announcement, its link or its card; Reload; the agent showing it again | An announcement inserts the tab without a stop, like an agent-created browser tab; a press on the link or the card selects the tab as one destination. Reload and a reshow replace the page's frame with a new one, so they add no step |
+| Links, forms and scripts inside a preview's page | The page's own navigation inside its frame adds the browser's own steps, which Back retraces inside the frame before it reaches the console's destinations, as a page embedded anywhere does; the console's history is untouched |
 
 Closing a dialog with its own control, including the header's close X, consumes
 its history layer. The X follows the same dismissal path as Escape: it cancels
@@ -50,7 +52,10 @@ the most recent 128 entries in this page's memory. Reloading or visiting an olde
 evicted entry still restores available base views and message destinations; it
 does not resurrect a form, search results or a pending operation. Existing
 `#session=<node UUID>/<session ID>&seq=<event>` citation links remain supported.
-A deleted session or closed viewer reports that its view is unavailable.
+A deleted session or closed viewer reports that its view is unavailable. A
+preview's address carries its secret token; it reaches the browser's own
+history only when the page is opened in a window of its own, or the page's
+own links are followed inside its frame.
 
 ## Implementation contract
 

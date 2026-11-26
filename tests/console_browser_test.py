@@ -2938,6 +2938,203 @@ async def tool_image_checks(instance):
           "named for the file read, the card never folded by it, its head never grown, focus home on Escape", flush=True)
 
 
+async def preview_checks(instance, sid):
+    """A preview an agent showed, in real Chromium. The node records a real
+    preview of a scratch folder whose page reports, by postMessage, what its
+    sandbox lets it do: it fetches its own data file, while cookies, storage,
+    the console's document and the console's API are out of its reach. The
+    node's announcement opens the tab beside the chat without focus; a real
+    click shows the page, framed edge to edge under the managed browser's bar
+    on a desktop and a phone in both themes; real tab switches leave the page
+    as it was (the frame is moved, never reloaded); a second announcement
+    reloads it; a real click on the answer's link opens it; Stop asks, and
+    ends it on the node; a wrong token is a plain 404."""
+    import tempfile
+    from puppy import places, previews
+    page = instance.page_session
+    scratch = Path(tempfile.mkdtemp(prefix="puppy-preview-lane-"))
+    (scratch / "data.json").write_text(json.dumps({"value": "harbor"}))
+    (scratch / "index.html").write_text("""<!doctype html><html><head><meta charset="utf-8">
+<title>Harbor bracket</title><style>html,body{margin:0;height:100%;background:#123}
+#mark{position:fixed;inset:0;border:3px solid #f80}</style></head><body><div id="mark"></div><script>
+const report = {born: Math.random().toString(36).slice(2)};
+try { report.cookie = document.cookie; } catch (e) { report.cookie = 'error:' + e.name; }
+try { localStorage.setItem('x', '1'); report.storage = 'ok'; } catch (e) { report.storage = 'error:' + e.name; }
+try { report.parent = parent.document.title; } catch (e) { report.parent = 'error:' + e.name; }
+const send = () => parent.postMessage({preview: report}, '*');
+fetch('data.json').then(r => r.json()).then(j => { report.own = j.value; },
+  e => { report.own = 'error:' + e.name; })
+  .then(() => fetch('/api/state').then(r => 'status:' + r.status, e => 'error:' + e.name))
+  .then(api => { report.api = api; send(); });
+addEventListener('message', event => { if (event.data === 'who') send(); });
+</script></body></html>""")
+    here = await places.visit(str(scratch))
+    # the demo session works in an invented folder: the page is in the temporary one
+    found = await places.ask(here.real, previews.resolve, db.get_session(sid)["cwd"], here.real)
+    assert found["base"] == "temp", found
+    item, _ = previews.remember(sid, found, "Harbor bracket")
+    tab_id = "p:0:" + item["id"]
+    tab = "document.querySelector('.workspace-pane .tab[data-tab-id=\"%s\"]')" % tab_id
+    session_tab = "document.querySelector('.workspace-pane .tab[data-tab-id=\"s:0:%d\"]')" % sid
+
+    async def click(expression):
+        point = await evaluate(instance, """(async () => { if (typeof closeDrawer === 'function') closeDrawer();
+            const b = %s; b.scrollIntoView({block: 'center', inline: 'center'});
+            await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+            const r = b.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+            const hit = document.elementFromPoint(x, y);
+            return {x, y, hit: !!hit && b.contains(hit)}; })()""" % expression)
+        assert point["hit"], (expression, point)
+        for kind in ("mousePressed", "mouseReleased"):
+            await instance.call("Input.dispatchMouseEvent", {"type": kind, "x": point["x"],
+                                "y": point["y"], "button": "left", "clickCount": 1}, session=page)
+
+    async def report(after=0):
+        await until(instance, "window.previewReports.length > %d" % after)
+        return await evaluate(instance, "previewReports[previewReports.length - 1]")
+
+    await evaluate(instance, """(() => { window.previewReports = [];
+        addEventListener('message', event => {
+          if (event.data && event.data.preview) previewReports.push(event.data.preview); });
+        activateTab('s:0:%d'); return true; })()""" % sid)
+    try:
+        # the node's announcement opens the tab beside the chat, the chat kept in focus
+        runner.hub(sid).preview_activity("", item["id"], name=item["name"])
+        await until(instance, "state.tabs.some(t => t.id === %s)" % json.dumps(tab_id))
+        assert await evaluate(instance, "state.active") == "s:0:%d" % sid, "the chat keeps the focus"
+        placed = await evaluate(instance, """(() => { const pane = workspacePaneForTab(%s);
+            return pane.tabs.indexOf(%s) - pane.tabs.indexOf('s:0:%d'); })()""" % (
+            json.dumps(tab_id), json.dumps(tab_id), sid))
+        assert placed == 1, ("beside its chat", placed)
+        title = await evaluate(instance, tab + ".textContent")
+        assert title.startswith("Harbor bracket @ "), title
+        await click(tab)
+        try:
+            first = await report()
+        except AssertionError:
+            dump = await evaluate(instance, """(async () => {
+                const view = state.views[%s];
+                const r = await fetch(view.url(), {credentials: 'omit'});
+                return {src: view.frame && view.frame.src, state: view.root.querySelector('.pv-state-text').textContent,
+                  status: r.status, csp: r.headers.get('content-security-policy'), body: (await r.text()).slice(0, 80),
+                  active: state.active}; })()""" % json.dumps(tab_id))
+            tree = await instance.call("Page.getFrameTree", {}, session=page)
+            print("DIAG", dump, json.dumps(tree)[:1500])
+            raise
+        assert first["own"] == "harbor", ("its own files, by relative fetch", first)
+        assert str(first["storage"]).startswith("error:"), ("no storage in the sandbox", first)
+        assert str(first["cookie"]).startswith("error:"), ("no cookies in the sandbox", first)
+        assert first["parent"] == "error:SecurityError", ("never the console's document", first)
+        assert first["api"] != "status:200", ("never the console's API", first)
+        measure = """(() => {
+            const view = state.views[%s], r = node => node.getBoundingClientRect();
+            const frame = view.root.querySelector('.pv-frame'), stage = view.root.querySelector('.br-stage');
+            const bar = view.root.querySelector('.br-bar'), where = view.root.querySelector('.pv-where');
+            const buttons = [...bar.querySelectorAll('.icon-btn')].map(node => [r(node).width, r(node).height]);
+            const toolbar = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--toolbar-h'));
+            const f = r(frame), st = r(stage);
+            return {sandbox: frame.getAttribute('sandbox'), src: frame.getAttribute('src'),
+              fills: Math.abs(f.left - st.left) < 1 && Math.abs(f.right - st.right) < 1 &&
+                     Math.abs(f.top - st.top) < 1 && Math.abs(f.bottom - st.bottom) < 1,
+              buttons, toolbar, where: where.textContent, whereHeight: r(where).height,
+              state: view.root.querySelector('.pv-state-text').textContent,
+              open: view.root.querySelector('.pv-open').getAttribute('href'),
+              ident: view.root.querySelector('.br-id').textContent,
+              owner: view.root.querySelector('.br-owner-text').textContent,
+              barOverflow: bar.scrollWidth > bar.clientWidth + 1,
+              paneOverflow: view.root.scrollWidth > view.root.clientWidth + 1};
+        })()""" % json.dumps(tab_id)
+        for width, height, mobile in ((1440, 900, False), (390, 844, True)):
+            await instance.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
+                "deviceScaleFactor": 2 if mobile else 1, "mobile": mobile}, session=page)
+            for theme in ("dark", "light"):
+                await evaluate(instance, "applyTheme(%s); true" % json.dumps(theme))
+                await until(instance, "state.views[%s].root.querySelector('.pv-state-text').textContent "
+                                      "=== 'Live'" % json.dumps(tab_id))
+                g = await evaluate(instance, measure)
+                label = (width, theme)
+                assert "allow-scripts" in g["sandbox"] and "allow-same-origin" not in g["sandbox"], (label, g)
+                assert g["src"] == "/preview/0/%s/" % item["token"] and g["open"] == g["src"], (label, g)
+                assert g["fills"], ("the page fills the stage", label, g)
+                assert all(size == [g["toolbar"], g["toolbar"]] for size in g["buttons"]), (label, g)
+                assert g["where"] == str(Path(found["real_root"])) + "/", (label, g)
+                assert g["whereHeight"] == g["toolbar"], (label, g)
+                assert g["ident"] == item["id"] and g["owner"], (label, g)
+                assert not g["barOverflow"] and not g["paneOverflow"], (label, g)
+                if os.environ.get("PREVIEW_SHOT"):
+                    shot = await instance.call("Page.captureScreenshot", {"format": "png"}, session=page)
+                    Path(os.environ["PREVIEW_SHOT"], "preview-%d-%s.png" % (width, theme)).write_bytes(
+                        base64.b64decode(shot["data"]))
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=page)
+        await evaluate(instance, "applyTheme('dark'); true")
+        # real tab switches move the frame without reloading its page
+        kept = await evaluate(instance, "typeof Element.prototype.moveBefore === 'function'")
+        await click(session_tab)
+        await until(instance, "state.active === 's:0:%d'" % sid)
+        await click(tab)
+        await until(instance, "state.active === %s" % json.dumps(tab_id))
+        count = await evaluate(instance, "previewReports.length")
+        await evaluate(instance, "state.views[%s].frame.contentWindow.postMessage('who', '*'); true"
+                       % json.dumps(tab_id))
+        again = await report(count)
+        if kept:
+            assert again["born"] == first["born"], ("a tab switch never reloads the page", first, again)
+        else:
+            print("NOTE: this Chromium has no Element.moveBefore; a tab switch reloads a preview")
+        # the agent showing it again reloads it where it stands, without focus
+        await click(session_tab)
+        count = await evaluate(instance, "previewReports.length")
+        runner.hub(sid).preview_activity("", item["id"])
+        reloaded = await report(count)
+        assert reloaded["born"] != first["born"], "a second announcement reloads the page"
+        assert await evaluate(instance, "state.active") == "s:0:%d" % sid
+        # the answer's link opens it
+        await evaluate(instance, """(() => {
+            window.previewShot = document.createElement('div');
+            const node = demoView.buildEventNode({kind: 'assistant', seq: 1, ts: 1,
+              data: {text: 'The bracket viewer is [here](puppy-preview:%s).'}});
+            previewShot.appendChild(node); demoView.inner.appendChild(previewShot);
+            window.previewLink = previewShot.querySelector('a.md-preview'); return !!previewLink; })()"""
+            % item["id"])
+        await until(instance, "previewLink.getAttribute('href') === %s" % json.dumps(
+            "/preview/0/%s/" % item["token"]))
+        await click("previewLink")
+        await until(instance, "state.active === %s" % json.dumps(tab_id))
+        # a wrong token is a plain 404 from this Puppy
+        wrong = await evaluate(instance, """fetch('/preview/0/%s/', {credentials: 'omit'})
+            .then(async r => [r.status, await r.text(), r.headers.get('content-security-policy')])"""
+            % ("Z" * 32))
+        assert wrong[0] == 404 and wrong[1] == "Not found" and wrong[2].startswith("sandbox"), wrong
+        # Stop asks, then ends it on the node
+        await click("state.views[%s].root.querySelector('.pv-stop')" % json.dumps(tab_id))
+        await until(instance, "!!document.querySelector('.modal .btn-danger')")
+        assert await evaluate(instance, "document.querySelector('.modal h2').textContent") == \
+            "Stop Preview %s?" % item["id"]
+        await click("document.querySelector('.modal .btn-danger')")
+        await until(instance, "!!state.views[%s].root.querySelector('.pv-dead')" % json.dumps(tab_id))
+        assert previews.previews_of(sid) == [], "ended on the node"
+        assert await evaluate(instance, "state.views[%s].root.querySelector('.pv-dead "
+                                        ".term-dead-message').textContent" % json.dumps(tab_id)) == \
+            "Preview ended"
+        await until(instance, "previewLink.classList.contains('unavailable')")
+        await click("state.views[%s].root.querySelector('.pv-dead .btn')" % json.dumps(tab_id))
+        await until(instance, "!state.tabs.some(t => t.id === %s)" % json.dumps(tab_id))
+    finally:
+        await instance.call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900,
+            "deviceScaleFactor": 1, "mobile": False}, session=page)
+        await evaluate(instance, """(() => { if (window.previewShot) previewShot.remove();
+            delete window.previewShot; delete window.previewLink; delete window.previewReports;
+            if (state.tabs.some(t => t.id === %s)) closeTab(%s);
+            activateTab('s:0:%d'); return true; })()""" % (json.dumps(tab_id), json.dumps(tab_id), sid))
+        previews.forget(sid, item["id"])
+        shutil.rmtree(str(scratch), ignore_errors=True)
+    print("PASS: a preview opens beside its chat, runs its page sandboxed - its own files, never the "
+          "console's cookies, storage, document or API - fills its stage under the browser's bar on a "
+          "desktop and a phone in both themes, survives tab switches, reloads when shown again, opens "
+          "from its link and stops behind a confirm")
+
+
 async def shared_file_checks(instance):
     """A file an agent shared, in real layout on a desktop and a phone in both
     themes. The node holds a real share (shared_files.share) and the view
@@ -11990,6 +12187,9 @@ async def main(args):
             if args.shared_files_only:
                 await shared_file_checks(instances[0])
                 return
+            if args.previews_only:
+                await preview_checks(instances[0], sid)
+                return
             if args.operations_only:
                 await operation_progress_checks(instances[0])
                 await operation_cancellation_checks(instances[0])
@@ -12032,6 +12232,7 @@ async def main(args):
             await image_original_checks(instances[0], sid)
             await tool_image_checks(instances[0])
             await shared_file_checks(instances[0])
+            await preview_checks(instances[0], sid)
             await avif_attachment_checks(instances[0])
             await composer_resize_checks(instances[0])
             await task_tools_checks(instances[0])
@@ -12090,6 +12291,7 @@ if __name__ == "__main__":
     parser.add_argument("--image-viewer-only", action="store_true")
     parser.add_argument("--image-original-only", action="store_true")
     parser.add_argument("--shared-files-only", action="store_true")
+    parser.add_argument("--previews-only", action="store_true")
     parser.add_argument("--operations-only", action="store_true")
     parser.add_argument("--session-request-only", action="store_true")
     parser.add_argument("--schedules-only", action="store_true")

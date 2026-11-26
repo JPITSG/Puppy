@@ -31,8 +31,11 @@ SETUP_CODE_ENV = "PUPPY_SETUP_CODE"
 SETUP_CODE_MIN_CHARS = 16
 SETUP_CODE_MAX_CHARS = 128
 
+# /preview/ answers its own: a preview's files carry their secret token
+# instead of the cookie, which a sandboxed page's requests never send (previews)
 PUBLIC_PREFIXES = ("/api/settings/bind/verify/",
-                   "/api/settings/bind/handoff/")
+                   "/api/settings/bind/handoff/",
+                   "/preview/")
 PUBLIC_PATHS = {"/", "/favicon.ico", "/api/auth/status", "/api/auth/login", "/api/auth/setup",
                 "/static/auth.css", "/static/auth.js"}
 

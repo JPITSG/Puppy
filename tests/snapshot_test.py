@@ -25,7 +25,7 @@ TEST_ROOT = private_root("snapshot-")
 os.environ["PUPPY_DATA"] = str(TEST_ROOT / "data")
 
 from puppy import (auth, backup_schedule, cli_releases, config, db, listener_handoff, notices, notify,
-                   schedules, spelling,
+                   previews, schedules, spelling, system_prompts,
                    runner as session_runner, snapshots, terminal, timeouts, token_usage, uploads,
                    web_tls, workspace_sync,
                    workspaces)  # noqa: E402
@@ -348,6 +348,13 @@ async def main() -> None:
         spelling.sent(["frobz"])
         saved_spelling = json.loads(db.query_one(
             "SELECT value FROM meta WHERE key=?", (spelling.META_KEY,))["value"])
+        # A session's previews and the preview policy are records of the same
+        # database: they come back as they were, tokens and all.
+        previews.remember(linked_id, {"base": "temp", "root": "harbor-viewer", "entry": "",
+                                      "real_root": "/tmp/harbor-viewer", "folder": True},
+                          "Harbor viewer")
+        saved_previews = previews.previews_of(linked_id)
+        system_prompts._set_preview_prompt("Saved preview policy")
         saved_backups = backup_schedule._new_state()
         saved_backups["settings"].update(enabled=True, at="04:15", keep=12)
         saved_backups["next_at"] = backup_schedule.next_occurrence("04:15", time.time())
@@ -483,6 +490,28 @@ async def main() -> None:
             lambda: snapshots._validate_database(invalid_spelling_db),
             "spelling dictionary")
         invalid_spelling_db.unlink()
+        invalid_previews_db = TEST_ROOT / "invalid-previews.db"
+        db.backup_to(str(invalid_previews_db))
+        invalid_previews_connection = sqlite3.connect(str(invalid_previews_db))
+        invalid_previews_connection.execute(
+            "UPDATE meta SET value='{\"format\":1,\"items\":[]}' WHERE key=?",
+            (previews.PREFIX + str(linked_id),))
+        invalid_previews_connection.commit()
+        invalid_previews_connection.close()
+        expect_snapshot_error(
+            lambda: snapshots._validate_database(invalid_previews_db), "invalid previews")
+        invalid_previews_db.unlink()
+        invalid_guidance_db = TEST_ROOT / "invalid-preview-guidance.db"
+        db.backup_to(str(invalid_guidance_db))
+        invalid_guidance_connection = sqlite3.connect(str(invalid_guidance_db))
+        invalid_guidance_connection.execute(
+            "UPDATE meta SET value='{\"format\":2,\"text\":\"x\"}' WHERE key=?",
+            (system_prompts.PREVIEW_KEY,))
+        invalid_guidance_connection.commit()
+        invalid_guidance_connection.close()
+        expect_snapshot_error(
+            lambda: snapshots._validate_database(invalid_guidance_db), "preview guidance")
+        invalid_guidance_db.unlink()
         invalid_usage_db = TEST_ROOT / "invalid-usage.db"
         db.backup_to(str(invalid_usage_db))
         invalid_usage_connection = sqlite3.connect(str(invalid_usage_db))
@@ -732,6 +761,7 @@ async def main() -> None:
         db.execute("DELETE FROM meta WHERE key IN (?,?)", (
             "completion_log", "session_completion.{}".format(linked_id)))
         notices.record("mutated after export", "warn")
+        system_prompts._set_preview_prompt(config.DEFAULT_PREVIEW_SYSTEM_PROMPT)
         backup_schedule._save(backup_schedule._new_state())
         token_usage.store([["turn:{}:8".format(linked_id), 1790078400.0, linked_id, "turn",
                             "claude", "", 1, 1, 0, 0, 0]])
@@ -1042,6 +1072,8 @@ async def main() -> None:
         assert notices.payload()["items"] == saved_notices
         assert json.loads(db.query_one(
             "SELECT value FROM meta WHERE key=?", (spelling.META_KEY,))["value"]) == saved_spelling
+        assert previews.previews_of(linked_id) == saved_previews, "previews come back as recorded"
+        assert system_prompts.preview_prompt() == "Saved preview policy"
         assert usage_records() == saved_usage, "the ledger comes back as recorded, and only it"
         assert backup_schedule._load() == saved_backups, "the daily backup settings come back as recorded"
         restored_schedule = schedules._load("a1b2c3d4e5f6")

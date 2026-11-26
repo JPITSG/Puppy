@@ -900,6 +900,8 @@ def delete_session(session_id: int) -> None:
             conn.execute("DELETE FROM meta WHERE key=?", ("session_title." + str(session_id),))
             # and the mark a schedule's run carries (schedules.RUN_PREFIX)
             conn.execute("DELETE FROM meta WHERE key=?", ("session_schedule." + str(session_id),))
+            # and its previews (previews.PREFIX): their links end with it
+            conn.execute("DELETE FROM meta WHERE key=?", ("session_previews." + str(session_id),))
             conn.execute("DELETE FROM events WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM session_drafts WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
