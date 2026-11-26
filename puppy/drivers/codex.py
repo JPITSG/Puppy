@@ -840,6 +840,16 @@ class CodexDriver(Driver):
     uses_stdin_stream = True
     supports_steering = True
     steering_acknowledged = True
+    # Puppy sets each bridge's tool_timeout_sec itself: 70 s, or what a
+    # bridge whose calls block asks for as its descriptor's call_seconds.
+    mcp_call_limit = 70
+
+    def mcp_call_seconds(self, mcp: dict) -> int:
+        try:
+            asked = int(mcp.get("call_seconds") or 0)
+        except (TypeError, ValueError):
+            asked = 0
+        return max(int(self.mcp_call_limit), asked)
     dynamic_model_options = True
     supports_fast_mode = True
     release_source = {"kind": "npm", "package": "@openai/codex"}
@@ -1018,8 +1028,9 @@ class CodexDriver(Driver):
                          list(mcp.get("args") or []), separators=(",", ":")),
                      "-c", prefix + ".enabled=true",
                      "-c", prefix + ".startup_timeout_sec=10",
-                     "-c", prefix + ".tool_timeout_sec=70"]
-            for key, value in sorted((mcp.get("env") or {}).items()):
+                     "-c", prefix + ".tool_timeout_sec={}".format(
+                         self.mcp_call_seconds(mcp))]
+            for key, value in sorted(self.mcp_env(mcp).items()):
                 argv += ["-c", "{}.env.{}={}".format(
                     prefix, key, json.dumps(str(value)))]
         return argv

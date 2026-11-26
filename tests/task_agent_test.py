@@ -9,6 +9,7 @@ the persisted record and the stdio server. No engine, network or quota.
 """
 import asyncio
 import json
+import time
 import os
 from pathlib import Path
 import subprocess
@@ -498,6 +499,33 @@ async def bridge_main():
     db.touch_session(two, name="Feature two")
     page = json.loads(await call("read", task=str(one)))
     assert page["events"][-1]["text"] == "Feature one"
+    # one task to read, never the oldest of several; the turns view too
+    await rejected(call("read", task="all"), "name one task")
+    await rejected(call("read"), "name one task")
+    await rejected(call("changes", task="all"), "name one task")
+    turns = json.loads(await call("read", task=str(one), view="turns"))
+    assert turns["view"] == "turns" and turns["task"].startswith("#{} ".format(one)), turns
+    await rejected(call("read", task=str(one), view="pages"), "view is events or turns")
+    # a wait ends at once when the user steers Main, and within the engine's limit
+    assert (task_agent._wait_limit(355), task_agent._wait_limit(62), task_agent._wait_limit(10)) == \
+        (300, 20, 1)
+    hub = runner.hub(parent)
+    hub._steer_receipts["steer-t"] = {"generation": hub._turn_generation, "status": "sent"}
+    try:
+        began = time.monotonic()
+        steered = await call("wait", tasks=["#{}".format(two)], wait_s=10)
+        assert time.monotonic() - began < 1.5 and steered.startswith("Returned early"), steered
+        assert "Still pending" in steered
+    finally:
+        hub._steer_receipts.pop("steer-t", None)
+    began = time.monotonic()
+    cut = await task_agent._wait(parent, parent, "main", ["#{}".format(two)], "finished", 200,
+                                 budget=45)
+    assert 2.5 < time.monotonic() - began < 6 and "wait_s 200 is longer" in cut, cut
+    # a wait wakes for each published session list
+    change = runner.sessions_changed()
+    runner.broadcast_sessions()
+    assert change.done()
     await rejected(call("status"), "not a task tool in Main")
     # new_task: engine choices refused with the valid ones, then a task armed
     from puppy.drivers.base import Driver
@@ -536,6 +564,8 @@ async def bridge_main():
         folded = await asyncio.wait_for(waiting, 15)
     assert "Done (folded into Main)" in folded and "folded into Main and closed" in folded
     assert "line 7 by one\n" in (path / "a.txt").read_text()
+    # a folded task is named as such, with where its conversation went
+    await rejected(call("read", task="#{}".format(one)), "was folded into Main and closed")
     # remove refuses unapplied changes unless discarding them is asked for
     (Path(db.get_session(two)["cwd"]) / "b.txt").write_text("unapplied\n")
     finish(two)

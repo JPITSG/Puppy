@@ -62,13 +62,28 @@ DEFAULT_IDLE_TIMEOUT_S = 600
 DEFAULT_MAX_RUNTIME_S = 7200
 MIN_TIMEOUT_S = 0
 MAX_TIMEOUT_S = config.MAX_TIMEOUT_SECONDS
-WAIT_MAX_S = 30
+# The longest one wait (and one long-poll of a job route) blocks. An agent
+# asks once instead of forty times: a wait returns as soon as an agent it
+# names has an answer the turn has not had (until "any"), when the user
+# steers the turn, or when the engine's own limit on one tool call nears
+# (the bridge's budget, spawn_agent).
+WAIT_MAX_S = 300
+# spawn's own look for a quick answer: enough to see a start fail.
+SPAWN_WAIT_S = 2
+# How often a wait looks for a steer the engine cannot read until it returns.
+STEER_POLL_S = 0.25
+# One long-poll of a relayed job; a node from before WAIT_MAX_S answers at 30.
+REMOTE_POLL_S = 60
+WAIT_UNTIL = ("any", "all")
 # One spawn call may fan out into parallel identical runs. The count cap keeps
 # a single directive from starting an unbounded process fleet; the running cap
 # is the node-wide backstop across calls, callers, and relayed remote work.
 MAX_SPAWN_COUNT = 12
-MAX_WAIT_JOBS = 16
 MAX_RUNNING_JOBS = 24
+MAX_WAIT_JOBS = MAX_RUNNING_JOBS
+# Lease renewals go out 16 ids at a time: what a node from before
+# MAX_WAIT_JOBS was 24 accepts in one request.
+RENEW_CHUNK = 16
 _JOB_ID_RE = re.compile(r"[a-f0-9]{8}")
 # Finished jobs stay readable for a while, then disappear with their output -
 # never while their owner still wants them for a reply (see _Manager._kept).
@@ -78,7 +93,10 @@ PURGE_AFTER_S = 1200
 # moment; this bounds the wait, inside the bridge's 55 s call deadline, and
 # what is left of that deadline is spent waiting for the new answer.
 REPLY_SETTLE_S = 25.0
-REPLY_BUDGET_S = 45.0
+# A bridge call without a budget (one from before budgets) had 55 s; the
+# reserve is what an answer takes once the waiting is over.
+DEFAULT_CALL_BUDGET_S = 55.0
+CALL_RESERVE_S = 15.0
 SWEEP_INTERVAL_S = 10
 # A turn's end reaps what it spawned before the session moves on; this bounds
 # how long that transition may wait on a wedged process or an unreachable
@@ -148,12 +166,19 @@ def _option_values(options) -> list:
             if isinstance(item, dict)]
 
 
-def _clamp_wait(value, default: int = 25) -> float:
+def _clamp_wait(value, default: int = 25, limit: float = WAIT_MAX_S) -> float:
     try:
         wait = int(value)
     except (TypeError, ValueError):
         wait = default
-    return float(min(max(wait, 0), WAIT_MAX_S))
+    return float(min(max(wait, 0), limit, WAIT_MAX_S))
+
+
+def _validated_until(value, default: str = "any") -> str:
+    until = str(value or default).strip().lower()
+    if until not in WAIT_UNTIL:
+        raise SpawnError("until must be any or all")
+    return until
 
 
 def _validated_count(value) -> int:
@@ -365,6 +390,10 @@ class SpawnJob:
         self.usage = {}
         self.denials = 0
         self.tool_calls = 0
+        self.last_tool = ""
+        # the round whose answer the owning turn has already been given, so
+        # a wait over several agents says so instead of repeating it
+        self.delivered_round = 0
         self.cancel_status = ""
         self.proc = None
         self.task = None
@@ -551,6 +580,7 @@ class SpawnJob:
             "last_progress_kind": self.last_progress_kind,
             "progress_seq": self.progress_seq,
             "denials": self.denials, "tool_calls": self.tool_calls,
+            "last_tool": self.last_tool,
             "round": self.round,
         }
         if self.running:
@@ -596,6 +626,7 @@ class SpawnJob:
         self.usage = {}
         self.denials = 0
         self.tool_calls = 0
+        self.last_tool = ""
         self.cancel_status = ""
         self.proc = None
         self.done.clear()
@@ -677,6 +708,7 @@ class SpawnJob:
             elif event_kind == "tool_use":
                 self._archive_candidate()
                 self.tool_calls += 1
+                self.last_tool = str(data.get("tool") or "")[:80]
             elif event_kind == "error":
                 self.error = str(data.get("text") or "")[:4000]
         elif kind == "result":
@@ -1222,8 +1254,8 @@ class _Manager:
             # that verdict changes; the lease outlasts the ping backoff
             return
         now = time.monotonic()
-        for start in range(0, len(ids), MAX_WAIT_JOBS):
-            chunk = ids[start:start + MAX_WAIT_JOBS]
+        for start in range(0, len(ids), RENEW_CHUNK):
+            chunk = ids[start:start + RENEW_CHUNK]
             try:
                 data = await _node_request(channel, "POST", "spawn/renew",
                                            body={"jobs": chunk},
@@ -1511,6 +1543,20 @@ def _shortened(text, answer_limit, job_id) -> str:
                                               job_id))
 
 
+def _work_text(job: dict) -> str:
+    """What a running agent has done so far, in words a wait can act on."""
+    calls = int(job.get("tool_calls") or 0)
+    if not calls:
+        return "no tool calls yet"
+    last = str(job.get("last_tool") or "")
+    return "{} tool call{}{}".format(calls, "" if calls == 1 else "s",
+                                     ", last " + last if last else "")
+
+
+def _answer_size(job: dict) -> int:
+    return len(str(job.get("answer") or job.get("error") or ""))
+
+
 def _limit_text(job: dict, name: str, remaining: str) -> str:
     value = job.get(name)
     if value is None:
@@ -1541,21 +1587,30 @@ def job_text(job: dict, node_name: str, answer_limit=None) -> str:
     elapsed = int(job.get("elapsed_s") or 0)
     if status == "running":
         lines.append(
-            "Status: running for {}s · last recognized progress {}s ago "
+            "Status: running for {}s · {} · last recognized progress {}s ago "
             "({}) · inactivity limit {} · hard runtime {} from start.".format(
-                elapsed, int(job.get("last_progress_age_s") or 0),
+                elapsed, _work_text(job), int(job.get("last_progress_age_s") or 0),
                 job.get("last_progress_kind") or "engine output",
                 _limit_text(job, "idle_timeout_s", "idle_remaining_s"),
                 _limit_text(job, "max_runtime_s", "hard_remaining_s")))
         if job.get("wait_note"):
             lines.append("Note: {}".format(job["wait_note"]))
         lines.append("The result is not ready yet. Call wait with jobs "
-                     "[\"{}\"] until it completes; update_limits may change "
-                     "either live limit when the user requests it, and cancel "
-                     "discards it. The job dies with this turn, so collect the "
-                     "result before finishing.".format(job.get("id")))
+                     "[\"{}\"]: it returns as soon as the agent finishes. "
+                     "update_limits may change either live limit when the user "
+                     "requests it, and cancel discards it. The job dies with "
+                     "this turn, so collect the result before finishing.".format(
+                         job.get("id")))
         return "\n".join(lines)
     detail = _format_usage(job)
+    if job.get("delivered_before"):
+        lines.append(
+            "Status: {} after {}s · its answer ({:,} characters) was already "
+            "returned earlier in this turn - call wait with jobs [\"{}\"] "
+            "alone to read it again.".format(
+                "completed" if status == "done" else status, elapsed,
+                _answer_size(job), job.get("id")))
+        return "\n".join(lines)
     if status == "done":
         lines.append("Status: completed in {}s{}".format(
             elapsed, " · " + detail if detail else ""))
@@ -1586,24 +1641,28 @@ def jobs_text(entries, answer_limit=None) -> str:
                if str(entry[0].get("status")) == "running"]
     finished = [entry for entry in entries
                 if str(entry[0].get("status")) != "running"]
-    lines = ["Spawned agents: {} of {} finished.".format(
-        len(finished), len(entries))]
+    fresh = [entry for entry in finished if not entry[0].get("delivered_before")]
+    lines = ["Spawned agents: {} of {} finished{}.".format(
+        len(finished), len(entries),
+        "" if len(fresh) == len(finished) else
+        " ({} with a new answer below)".format(len(fresh)))]
     if answer_limit is not None and finished:
         lines.append(
             "Answers were shortened to fit this response; call wait with a "
             "single job id to read that agent's full answer.")
     if running:
         lines.append(
-            "Still running: {} - keep calling wait with these job ids until "
-            "every agent finishes; they all die with this turn.".format(
+            "Still running: {} - call wait again with these job ids; they all "
+            "die with this turn.".format(
                 ", ".join(str(entry[0].get("id")) for entry in running)))
         for payload, node_name in running:
             if payload.get("idle_timeout_s") is not None and \
                     payload.get("max_runtime_s") is not None:
                 lines.append(
-                    "Agent {} on {}: progress {}s ago ({}) · inactivity {} "
-                    "· hard runtime {}.".format(
+                    "Agent {} on {}: running {}s · {} · progress {}s ago ({}) "
+                    "· inactivity {} · hard runtime {}.".format(
                         payload.get("id"), node_name,
+                        int(payload.get("elapsed_s") or 0), _work_text(payload),
                         int(payload.get("last_progress_age_s") or 0),
                         payload.get("last_progress_kind") or "engine output",
                         _limit_text(payload, "idle_timeout_s", "idle_remaining_s"),
@@ -1652,6 +1711,10 @@ def _register_remote(session: dict, turn_id: str, target: dict,
         # the turn without another round trip (a combined result that had to
         # be shortened is re-read one agent at a time)
         "final": None, "finished_at": 0.0,
+        # the last running report, for a wait that stopped watching it
+        "last": None,
+        # the round whose answer the turn has already been given
+        "delivered_round": 0,
     }
     manager().remote[str(job_id)] = handle
     manager().ensure_sweeper()
@@ -1717,7 +1780,7 @@ async def _refresh_remote(channel: dict, job: dict, wait_s: float,
         return job
     try:
         data = await _node_request(
-            channel, "GET", "spawn/{}?wait_s={}".format(job["id"], int(wait_s)),
+            channel, "GET", "spawn/{}?wait_s={}".format(job["id"], int(round(wait_s))),
             timeout_s=wait_s + 25.0 if timeout_s is None else timeout_s)
         fresh = data.get("job") if isinstance(data.get("job"), dict) else None
         return fresh if fresh and fresh.get("id") else job
@@ -1822,7 +1885,8 @@ async def _start_remote_fleet(session: dict, turn_id: str, target: dict,
     return jobs
 
 
-async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
+async def start_for_turn(session: dict, turn_id: str, params: dict,
+                         budget_s=None) -> dict:
     target = resolve_target(params.get("node"))
     count = _validated_count(params.get("count"))
     if "timeout_s" in params:
@@ -1841,19 +1905,28 @@ async def start_for_turn(session: dict, turn_id: str, params: dict) -> dict:
     for name in ("idle_timeout_s", "max_runtime_s"):
         if name in params:
             body[name] = _validated_seconds(params[name], name)
-    initial_wait = _clamp_wait(params.get("wait_s"), default=15)
+    limit = _wait_limit(budget_s)
+    initial_wait = _clamp_wait(params.get("wait_s"), default=SPAWN_WAIT_S,
+                               limit=limit)
     if target["bid"]:
         channel = _spawn_channel(target["bid"])
         _check_timeout_capability(channel, body)
         jobs = await _start_remote_fleet(session, turn_id, target, channel,
                                          body, count, initial_wait)
-        return _rendered([(job, target["name"]) for job in jobs])
+        for job in jobs:
+            handle = manager().remote.get(str(job.get("id") or ""))
+            if handle is not None and str(job.get("status")) != "running":
+                handle["delivered_round"] = _round_of(job)
+        return _rendered([(job, target["name"]) for job in jobs],
+                         note=_cut_note(params.get("wait_s"), limit))
     request = await prepare_request(body)
     manager().ensure_capacity(count)
     owner = ("turn", int(session["id"]), str(turn_id))
     jobs = [manager().start_job(request, owner) for _ in range(count)]
-    await asyncio.gather(*(manager().wait(job, initial_wait) for job in jobs))
-    return _rendered([(job.payload(), target["name"]) for job in jobs])
+    results, reason = await _collect(session, [("local", job.id, job) for job in jobs],
+                                     initial_wait, "all")
+    return _rendered(results, note=_wait_note(
+        _cut_note(params.get("wait_s"), limit), reason))
 
 
 def _turn_job(session: dict, turn_id: str, job_id: str):
@@ -1915,14 +1988,190 @@ async def _settle_entry(kind: str, job_id: str, ref, wait_s: float,
     return (job, ref["node"])
 
 
-async def wait_for_turn(session: dict, turn_id: str, params: dict) -> dict:
+def _local_state(job: SpawnJob) -> dict:
+    """A local job's report, a reply still waiting for the previous round's
+    process to end counting as the round it begins: the previous answer is
+    not the one a wait after a reply is for."""
+    payload = job.payload()
+    if not job.replying or job.running:
+        return payload
+    for key in ("answer", "error", "usage", "replyable", "stop_reason"):
+        payload.pop(key, None)
+    payload.update(status="running", round=job.round + 1, elapsed_s=0,
+                   last_progress_age_s=0, last_progress_kind="reply sent",
+                   tool_calls=0, last_tool="")
+    return payload
+
+
+def _entry_state(kind: str, job_id: str, ref, base=None) -> tuple:
+    """What is known of one of the turn's agents now, without asking."""
+    if kind == "local":
+        return (_local_state(ref), _local_node_name())
+    if ref.get("final") is not None:
+        return (ref["final"], ref["node"])
+    known = base or ref.get("last") or {
+        "id": job_id, "status": "running", "round": ref.get("round") or 1}
+    return (dict(known), ref["node"])
+
+
+def _finished(payload: dict) -> bool:
+    return str(payload.get("status") or "running") != "running"
+
+
+def _delivered(kind: str, ref) -> int:
+    return int(ref.delivered_round if kind == "local" else
+               ref.get("delivered_round") or 0)
+
+
+async def _watch_entry(kind: str, job_id: str, ref, deadline: float,
+                       alone: bool, latest: dict) -> None:
+    """Observe one agent until it has an answer or ``deadline`` passes,
+    keeping ``latest[job_id]`` current for a wait that stops watching it
+    early. A relayed agent is long-polled a minute at a time; a node that
+    cannot say ends the watch with its note rather than being asked again
+    and again."""
+    loop = asyncio.get_event_loop()
+    if kind == "local":
+        await manager().wait(ref, max(0.0, deadline - loop.time()))
+        latest[job_id] = (_local_state(ref), _local_node_name())
+        return
+    first = True
+    while ref.get("final") is None:
+        remaining = deadline - loop.time()
+        if remaining <= 0 and not first:
+            return
+        poll = max(0.0, min(remaining, REMOTE_POLL_S))
+        payload, node = await _settle_entry(
+            "remote", job_id, ref, poll, alone, base=latest[job_id][0],
+            timeout_s=poll + 25.0)
+        latest[job_id] = (payload, node)
+        first = False
+        if _finished(payload):
+            return
+        ref["last"] = payload
+        if payload.get("wait_note"):
+            return
+    latest[job_id] = (ref["final"], ref["node"])
+
+
+async def _steered(hub) -> None:
+    """Returns once the user has steered the turn: the engine reads a steer
+    only when the tool call it is blocked in returns."""
+    while not hub._steers_pending():
+        await asyncio.sleep(STEER_POLL_S)
+
+
+async def _collect(session: dict, entries: list, wait_s: float, until: str,
+                   bases=None) -> tuple:
+    """Observe the turn's agents for up to ``wait_s``. ``any`` ends the wait
+    once one of them has an answer the turn has not been given (or every one
+    has finished), ``all`` once every one has; either ends it when the user
+    steers the turn. Answers the entries' latest reports in order - a
+    finished one whose answer this turn already received marked
+    ``delivered_before`` when the wait named others too - and "steer" when
+    that cut the wait short."""
+    from puppy import runner
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + max(0.0, wait_s)
+    bases = bases or {}
+    alone = len(entries) == 1
+    latest = {job_id: _entry_state(kind, job_id, ref, bases.get(job_id))
+              for kind, job_id, ref in entries}
+
+    def satisfied() -> bool:
+        if all(_finished(latest[job_id][0]) for _, job_id, _ in entries):
+            return True
+        return until == "any" and any(
+            _finished(latest[job_id][0]) and
+            _delivered(kind, ref) < _round_of(latest[job_id][0])
+            for kind, job_id, ref in entries)
+
+    watchers = [asyncio.ensure_future(_watch_entry(
+        kind, job_id, ref, deadline, alone, latest))
+        for kind, job_id, ref in entries]
+    steer = asyncio.ensure_future(_steered(runner.hub(int(session["id"]))))
+    reason = ""
+    try:
+        if wait_s <= 0:
+            # one fresh look at each, the relayed ones included
+            await asyncio.gather(*watchers)
+        pending = {task for task in watchers if not task.done()}
+        while pending and not satisfied():
+            timeout = deadline - loop.time()
+            if timeout <= 0:
+                break
+            done, pending = await asyncio.wait(
+                pending | {steer}, timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED)
+            pending.discard(steer)
+            for task in done:
+                if task is not steer and task.exception() is not None:
+                    raise task.exception()
+            if steer in done:
+                reason = "steer"
+                break
+            if not done:
+                break
+    finally:
+        for task in watchers + [steer]:
+            task.cancel()
+        await asyncio.gather(*watchers, steer, return_exceptions=True)
+    results = []
+    for kind, job_id, ref in entries:
+        payload, node = latest[job_id]
+        payload = dict(payload)
+        if _finished(payload):
+            seen, current = _delivered(kind, ref), _round_of(payload)
+            if seen >= current and not alone:
+                payload["delivered_before"] = True
+            if kind == "local":
+                ref.delivered_round = max(seen, current)
+            else:
+                ref["delivered_round"] = max(seen, current)
+        results.append((payload, node))
+    return results, reason
+
+
+def _wait_limit(budget_s) -> float:
+    """How long a wait may block inside a bridge call of ``budget_s``: what
+    the engine allows one tool call, less what the answer itself takes."""
+    try:
+        budget = float(budget_s) if budget_s is not None else DEFAULT_CALL_BUDGET_S
+    except (TypeError, ValueError):
+        budget = DEFAULT_CALL_BUDGET_S
+    return float(max(0.0, min(WAIT_MAX_S, budget - CALL_RESERVE_S)))
+
+
+def _cut_note(asked, limit: float) -> str:
+    try:
+        asked = int(asked)
+    except (TypeError, ValueError):
+        return ""
+    if asked <= limit:
+        return ""
+    return ("wait_s {} is longer than this engine lets one tool call last, so "
+            "this call waited at most {} s - call wait again to keep "
+            "waiting.".format(asked, int(limit)))
+
+
+def _wait_note(note: str, reason: str) -> str:
+    if reason == "steer":
+        steer = ("Returned early: the user has sent you a message - read it "
+                 "before waiting again. The agents keep working.")
+        return steer + ("\n" + note if note else "")
+    return note
+
+
+async def wait_for_turn(session: dict, turn_id: str, params: dict,
+                        budget_s=None) -> dict:
     entries = _turn_entries(session, turn_id,
                             _validated_job_ids(params))
-    wait_s = _clamp_wait(params.get("wait_s"))
-    results = await asyncio.gather(
-        *(_settle_entry(kind, job_id, ref, wait_s, len(entries) == 1)
-          for kind, job_id, ref in entries))
-    return _rendered(list(results))
+    until = _validated_until(params.get("until"))
+    limit = _wait_limit(budget_s)
+    wait_s = _clamp_wait(params.get("wait_s"), default=int(limit), limit=limit)
+    results, reason = await _collect(session, entries, wait_s, until)
+    return _rendered(results, note=_wait_note(
+        _cut_note(params.get("wait_s"), limit), reason))
 
 
 def _reply_channel(bid: int) -> dict:
@@ -1944,7 +2193,7 @@ async def _reply_remote(channel: dict, job_id: str, handle: dict,
     previous_round = int(handle.get("round") or 1)
     previous_finished = handle.get("finished_at") or 0.0
     expected = max(previous_round, _round_of(previous)) + 1
-    handle.update(final=None, finished_at=0.0, round=expected)
+    handle.update(final=None, finished_at=0.0, round=expected, last=None)
     try:
         data = await _node_request(
             channel, "POST", "spawn/{}/reply".format(job_id),
@@ -1973,14 +2222,17 @@ async def _reply_remote(channel: dict, job_id: str, handle: dict,
     return job
 
 
-async def reply_for_turn(session: dict, turn_id: str, params: dict) -> dict:
+async def reply_for_turn(session: dict, turn_id: str, params: dict,
+                         budget_s=None) -> dict:
     """Continue finished agents' conversations: each agent named gets the
     message as the next round of its own conversation, and the new answers
     are collected like wait's for what is left of the bridge call."""
     started = time.monotonic()
     message = _validated_message(params.get("message"))
     entries = _turn_entries(session, turn_id, _validated_job_ids(params))
-    wait_s = _clamp_wait(params.get("wait_s"))
+    until = _validated_until(params.get("until"))
+    limit = _wait_limit(budget_s)
+    wait_s = _clamp_wait(params.get("wait_s"), default=int(limit), limit=limit)
     # what this node can know already refuses the call before any agent is
     # sent anything
     channels = {}
@@ -2018,12 +2270,14 @@ async def reply_for_turn(session: dict, turn_id: str, params: dict) -> dict:
         raise SpawnError("\n".join(failures), 409)
     sent = [(entry, base) for entry, (failure, base) in zip(entries, outcomes)
             if not failure]
-    wait = min(wait_s, max(0.0, REPLY_BUDGET_S - (time.monotonic() - started)))
-    results = await asyncio.gather(
-        *(_settle_entry(kind, job_id, ref, wait, len(sent) == 1, base=base,
-                        timeout_s=wait + 8.0)
-          for (kind, job_id, ref), base in sent))
-    return _rendered(list(results), note="\n".join(failures))
+    wait = min(wait_s, max(0.0, limit - (time.monotonic() - started)))
+    results, reason = await _collect(
+        session, [entry for entry, _base in sent], wait, until,
+        bases={entry[1]: base for entry, base in sent if base})
+    note = "\n".join(part for part in (
+        "\n".join(failures), _wait_note(_cut_note(params.get("wait_s"), limit),
+                                        reason)) if part)
+    return _rendered(results, note=note)
 
 
 async def update_limits_for_turn(session: dict, turn_id: str,

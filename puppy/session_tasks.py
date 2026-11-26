@@ -15,6 +15,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import posixpath
 import re
 import shutil
 import stat
@@ -994,6 +995,155 @@ def _copy_project(root, destination, committed=False):
     return base
 
 
+SNAPSHOT_HEAD = "refs/puppy/snapshot/head"
+
+
+def _snapshot_paths(root, paths):
+    """The paths a working-file copy of Main would take, held to the rules
+    `_copy_project` enforces as it copies: inside the project with no
+    symlinked folder on the way, relative symlinks that stay in it, regular
+    files within COPY_BYTES, and nothing special. A path that is gone or is a
+    folder now is left out, as the copy leaves it."""
+    from puppy.workspace_sync import _RootWalker, validate_relpath
+    walker = _RootWalker(root)
+    total = 0
+    selected = []
+    for rel in paths:
+        operations.checkpoint()
+        validate_relpath(rel)
+        if rel.split("/")[0] == ".git":
+            raise TaskError("Invalid project path")
+        try:
+            fd, leaf = walker.open_parent(rel)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        try:
+            try:
+                info = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                link = os.readlink(leaf, dir_fd=fd)
+                found = None if os.path.isabs(link) else \
+                    places.nearby(os.path.join(root, os.path.dirname(rel), link), root)
+                if found is None or os.path.commonpath([root, found[0]]) != root:
+                    raise TaskError("Task copies require relative symlinks within the project: " + rel)
+            elif stat.S_ISREG(info.st_mode):
+                total += info.st_size
+                if total > COPY_BYTES:
+                    raise TaskError("Project working files exceed the 512 MiB task-copy limit")
+            else:
+                raise TaskError("Project contains a special file: " + rel)
+            selected.append(rel)
+        finally:
+            os.close(fd)
+    return selected
+
+
+def _tree_bounds(cwd, commit):
+    """A commit's own files held to the copy's bounds and symlink rule, read
+    from its tree, as `_checkout_size` reads a clone's checkout of it."""
+    if not commit:
+        return 0
+    files = total = 0
+    links = []
+    for entry in _git(cwd, "ls-tree", "-r", "-l", "-z", commit, timeout=120).split(b"\0"):
+        if not entry:
+            continue
+        meta, _, path = entry.partition(b"\t")
+        mode, kind, oid, size = meta.split()
+        if kind != b"blob":
+            continue
+        files += 1
+        if mode == b"120000":
+            links.append((os.fsdecode(path), oid))
+        else:
+            total += int(size)
+        if files > COPY_FILES:
+            raise TaskError("Project has too many files for a task copy")
+        if total > COPY_BYTES:
+            raise TaskError("Project working files exceed the 512 MiB task-copy limit")
+    if links:
+        batch = _git(cwd, "cat-file", "--batch", data=b"".join(oid + b"\n" for _, oid in links),
+                     timeout=120)
+        position = 0
+        for path, _oid in links:
+            head_end = batch.index(b"\n", position)
+            size = int(batch[position:head_end].split()[2])
+            target = os.fsdecode(batch[head_end + 1:head_end + 1 + size])
+            position = head_end + 1 + size + 1
+            landing = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
+            if posixpath.isabs(target) or landing == ".." or landing.startswith("../"):
+                raise TaskError("Task copies require relative symlinks within the project: " + path)
+    return total
+
+
+def _snapshot_into(root, cwd, ref=None, committed=False):
+    """Main's files as one commit in a task's own repository - the commit
+    `_copy_project` makes from a clone of Main given those files: its
+    working files as they stand, or with ``committed`` its last commit,
+    plus the notes either way. Built without the clone, which spent nearly
+    all of its time packing Main's whole history: only the commits the task
+    lacks are fetched, and the files go through a private index straight
+    into the task's own object store. Main's working tree, index and refs are
+    only read. Answers the commit, also under ``ref`` when one is named."""
+    stage = _git(root, "ls-files", "--stage", "-z")
+    if any(entry.startswith(b"160000 ") for entry in stage.split(b"\0")):
+        raise TaskError("Submodules need to be handled in their own session")
+    task_git = os.fsdecode(_git(cwd, "rev-parse", "--absolute-git-dir").strip())
+    index = os.path.join(task_git, "puppy-snapshot-index")
+    env = {"GIT_INDEX_FILE": index}
+    head = ""
+    try:
+        if os.path.lexists(index):
+            os.unlink(index)
+        if _git_run(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}").returncode == 0:
+            operations.report("Reading Main's new commits")
+            _git(cwd, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+                 "--no-recurse-submodules", "--", root, "+HEAD:" + SNAPSHOT_HEAD, timeout=120)
+            head = _git(cwd, "rev-parse", SNAPSHOT_HEAD + "^{commit}").decode().strip()
+        if committed:
+            if head:
+                _git(cwd, "read-tree", head, env=env, timeout=120)
+            _tree_bounds(cwd, head)
+            # A note the commit holds is already there; an ignored one is not.
+            paths = [name for name in NOTES if os.path.lexists(os.path.join(root, name)) and
+                     not (head and _git(cwd, "ls-tree", "--name-only", head, "--", name).strip())]
+        else:
+            tracked = _git(root, "ls-files", "-z", "--cached", "--others",
+                           "--exclude-standard").split(b"\0")
+            paths = list(dict.fromkeys(os.fsdecode(path) for path in tracked if path))
+            # Project conventions remain available even when the notes are gitignored.
+            for name in NOTES:
+                if os.path.lexists(os.path.join(root, name)) and name not in paths:
+                    paths.append(name)
+            if len(paths) > COPY_FILES:
+                raise TaskError("Project has too many files for a task copy")
+        selected = _snapshot_paths(root, paths)
+        if selected:
+            operations.report("Recording Main's working files", "{:,} files".format(len(selected)))
+            # Main's files hashed from where they stand into the task's store;
+            # update-index consults no ignore rules, as the copy's add --force
+            _git(root, "--git-dir=" + task_git, "--work-tree=" + root, "update-index",
+                 "--add", "-z", "--stdin", env=env, timeout=600,
+                 data=b"".join(os.fsencode(path) + b"\0" for path in selected))
+        tree = _git(cwd, "write-tree", env=env).decode().strip()
+        commit = _git(cwd, "commit-tree", tree, *(("-p", head) if head else ()),
+                      "-m", "Task starting point").decode().strip()
+        if ref:
+            _git(cwd, "update-ref", ref, commit)
+        return commit
+    finally:
+        try:
+            os.unlink(index)
+        except FileNotFoundError:
+            pass
+        if head:
+            _git_run(cwd, "update-ref", "-d", SNAPSHOT_HEAD)
+
+
 def _changes(session, value):
     """The task's delta since its base, computed without touching its index.
 
@@ -1039,17 +1189,11 @@ def _resolution_snapshot(root, task, value, tree, token):
     task's working files/index nor Main's index is changed by preparation.
     """
     refs = "refs/puppy/resolve/" + token
-    path = workspaces.create_temporary()
-    try:
-        main = _copy_project(root, path)
-        _git(task["cwd"], "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-             "--no-recurse-submodules", "--", path, "+refs/puppy/base:" + refs + "/main", timeout=120)
-        _git(task["cwd"], "update-ref", "--stdin", data=(
-            "start\nupdate {0}/base {1}\nupdate {0}/task {2}\nprepare\ncommit\n".format(
-                refs, value["base"], tree)).encode())
-        return main, refs
-    finally:
-        workspaces.discard_created(path)
+    main = _snapshot_into(root, task["cwd"], refs + "/main")
+    _git(task["cwd"], "update-ref", "--stdin", data=(
+        "start\nupdate {0}/base {1}\nupdate {0}/task {2}\nprepare\ncommit\n".format(
+            refs, value["base"], tree)).encode())
+    return main, refs
 
 
 def _review_idle(hub, action="reviewing"):
@@ -1101,16 +1245,9 @@ def _refresh_clean(task, value):
 
 
 def _refresh_snapshot(root, task):
-    path = workspaces.create_temporary()
-    try:
-        main = _copy_project(root, path)
-        # Import independent objects without changing the task's refs or
-        # FETCH_HEAD. Preparation is disposable and remains cancellable.
-        _git(task["cwd"], "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-             "--no-recurse-submodules", "--", path, "refs/puppy/base", timeout=120)
-        return main
-    finally:
-        workspaces.discard_created(path)
+    # Independent objects in the task's own store, without changing its refs
+    # or FETCH_HEAD. Preparation is disposable and remains cancellable.
+    return _snapshot_into(root, task["cwd"])
 
 
 def _save_refresh(sid, value, files, count):
@@ -1305,14 +1442,7 @@ async def _resolve_conflicts(root, task, value, tree, token, conflict):
 def _sync_snapshot(root, task, committed=False):
     """Main's files - its working files, or with ``committed`` its last
     commit - pinned inside the task's own repository as SYNC_REFS/main."""
-    path = workspaces.create_temporary()
-    try:
-        main = _copy_project(root, path, committed)
-        _git(task["cwd"], "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-             "--no-recurse-submodules", "--", path, "+refs/puppy/base:" + SYNC_REFS + "/main", timeout=120)
-        return main
-    finally:
-        workspaces.discard_created(path)
+    return _snapshot_into(root, task["cwd"], SYNC_REFS + "/main", committed)
 
 
 def _merge_trees(task, base, tree, main):

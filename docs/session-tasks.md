@@ -295,13 +295,21 @@ create a task (`new_task`, engine, model and effort refused with the valid
 values rather than replaced), send a task a message, stop it, refresh it from
 Main, set it to apply when done, or remove it (folded by default; a task with
 changes not applied to Main is refused unless the user wants them discarded).
-`wait` blocks for at most 20 seconds per call until the named tasks are
-finished, applied, or folded into Main and closed, and returns early for a
-task that needs someone - an approval, held messages, a stopped turn, or a
-task that will never fold because it is not set to apply when done. A task is
-named by its number (`#12`), its exact name, or a mention; `all` names every
-task. Main's own turn reads Main's files for `new_task` and `refresh` while it
-waits on them.
+`wait` blocks for up to five minutes per call - less where the engine
+allows a tool call less: Puppy tells Codex how long the task bridge's calls
+may last, OpenCode's minute is kept going by progress notifications, and
+Claude Code sets no such limit - until the named tasks are finished,
+applied, or folded into Main and closed. It wakes for every change Puppy
+publishes to the session list, returns early for a task that needs someone
+- an approval, held messages, a stopped turn, or a task that will never fold
+because it is not set to apply when done - and returns at once when the user
+steers the waiting turn, which the engine reads only once the call is over.
+A task is named by its number (`#12`), its exact name, or a mention; `all`
+names every task, though `read` and `changes` take one task, and a task
+folded into Main is named as such, with the event of Main's history that
+holds its conversation. `read` takes `view: "turns"` for one row per prompt
+with that turn's final answer. Main's own turn reads Main's files for
+`new_task` and `refresh` while it waits on them.
 
 In a task, the agent sees its own changes, whether they would apply to Main
 and any conflicts still unresolved (`status`), merges Main's current files
@@ -374,6 +382,14 @@ review uses the supplied Main snapshot as its baseline; preparation leaves the
 task's working files and index intact for its agent to reconcile. These refs and
 their independent Git objects are included in full backups. The switch is a
 per-request choice and is not persisted.
+Main's files reach a task's repository as one commit, built in place
+(`_snapshot_into`): Main's last commit is fetched - only what the copy lacks
+travels - and its working files (or with a busy Main its last commit) go
+through a private index straight into the copy's own object store, held to
+the same rules as the copy a creation makes (relative symlinks within the
+project, no special files, the file and size limits). Main's files, index
+and refs are only read. A sync, a refresh and a conflict resolution all use
+it; only a creation clones Main.
 A merge of Main into a task (a conflict round, or the task's own `sync_main`)
 keeps its inputs at `refs/puppy/sync/{base,task,main}` inside that copy, moves
 `refs/puppy/base` and the record's `base` to the Main snapshot, and appends an

@@ -104,6 +104,13 @@ elif mode == "noise":
         out({"t": "status", "text": "Thinking..."})
 elif mode == "hang":
     time.sleep(600)
+elif mode in ("quick", "slow"):
+    time.sleep(0.3 if mode == "quick" else 2.5)
+    out({"t": "a", "text": mode + " answer"})
+    out({"t": "result", "ok": True})
+elif mode == "busy":
+    out({"t": "tool", "tool": "Bash"})
+    time.sleep(600)
 '''
 
 
@@ -169,6 +176,9 @@ class FakeDriver(Driver):
         if kind == "status":
             return [{"a": "transient", "msg": {
                 "type": "status", "text": ev["text"]}}]
+        if kind == "tool":
+            return [{"a": "event", "kind": "tool_use", "data": {
+                "tool": ev["tool"], "input": {}, "tool_use_id": "t1"}}]
         if kind == "result":
             return [{"a": "result", "data": {
                 "ok": ev["ok"], "usage": ev.get("usage"),
@@ -1212,6 +1222,105 @@ async def test_relay_start(cwd):
     print("relayed start tracking, lost jobs, and fleet compensation ok")
 
 
+async def test_waits(cwd):
+    """One wait instead of forty: it returns once an agent has an answer the
+    turn has not had (or every one has), when the user steers the turn, or
+    when the engine's limit on one tool call nears - and says each answer
+    once."""
+    sid = db.create_session("wait test", "fake", cwd, "", "", "blue",
+                            "standard")
+    hub = runner.hub(sid)
+    hub.status = "running"
+    hub._active_turn_id = "turn-w"
+    session = db.get_session(sid)
+    clock = time.monotonic
+
+    def ids_of(prompt):
+        return [job.id for job in spawn_exec.manager().jobs.values()
+                if job.owner == ("turn", sid, "turn-w") and job.prompt == prompt]
+
+    # spawn looks for a quick answer only briefly, then hands over the ids
+    began = clock()
+    quick = await spawn_exec.start_for_turn(
+        session, "turn-w", {"prompt": "fast", "model": "quick"})
+    assert clock() - began < 1.8 and "quick answer" in quick["text"], quick
+    began = clock()
+    slow = await spawn_exec.start_for_turn(
+        session, "turn-w", {"prompt": "long", "model": "slow"})
+    assert 1.8 <= clock() - began < 2.4, clock() - began
+    assert "Status: running" in slow["text"] and "no tool calls yet" in slow["text"], slow
+    pair = ids_of("fast") + ids_of("long")
+
+    # the answer spawn already gave is not given again beside another's
+    began = clock()
+    waited = await spawn_exec.wait_for_turn(session, "turn-w", {"jobs": pair}, 315)
+    assert 0.2 < clock() - began < 3.5, clock() - began
+    assert "2 of 2 finished (1 with a new answer below)." in waited["text"], waited
+    assert "slow answer" in waited["text"] and "quick answer" not in waited["text"]
+    assert "was already returned earlier in this turn" in waited["text"]
+    # one id alone always reads its whole answer again
+    alone = await spawn_exec.wait_for_turn(session, "turn-w", {"jobs": pair[:1]}, 315)
+    assert "quick answer" in alone["text"] and "already returned" not in alone["text"]
+
+    # until any: the first new answer ends the wait; until all: the last
+    await spawn_exec.start_for_turn(session, "turn-w", {"prompt": "a1", "model": "quick", "wait_s": 0})
+    await spawn_exec.start_for_turn(session, "turn-w", {"prompt": "a2", "model": "slow", "wait_s": 0})
+    both = ids_of("a1") + ids_of("a2")
+    began = clock()
+    first = await spawn_exec.wait_for_turn(session, "turn-w", {"jobs": both}, 315)
+    assert clock() - began < 1.6, clock() - began
+    assert "1 of 2 finished." in first["text"] and "quick answer" in first["text"], first
+    assert "Still running: {}".format(both[1]) in first["text"], first
+    rest = await spawn_exec.wait_for_turn(session, "turn-w", {"jobs": both}, 315)
+    assert "2 of 2 finished (1 with a new answer below)." in rest["text"], rest
+    await spawn_exec.start_for_turn(session, "turn-w", {"prompt": "b1", "model": "quick", "wait_s": 0})
+    await spawn_exec.start_for_turn(session, "turn-w", {"prompt": "b2", "model": "slow", "wait_s": 0})
+    began = clock()
+    everyone = await spawn_exec.wait_for_turn(
+        session, "turn-w", {"jobs": ids_of("b1") + ids_of("b2"), "until": "all"}, 315)
+    assert clock() - began > 1.5 and "2 of 2 finished." in everyone["text"], everyone
+    assert everyone["text"].count("answer") >= 2 and "with a new answer" not in everyone["text"]
+    try:
+        await spawn_exec.wait_for_turn(session, "turn-w", {"jobs": both, "until": "most"}, 315)
+    except spawn_exec.SpawnError as exc:
+        assert "until must be any or all" in str(exc), exc
+    else:
+        raise AssertionError("an unknown until was accepted")
+
+    # a running agent says what it is doing; a steer ends the wait at once
+    await spawn_exec.start_for_turn(session, "turn-w", {"prompt": "work", "model": "busy", "wait_s": 0})
+    busy = ids_of("work")
+    await until(lambda: spawn_exec.manager().get(busy[0]).tool_calls == 1)
+    hub._steer_receipts["steer-1"] = {"generation": hub._turn_generation, "status": "sent"}
+    try:
+        began = clock()
+        steered = await spawn_exec.wait_for_turn(session, "turn-w", {"jobs": busy}, 315)
+        assert clock() - began < 1.0, clock() - began
+        assert steered["text"].startswith("Returned early: the user has sent you a message"), steered
+        assert "1 tool call, last Bash" in steered["text"], steered
+    finally:
+        hub._steer_receipts.pop("steer-1", None)
+
+    # the engine's limit on one call bounds the wait, and says so
+    began = clock()
+    cut = await spawn_exec.wait_for_turn(session, "turn-w", {"jobs": busy, "wait_s": 120}, 17)
+    assert 1.8 < clock() - began < 3.0, clock() - began
+    assert "wait_s 120 is longer than this engine lets one tool call last" in cut["text"], cut
+    assert spawn_exec._wait_limit(None) == 40 and spawn_exec._wait_limit(315) == 300
+    await spawn_exec.cancel_for_turn(session, "turn-w", {"jobs": busy})
+    hub.status = "idle"
+    hub._active_turn_id = ""
+    print("  waits ok")
+
+
+async def until(predicate, seconds=10.0):
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.05)
+
+
 async def test_replies(cwd):
     """A finished agent's own conversation continues only when its turn
     replies: the engine resumes it with every earlier message, each round is
@@ -1392,7 +1501,8 @@ async def test_replies(cwd):
             assert len(pair) == 2
             both = await spawn_exec.reply_for_turn(
                 session, "turn-c", {"jobs": [item.id for item in pair],
-                                    "message": "Explain it.", "wait_s": 20})
+                                    "message": "Explain it.", "wait_s": 20,
+                                    "until": "all"})
             assert "2 of 2 finished." in both["text"], both
             assert both["text"].count(
                 "round 2: Pick a number. | Explain it.") == 2, both
@@ -1685,6 +1795,115 @@ async def test_upgrade_gate(cwd):
     finally:
         mgr.jobs.pop(settled.id, None)
     print("upgrade launch gate and teardown blocker ok")
+
+
+def test_bridge_budgets():
+    """How long one bridge call may block, by what the engine allows one tool
+    call, and the progress that keeps a client's per-call timer going."""
+    import socket
+    import threading
+    from puppy import bridge_calls
+    saved = {key: os.environ.pop(key, None)
+             for key in ("PUPPY_MCP_CALL_LIMIT", "PUPPY_MCP_PROGRESS_RESETS")}
+    try:
+        # no word from the driver: the shortest limit any engine has
+        assert bridge_calls.call_budget(315) == 50
+        for limit, resets, token, expected in (
+                ("0", "0", None, 315),        # Claude Code: no limit to fit
+                ("330", "0", 1, 315),         # Codex, told 330 for this bridge
+                ("70", "0", 1, 60),           # Codex for any other bridge
+                ("60", "1", 7, 315),          # OpenCode, kept alive by progress
+                ("60", "1", None, 50),        # ... that asked for none
+                ("12", "0", None, 5),         # never below the shortest call
+                ("soon", "0", None, 50)):
+            os.environ["PUPPY_MCP_CALL_LIMIT"] = limit
+            os.environ["PUPPY_MCP_PROGRESS_RESETS"] = resets
+            assert bridge_calls.call_budget(315, token) == expected, (limit, resets, token)
+    finally:
+        for key, value in saved.items():
+            os.environ.pop(key, None)
+            if value is not None:
+                os.environ[key] = value
+    assert bridge_calls.progress_token({"_meta": {"progressToken": 4}}) == 4
+    assert bridge_calls.progress_token({"_meta": {"progressToken": "a"}}) == "a"
+    for params in ({}, {"_meta": {}}, {"_meta": {"progressToken": True}},
+                   {"_meta": {"progressToken": {"x": 1}}}, None):
+        assert bridge_calls.progress_token(params) is None, params
+    # the node takes the child's word, within bounds; a child from before
+    # budgets keeps the 55 s every call had
+    assert spawn_agent._budget({}) == 55.0 and spawn_agent._budget(None) == 55.0
+    assert spawn_agent._budget({"budget_s": 9999}) == spawn_agent.LONGEST_CALL
+    assert spawn_agent._budget({"budget_s": 1}) == 5.0
+    assert spawn_agent._budget({"budget_s": "nan"}) == 55.0
+
+    # a slow answer: progress every PROGRESS_EVERY to a client that asked
+    path = os.path.join(TEST_ROOT, "budget.sock")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(path)
+    listener.listen(4)
+
+    def serve(delay, answer):
+        connection, _ = listener.accept()
+        connection.recv(65536)
+        time.sleep(delay)
+        try:
+            connection.sendall(answer)
+        except OSError:
+            pass                    # the client gave up first
+        connection.close()
+
+    every = bridge_calls.PROGRESS_EVERY
+    bridge_calls.PROGRESS_EVERY = 0.1
+    try:
+        sent = []
+        thread = threading.Thread(target=serve, args=(0.55, b'{"ok":true}\n'))
+        thread.start()
+        answer = bridge_calls.exchange(path, b"{}\n", 5, 1024, token="tok",
+                                       write=sent.append, label="waiting")
+        thread.join()
+        assert answer == b'{"ok":true}\n', answer
+        assert len(sent) >= 3, sent
+        assert [item["params"]["progress"] for item in sent] == list(range(1, len(sent) + 1))
+        assert all(item["method"] == "notifications/progress" and
+                   item["params"]["progressToken"] == "tok" and
+                   item["params"]["message"] == "waiting" for item in sent), sent
+        # no token, no progress
+        sent.clear()
+        thread = threading.Thread(target=serve, args=(0.3, b'{"ok":true}\n'))
+        thread.start()
+        bridge_calls.exchange(path, b"{}\n", 5, 1024, write=sent.append)
+        thread.join()
+        assert sent == []
+        # out of time, and too large
+        thread = threading.Thread(target=serve, args=(1.4, b'{"ok":true}\n'))
+        thread.start()
+        try:
+            bridge_calls.exchange(path, b"{}\n", 0.3, 1024)   # at least a second
+        except socket.timeout:
+            pass
+        else:
+            raise AssertionError("a call outlived its budget")
+        thread.join()
+        thread = threading.Thread(target=serve, args=(0, b"x" * 5000))
+        thread.start()
+        try:
+            bridge_calls.exchange(path, b"{}\n", 5, 1024)
+        except bridge_calls.BridgeResponseTooLarge:
+            pass
+        else:
+            raise AssertionError("an oversized answer was read")
+        thread.join()
+    finally:
+        bridge_calls.PROGRESS_EVERY = every
+        listener.close()
+        os.unlink(path)
+    assert spawn_agent.turn_mcp(1, "t") is None
+    spawn_agent._server = object()
+    try:
+        assert spawn_agent.turn_mcp(1, "t")["call_seconds"] == spawn_agent.CALL_SECONDS
+    finally:
+        spawn_agent._server = None
+    print("  bridge budgets and progress ok")
 
 
 def test_bridge_sizing():
@@ -2099,11 +2318,13 @@ async def main():
         await test_validation(cwd)
         await test_turn_dispatch(cwd)
         await test_parallel(cwd)
+        await test_waits(cwd)
         await test_turn_end_reaping(cwd)
         await test_relay_start(cwd)
         await test_replies(cwd)
         await test_relay_replies(cwd)
         await test_upgrade_gate(cwd)
+        test_bridge_budgets()
         test_bridge_sizing()
         await test_http_routes(cwd)
         await test_reply_routes(cwd)

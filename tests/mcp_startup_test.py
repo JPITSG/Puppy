@@ -101,6 +101,21 @@ opencode_servers = {server["name"]: dict(
     server, env={item["name"]: item["value"] for item in server["env"]})
     for server in opencode}
 
+# what each engine allows one tool call, in every bridge's environment: the
+# waits of the spawn and task bridges size themselves by it (bridge_calls)
+long_waits = {"spawn": spawn_agent.CALL_SECONDS, "task": task_agent.CALL_SECONDS}
+for kind, module in bridges.items():
+    name = module.SERVER_NAME
+    assert claude_servers[name]["env"]["PUPPY_MCP_CALL_LIMIT"] == "0", kind
+    assert claude_servers[name]["env"]["PUPPY_MCP_PROGRESS_RESETS"] == "0", kind
+    assert codex_servers[name]["tool_timeout_sec"] == long_waits.get(kind, 70), kind
+    assert codex_servers[name]["env"]["PUPPY_MCP_CALL_LIMIT"] == \
+        str(long_waits.get(kind, 70)), kind
+    assert opencode_servers[name]["env"]["PUPPY_MCP_CALL_LIMIT"] == "60", kind
+    assert opencode_servers[name]["env"]["PUPPY_MCP_PROGRESS_RESETS"] == "1", kind
+assert spawn_agent.CALL_SECONDS >= spawn_agent.LONGEST_CALL + 10
+assert task_agent.CALL_SECONDS >= task_agent.LONGEST_CALL + 10
+
 config_bytes = (node_data / "config.json").read_bytes()
 wire = "\n".join(json.dumps(message) for message in (
     {"jsonrpc": "2.0", "id": 1, "method": "initialize",

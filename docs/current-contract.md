@@ -180,6 +180,12 @@ still contain a value written before that release.
   for the previous run's process to exit is answered with the round that reply
   begins. Replying is optional; nothing changes for a controller that never
   replies, and a node without the capability is never sent one.
+- A job route's `wait_s` (`GET /api/spawn/{job_id}?wait_s=`, a start's or a
+  reply's) is honoured up to 300 seconds, where it was 30; a controller
+  long-polls a relayed job at most a minute at a time, so a node that still
+  answers at 30 is simply asked again. Running payloads add `last_tool`, the
+  name of the job's latest tool call, beside `tool_calls`. No new capability,
+  persisted shape or protocol version.
 - Upgrade readiness and backend availability come from their current owners;
   missing fields are not inferred from session lists or browser polls.
 - The console requires shared drafts, upload IDs, engine defaults, complete

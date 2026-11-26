@@ -383,6 +383,12 @@ class OpenCodeDriver(Driver):
     key = "opencode"
     label = "OpenCode"
     binary = "opencode"
+    # 1.19.6 calls an MCP tool through the MCP SDK's client with no timeout
+    # of its own set (the SDK's 60 s), resetTimeoutOnProgress and a progress
+    # handler. Probed: a 90 s call ends at 60 s with "MCP error -32001:
+    # Request timed out", and answers when it sends progress every 15 s.
+    mcp_call_limit = 60
+    mcp_progress_resets = True
     # The official curl installer uses this when no custom/XDG/HOME-bin target
     # wins, then updates interactive shell files. A service manager does not
     # source those files, so check the documented installation directly too.
@@ -538,8 +544,7 @@ class OpenCodeDriver(Driver):
         return {"OPENCODE_CONFIG_CONTENT": json.dumps(
             inline, ensure_ascii=False, separators=(",", ":"))}
 
-    @staticmethod
-    def _mcp_servers(browser_mcp, terminal_mcp=None, vnc_mcp=None,
+    def _mcp_servers(self, browser_mcp, terminal_mcp=None, vnc_mcp=None,
                      spawn_mcp=None, session_mcp=None, task_mcp=None,
                      files_mcp=None) -> list:
         servers = []
@@ -547,7 +552,7 @@ class OpenCodeDriver(Driver):
                                       spawn_mcp, session_mcp, task_mcp, files_mcp)
                     if item):
             environment = []
-            for name, value in (mcp.get("env") or {}).items():
+            for name, value in self.mcp_env(mcp).items():
                 environment.append({"name": str(name), "value": str(value)})
             servers.append({
                 "name": mcp["name"], "command": mcp["command"],

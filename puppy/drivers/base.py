@@ -688,6 +688,24 @@ class Driver:
     # "args": ["update"]}. The vendor updater owns install-method detection;
     # cli_upgrade owns the bounded subprocess. Never build this from input.
     upgrade_source = None
+    # What this engine allows one MCP tool call: its own per-call limit in
+    # seconds (0 for one too long to matter), and whether an MCP progress
+    # notification restarts that limit. Puppy's bridges whose calls block -
+    # spawned-agent and task waits - size each call by it (bridge_calls).
+    mcp_call_limit = 60
+    mcp_progress_resets = False
+
+    def mcp_call_seconds(self, mcp: dict) -> int:
+        """The per-call limit this engine puts on one Puppy bridge."""
+        return int(self.mcp_call_limit)
+
+    def mcp_env(self, mcp: dict) -> dict:
+        """A Puppy bridge's environment as this engine launches it: its own,
+        plus what the engine allows one of its tool calls."""
+        env = dict(mcp.get("env") or {})
+        env["PUPPY_MCP_CALL_LIMIT"] = str(int(self.mcp_call_seconds(mcp)))
+        env["PUPPY_MCP_PROGRESS_RESETS"] = "1" if self.mcp_progress_resets else "0"
+        return env
 
     def tool_options(self):
         """Session tools this engine's headless protocol can run, as

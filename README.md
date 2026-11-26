@@ -990,7 +990,10 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   id however the engine spells it (`fable[1m]`, `provider/model:free`); the
   agent takes the task from your surrounding request. A
   session hosted on a backend spawns on that backend only. The spawning turn
-  waits for the answers and acts on them. An answer is normally the whole
+  waits for the answers and acts on them: a wait returns as soon as one of
+  the agents has an answer the turn has not seen, or as soon as you steer
+  the turn, gives each answer once, and blocks up to five minutes a call
+  where the engine allows a tool call that long. An answer is normally the whole
   exchange, but the agent may reply to a finished spawned agent to continue
   that agent's own conversation - a point to clarify, a claim to challenge -
   rather than spawn a fresh one; replying is the agent's option, never

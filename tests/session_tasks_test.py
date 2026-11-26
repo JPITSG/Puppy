@@ -1015,9 +1015,122 @@ def auto_titles():
     assert not cut('a' * 47 + ' b').endswith(' \u2026')
 
 
+def _old_snapshot(root, cwd, committed=False):
+    """The snapshot as Puppy made it before v1.0.654: a clone of Main given
+    its files, fetched into the task's repository."""
+    path = tasks.workspaces.create_temporary()
+    try:
+        main = tasks._copy_project(str(root), path, committed)
+        tasks._git(cwd, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+                   "--", path, "+refs/puppy/base:refs/puppy/old-snapshot")
+        return main
+    finally:
+        tasks.workspaces.discard_created(path)
+
+
+def snapshot_in_place():
+    """Main's files as one commit in a task's repository, built without the
+    clone: the very tree the clone and copy made, in both modes, Main left as
+    it was, nothing left behind, and the copy's refusals kept."""
+    import shutil
+    main = ROOT / 'snap-main'
+    shutil.rmtree(main, ignore_errors=True)
+    main.mkdir()
+    git = lambda *args: tasks._git(str(main), *args)  # noqa: E731
+    git('init', '--quiet')
+    (main / '.gitignore').write_text('ignored/\nAGENTS.md\n*.log\n')
+    (main / 'kept.txt').write_text('kept\n')
+    (main / 'changed.txt').write_text('before\n')
+    (main / 'staged.txt').write_text('before\n')
+    (main / 'gone.txt').write_text('soon gone\n')
+    (main / 'sub').mkdir()
+    (main / 'sub' / 'deep.txt').write_text('deep\n')
+    (main / 'run.sh').write_text('#!/bin/sh\necho hi\n')
+    os.chmod(main / 'run.sh', 0o755)
+    os.symlink('sub/deep.txt', main / 'link')
+    git('add', '-A')
+    git('commit', '-qm', 'Initial')
+    task = ROOT / 'snap-task'
+    shutil.rmtree(task, ignore_errors=True)
+    tasks._git(str(ROOT), 'clone', '--quiet', '--no-local', str(main), str(task))
+    git('commit', '--allow-empty', '-qm', 'Main moved on')
+    (main / 'changed.txt').write_text('after\n')
+    (main / 'staged.txt').write_text('staged\n')
+    git('add', 'staged.txt')
+    (main / 'staged.txt').write_text('staged then edited\n')
+    os.unlink(main / 'gone.txt')
+    (main / 'new.txt').write_text('untracked\n')
+    (main / 'noise.log').write_text('ignored\n')
+    (main / 'ignored').mkdir()
+    (main / 'ignored' / 'secret').write_text('never copied\n')
+    (main / 'AGENTS.md').write_text('ignored notes travel\n')
+    (main / 'forced.txt').write_text('force-added\n')
+    (main / '.gitignore').write_text('ignored/\nAGENTS.md\n*.log\nforced.txt\n')
+    git('add', '--force', 'forced.txt')
+    status = git('status', '--porcelain', '-z')
+    index = (main / '.git' / 'index').read_bytes()
+    refs = git('for-each-ref')
+    cwd = str(task)
+    for committed in (False, True):
+        new = tasks._snapshot_into(str(main), cwd, 'refs/puppy/new-snapshot', committed)
+        old = _old_snapshot(main, cwd, committed)
+        tree = lambda ref: tasks._git(cwd, 'rev-parse', ref + '^{tree}').strip()  # noqa: E731
+        assert tree(new) == tree(old), (committed, tasks._git(cwd, 'diff', '--stat', old, new))
+        assert tasks._git(cwd, 'rev-parse', 'refs/puppy/new-snapshot').strip().decode() == new
+        assert tasks._git(cwd, 'rev-parse', new + '^').strip() == \
+            tasks._git(cwd, 'rev-parse', old + '^').strip(), "both stand on Main's last commit"
+        listed = tasks._git(cwd, 'ls-tree', '-r', '--name-only', new).decode().split()
+        assert 'AGENTS.md' in listed and 'ignored/secret' not in listed and 'noise.log' not in listed
+        assert ('new.txt' in listed) is (not committed) and ('gone.txt' in listed) is committed
+        assert ('forced.txt' in listed) is (not committed)
+        assert tasks._git(cwd, 'show', new + ':link').decode() == 'sub/deep.txt'
+        assert b'100755 blob' in tasks._git(cwd, 'ls-tree', new, 'run.sh')
+    # Main exactly as it was; nothing of the build left in the task's repository
+    assert git('status', '--porcelain', '-z') == status
+    assert (main / '.git' / 'index').read_bytes() == index and git('for-each-ref') == refs
+    task_git = tasks._git(cwd, 'rev-parse', '--absolute-git-dir').decode().strip()
+    assert not os.path.exists(os.path.join(task_git, 'puppy-snapshot-index'))
+    assert not tasks._git(cwd, 'for-each-ref', 'refs/puppy/snapshot')
+    assert tasks._refresh_snapshot(str(main), {"cwd": cwd})   # no ref of its own
+    # the copy's refusals stand (git lists no untracked special file, so a
+    # special file is one a tracked path has become)
+    def tracked_fifo():
+        (main / 'fifo').write_text('was a file\n')
+        git('add', 'fifo')
+        os.unlink(main / 'fifo')
+        os.mkfifo(main / 'fifo')
+    for name, make, needle in (
+            ('outside', lambda: os.symlink('../elsewhere', main / 'outside'), 'relative symlinks'),
+            ('absolute', lambda: os.symlink('/etc/hosts', main / 'absolute'), 'relative symlinks'),
+            ('fifo', tracked_fifo, 'special file')):
+        make()
+        try:
+            tasks._snapshot_into(str(main), cwd)
+        except tasks.TaskError as exc:
+            assert needle in str(exc), (name, exc)
+        else:
+            raise AssertionError('a snapshot took ' + name)
+        os.unlink(main / name)
+    # an unborn Main is a root commit holding its files
+    empty = ROOT / 'snap-empty'
+    shutil.rmtree(empty, ignore_errors=True)
+    empty.mkdir()
+    tasks._git(str(empty), 'init', '--quiet')
+    (empty / 'first.txt').write_text('first\n')
+    root_commit = tasks._snapshot_into(str(empty), cwd)
+    assert tasks._git(cwd, 'ls-tree', '--name-only', root_commit).decode().split() == ['first.txt']
+    assert tasks._git_run(cwd, 'rev-parse', '--verify', '--quiet', root_commit + '^').returncode != 0
+    shutil.rmtree(main, ignore_errors=True)
+    shutil.rmtree(task, ignore_errors=True)
+    shutil.rmtree(empty, ignore_errors=True)
+    print('PASS: Main snapshotted in place equals the clone-and-copy snapshot in both modes, '
+          'leaves Main and the task repository as they were, and keeps the copy\'s refusals')
+
+
 async def main():
     config.ensure_dirs()
     auto_titles()
+    snapshot_in_place()
     await conflict_resolution()
     await creation_progress()
     await busy_main_creation()

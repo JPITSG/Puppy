@@ -27,7 +27,7 @@ import struct
 import sys
 import time
 
-from puppy import config, system_prompts
+from puppy import bridge_calls, config, system_prompts
 
 log = logging.getLogger("puppy.tasks.agent")
 
@@ -38,10 +38,20 @@ SOCKET_NAME = "agent.sock"
 MAX_REQUEST = 2 * 1024 * 1024
 MAX_RESPONSE = 1024 * 1024
 # wait blocks for at most WAIT_MAX seconds, and its return may be held for
-# an apply into Main that began while it waited (session_tasks.HOLD_LIMIT):
-# together inside an engine's 70 s MCP tool timeout.
-WAIT_MAX = 20
-REQUEST_TIMEOUT = 62.0
+# an apply into Main that began while it waited (session_tasks.HOLD_LIMIT 40):
+# one call is up to LONGEST_CALL, less where the engine bounds a tool call
+# more tightly (bridge_calls) - Codex is told CALL_SECONDS for this bridge.
+# A request without a budget keeps the 62 s every call once had.
+WAIT_MAX = 300
+LONGEST_CALL = 355.0
+CALL_SECONDS = 370
+DEFAULT_BUDGET = 62.0
+SHORTEST_BUDGET = 5.0
+HOLD_RESERVE = 42.0
+# A wait wakes for every change the session list publishes, and looks again
+# this often anyway for the ones that publish nothing.
+WAIT_LOOK_EVERY = 2.0
+STEER_POLL = 0.25
 DIFF_PAGE = 60000
 FOLDED_LISTED = 10
 ROLES = ("main", "task")
@@ -145,8 +155,10 @@ _UNTIL = {"type": "string", "enum": ["finished", "applied", "folded"],
           "default": "finished",
           "description": ("finished: no longer working; applied: its changes are "
                           "in Main; folded: applied, folded into Main and closed.")}
-_WAIT_S = {"type": "integer", "minimum": 1, "maximum": WAIT_MAX, "default": WAIT_MAX,
-           "description": "How long this call may block; call wait again while tasks are pending."}
+_WAIT_S = {"type": "integer", "minimum": 1, "maximum": WAIT_MAX,
+           "description": ("Longest this call may block (default: as long as the engine "
+                           "allows one tool call, up to {} s); call wait again while tasks "
+                           "are pending.").format(WAIT_MAX)}
 _PAGE = {
     "after_seq": {"type": "integer", "minimum": 0},
     "before_seq": {"type": "integer", "minimum": 1},
@@ -161,11 +173,16 @@ _LIST = _tool(
 _READ = _tool(
     "read", "Read one task's conversation: the newest page by default, paged "
     "with after_seq/before_seq. For a cut-off event use limit=1, after_seq=seq-1 "
-    "and its next_offset.", dict(_PAGE, task=_TASK), required=["task"], read_only=True)
+    "and its next_offset. view turns pages through it oldest first, one row per "
+    "prompt with that turn's final answer.",
+    dict(_PAGE, task=_TASK, view={"type": "string", "enum": ["events", "turns"],
+                                  "default": "events"}),
+    required=["task"], read_only=True)
 _WAIT = _tool(
     "wait", "Wait until tasks have finished, had their changes applied to Main, "
     "or been folded into Main and closed. Returns each task's phase; call it "
-    "again while any is pending. Returns early when a task needs the user.",
+    "again while any is pending. Returns early when a task needs the user or "
+    "the user steers you.",
     {"tasks": _TASKS, "until": _UNTIL, "wait_s": _WAIT_S}, read_only=True)
 
 MAIN_TOOLS = [
@@ -309,6 +326,8 @@ def turn_mcp(session_id: int, turn_id: str, role: str = "main"):
         "command": sys.executable,
         "args": ["-m", "puppy.task_agent"],
         "engine_guidance": system_prompts.tasks_prompt(),
+        # waits block for minutes: the engine's own tool-call limit for it
+        "call_seconds": CALL_SECONDS,
         # Claude Code's allow list: these only look, so its auto mode runs
         # them without first asking its safety check (drivers/claude.py)
         "read_only_tools": [tool["name"] for tool in TOOLS[role]
@@ -412,6 +431,28 @@ def _known(rows) -> str:
     return " Its tasks: " + shown + (", ..." if len(rows) > 20 else "") + "."
 
 
+def _missing(main_id, sid, rows) -> str:
+    """Why a task number names no open task here: folded, or never one."""
+    from puppy import session_tasks
+    for item in session_tasks.folded(main_id, 64):
+        if item.get("task_id") == sid:
+            return ("Task #{} was folded into Main and closed {}: its condensed "
+                    "conversation is event {} of Main's own history.".format(
+                        sid, _ago(item.get("folded_at")), item.get("seq")))
+    return "No task #{} in this session.{}".format(sid, _known(rows))
+
+
+def _one(main_id, ref, exclude=0):
+    """The one task a read or a look at changes is about."""
+    if ref is None or (isinstance(ref, list) and len(ref) != 1):
+        raise TaskAgentError("name one task, by number (#12) or exact name")
+    found = _resolve(main_id, ref, exclude)
+    if len(found) != 1:
+        raise TaskAgentError("name one task, by number (#12) or exact name - "
+                             "\"all\" is several")
+    return found[0]
+
+
 def _resolve(main_id, refs, exclude=0):
     """Task numbers for refs: numbers, exact names, @Task mentions or all."""
     rows = [row for row in _rows(main_id) if row[0] != exclude]
@@ -438,7 +479,7 @@ def _resolve(main_id, refs, exclude=0):
             if sid == exclude:
                 raise TaskAgentError("#{} is this task itself".format(sid))
             if sid not in ids:
-                raise TaskAgentError("No task #{} in this session.{}".format(sid, _known(rows)))
+                raise TaskAgentError(_missing(main_id, sid, rows))
             out.append(sid)
             continue
         named = [sid for sid, session, _ in rows if _flat(session["name"]).lower() == text.lower()]
@@ -577,24 +618,52 @@ def _wait_state(main_id, sid, until):
     return False, False, line
 
 
-async def _wait(main_id, caller, role, refs, until, wait_s, exclude=0):
-    from puppy import session_tasks
+def _wait_limit(budget) -> int:
+    """How long a wait may block inside a call of ``budget`` seconds: its
+    return may still be held for an apply (session_tasks.HOLD_LIMIT)."""
+    return int(max(1, min(WAIT_MAX, float(budget) - HOLD_RESERVE)))
+
+
+async def _steered(hub) -> None:
+    while not hub._steers_pending():
+        await asyncio.sleep(STEER_POLL)
+
+
+async def _wait(main_id, caller, role, refs, until, wait_s, exclude=0, budget=DEFAULT_BUDGET):
+    from puppy import runner, session_tasks
     if until not in ("finished", "applied", "folded"):
         raise TaskAgentError("until must be finished, applied or folded")
+    limit = _wait_limit(budget)
+    asked = wait_s
     try:
-        wait_s = max(1, min(WAIT_MAX, int(wait_s)))
+        wait_s = max(1, min(limit, int(limit if wait_s is None else wait_s)))
     except (TypeError, ValueError):
         raise TaskAgentError("wait_s must be a whole number of seconds")
     sids = _resolve(main_id, refs, exclude)
     loop = asyncio.get_event_loop()
     deadline = loop.time() + wait_s
+    steered = []
 
     async def poll():
-        while True:
-            states = [_wait_state(main_id, sid, until) for sid in sids]
-            if all(settled or blocked for settled, blocked, _ in states) or loop.time() >= deadline:
-                return
-            await asyncio.sleep(0.5)
+        steer = asyncio.ensure_future(_steered(runner.hub(caller)))
+        try:
+            while True:
+                states = [_wait_state(main_id, sid, until) for sid in sids]
+                if all(settled or blocked for settled, blocked, _ in states) or \
+                        loop.time() >= deadline:
+                    return
+                if steer.done():
+                    steered.append(True)
+                    return
+                # woken by any change the session list publishes; a look
+                # every WAIT_LOOK_EVERY catches one that publishes nothing
+                change = runner.sessions_changed()
+                await asyncio.wait({change, steer}, timeout=min(
+                    WAIT_LOOK_EVERY, max(0.0, deadline - loop.time())),
+                    return_when=asyncio.FIRST_COMPLETED)
+                change.cancel()
+        finally:
+            steer.cancel()
 
     if role == "main":
         # Main's engine is blocked on this call: while it waits, Puppy may
@@ -620,6 +689,16 @@ async def _wait(main_id, caller, role, refs, until, wait_s, exclude=0):
         out.extend("- " + line for line in pending)
     if not pending and not blocked:
         out.append("Every named task is {}.".format(word))
+    if steered and pending:
+        out.insert(0, "Returned early: the user has sent you a message - read it "
+                      "before waiting again. The tasks keep working.")
+    try:
+        cut = asked is not None and int(asked) > limit
+    except (TypeError, ValueError):
+        cut = False
+    if cut and pending and not steered:
+        out.append("(wait_s {} is longer than this engine lets one tool call last; "
+                   "this call waited {} s.)".format(int(asked), limit))
     return "\n".join(out)
 
 
@@ -900,18 +979,40 @@ def _excerpt_lines(text, limit):
                                        if len(lines) > limit else "")
 
 
-def _read(main_id, sid, params):
-    from puppy import db, session_links
-    args = {key: params[key] for key in ("after_seq", "before_seq", "offset", "limit") if key in params}
+async def _read(main_id, sid, params):
+    """One page of a task's conversation, read off the event loop through the
+    same lane as every agent's conversation reads (session_links)."""
+    from puppy import db, session_links, workers
+    args = {key: params[key] for key in ("after_seq", "before_seq", "offset", "limit")
+            if key in params}
+    view = params.get("view", "events")
+    if view not in ("events", "turns"):
+        raise TaskAgentError("view is events or turns")
+    reader = session_links._turns if view == "turns" else session_links._events
     try:
-        page = session_links._events(sid, args)
+        page = await session_links._reads.run(workers.history, reader, sid, args,
+                                              wait=session_links.READS_WAIT)
+    except workers.Busy:
+        raise TaskAgentError("too many reads are waiting here; try again in a moment")
     except session_links.SessionLinkError as exc:
         raise TaskAgentError(str(exc))
     page["task"] = _label(sid, db.get_session(sid))
     return json.dumps(page, ensure_ascii=False)
 
 
+def _budget(request) -> float:
+    """What the stdio child said this call may take (its engine's limit)."""
+    try:
+        budget = float((request or {}).get("budget_s"))
+    except (TypeError, ValueError, AttributeError):
+        return DEFAULT_BUDGET
+    if budget != budget:
+        return DEFAULT_BUDGET
+    return min(LONGEST_CALL, max(SHORTEST_BUDGET, budget))
+
+
 async def _dispatch(request: dict) -> dict:
+    budget = _budget(request)
     try:
         session_id = int(request.get("session_id"))
     except (TypeError, ValueError):
@@ -943,12 +1044,12 @@ async def _dispatch(request: dict) -> dict:
         if method == "tasks":
             return {"text": "\n".join(_task_lines(main_id, session_id if own else 0))}
         if method == "read":
-            return {"text": _read(main_id, _resolve(main_id, params.get("task"))[0], params)}
+            return {"text": await _read(main_id, _one(main_id, params.get("task")), params)}
         if method == "wait":
             return {"text": await _wait(main_id, session_id, role, params.get("tasks"),
                                         params.get("until", "finished"),
-                                        params.get("wait_s", WAIT_MAX),
-                                        exclude=session_id if own else 0)}
+                                        params.get("wait_s"),
+                                        exclude=session_id if own else 0, budget=budget)}
         if method == "status":
             look = await session_tasks.changes(main_id, session_id)
             text = _changes_text(session_id, look, own=True, with_diff=False)
@@ -963,7 +1064,7 @@ async def _dispatch(request: dict) -> dict:
             return {"text": await _apply_when_done(
                 main_id, _resolve(main_id, params.get("tasks")), enabled)}
         if method == "changes":
-            sid = _resolve(main_id, params.get("task"))[0]
+            sid = _one(main_id, params.get("task"))
             look = await session_tasks.changes(main_id, sid)
             return {"text": _changes_text(sid, look, offset=params.get("offset", 0),
                                           limit=params.get("limit", DIFF_PAGE))}
@@ -1027,7 +1128,7 @@ async def _handle_connection(reader, writer) -> None:
         request = json.loads(raw.decode("utf-8"))
         if not isinstance(request, dict):
             raise TaskAgentError("invalid task agent request")
-        result = await asyncio.wait_for(_dispatch(request), timeout=REQUEST_TIMEOUT)
+        result = await asyncio.wait_for(_dispatch(request), timeout=_budget(request))
         response = {"ok": True, "result": result}
     except TaskAgentError as exc:
         response = {"ok": False, "error": str(exc)}
@@ -1051,35 +1152,27 @@ async def _handle_connection(reader, writer) -> None:
 
 # ---- stdio MCP subprocess ----
 
-def _bridge_call(method: str, params: dict) -> dict:
+def _bridge_call(method: str, params: dict, token=None) -> dict:
     path = os.environ.get("PUPPY_TASKS_SOCKET", "")
     session_id = os.environ.get("PUPPY_TASKS_SESSION_ID", "")
     turn_id = os.environ.get("PUPPY_TASKS_TURN_ID", "")
     if not path or not session_id or not turn_id:
         raise TaskAgentError("Puppy task bridge environment is incomplete")
+    budget = bridge_calls.call_budget(LONGEST_CALL, token)
     request = _encode({
         "session_id": session_id, "turn_id": turn_id,
-        "method": method, "params": params,
+        "method": method, "params": params, "budget_s": budget,
     })
     if len(request) > MAX_REQUEST:
         raise TaskAgentError("task tool request is too large")
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(REQUEST_TIMEOUT + 4.0)
     try:
-        client.connect(path)
-        client.sendall(request)
-        chunks = bytearray()
-        while b"\n" not in chunks:
-            chunk = client.recv(65536)
-            if not chunk:
-                break
-            chunks.extend(chunk)
-            if len(chunks) > MAX_RESPONSE + 4096:
-                raise TaskAgentError("task bridge response is too large")
+        chunks = bridge_calls.exchange(
+            path, request, budget + 4.0, MAX_RESPONSE + 4096, token=token,
+            write=_write_mcp, label="waiting on tasks")
+    except bridge_calls.BridgeResponseTooLarge:
+        raise TaskAgentError("task bridge response is too large")
     except (OSError, socket.timeout) as exc:
         raise TaskAgentError("could not reach Puppy's task bridge: {}".format(exc))
-    finally:
-        client.close()
     try:
         payload = json.loads(bytes(chunks).split(b"\n", 1)[0].decode("utf-8"))
     except Exception:
@@ -1150,7 +1243,8 @@ def mcp_main() -> None:
                 if not isinstance(arguments, dict):
                     raise TaskAgentError("task tool arguments must be an object")
                 try:
-                    called = _bridge_call(name, arguments)
+                    called = _bridge_call(name, arguments,
+                                          bridge_calls.progress_token(params))
                     result = {"content": [{"type": "text", "text": str(
                         called.get("text") or "Task operation completed.")}],
                               "isError": False}

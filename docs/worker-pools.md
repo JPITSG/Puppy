@@ -69,7 +69,7 @@ the thread has really ended. A full line refuses at once.
 | --- | --- | --- | --- |
 | Searches from the console | 2 | - | 8 s |
 | Agents' searches | 2 | 1 | 20 s, or 2.5 s for one relayed from another backend |
-| Agents' reads of conversations | 2 | - | 20 s, or 2.5 s for one relayed from another backend |
+| Agents' reads of conversations (the session and task tools') | 2 | - | 20 s, or 2.5 s for one relayed from another backend |
 
 An agent's caller is its session: the parallel searches of one turn, its
 sub-agents' included, run one after the other, and leave the other place to

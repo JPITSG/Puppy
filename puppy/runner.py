@@ -812,9 +812,25 @@ def _notify_workspace_phase(session_id: int, phase: str) -> None:
             log.exception("workspace hook failed for session %s", session_id)
 
 
+_session_changes = []
+
+
+def sessions_changed():
+    """A future the next published session list resolves: something a wait
+    on sessions (a task tool's) may want to look at again."""
+    future = asyncio.get_event_loop().create_future()
+    _session_changes[:] = [item for item in _session_changes if not item.done()]
+    _session_changes.append(future)
+    return future
+
+
 def broadcast_sessions() -> dict:
     payload = sessions_payload()
     publish_state(payload)
+    waiting, _session_changes[:] = list(_session_changes), []
+    for future in waiting:
+        if not future.done():
+            future.set_result(None)
     try:
         from puppy import state_stream
         state_stream.wake("node")

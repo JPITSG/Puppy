@@ -2328,14 +2328,17 @@ second/model-b
 
     ctx = driver.turn_context(session, True, "hello", "pin", browser_mcp=browser,
                               terminal_mcp=terminal_mcp)
+    # each bridge is told OpenCode's minute, which progress restarts
+    limits = [{"name": "PUPPY_MCP_CALL_LIMIT", "value": "60"},
+              {"name": "PUPPY_MCP_PROGRESS_RESETS", "value": "1"}]
     assert ctx["mcp_servers"] == [{
         "name": "puppy_browser", "command": "/tmp/browser-agent",
         "args": ["--session", "9"],
-        "env": [{"name": "PUPPY_SOCKET", "value": "/tmp/socket"}],
+        "env": [{"name": "PUPPY_SOCKET", "value": "/tmp/socket"}] + limits,
     }, {
         "name": "puppy_terminal", "command": "/tmp/terminal-agent",
         "args": [],
-        "env": [{"name": "PUPPY_TERMINAL_SOCKET", "value": "/tmp/terminal-socket"}],
+        "env": [{"name": "PUPPY_TERMINAL_SOCKET", "value": "/tmp/terminal-socket"}] + limits,
     }]
     initial = driver.initial_stdin(session, "hello")[0]
     assert initial["method"] == "initialize" and initial["params"]["protocolVersion"] == 1

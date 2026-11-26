@@ -528,6 +528,9 @@ class ClaudeDriver(Driver):
     steering_acknowledged = True
     supports_side_questions = True
     background_guidance = BACKGROUND_GUIDANCE
+    # Probed on 2.1.332: a 100 s MCP call answered normally; the CLI's own
+    # per-call default (MCP_TOOL_TIMEOUT unset) is 1e8 ms.
+    mcp_call_limit = 0
     dynamic_model_options = True
     release_source = {"kind": "npm", "package": "@anthropic-ai/claude-code"}
     upgrade_source = {"kind": "self", "args": ["update"]}
@@ -765,7 +768,7 @@ class ClaudeDriver(Driver):
             mcp_config = {"mcpServers": {item["name"]: {
                 "type": "stdio", "command": item["command"],
                 "args": list(item.get("args") or []),
-                "env": dict(item.get("env") or {}),
+                "env": self.mcp_env(item),
             } for item in mcps}}
             argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
             # Tools that only look are allowed up front: in auto mode the CLI

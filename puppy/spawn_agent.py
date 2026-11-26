@@ -20,7 +20,7 @@ import stat
 import struct
 import sys
 
-from puppy import config, system_prompts
+from puppy import bridge_calls, config, system_prompts
 
 log = logging.getLogger("puppy.spawn.agent")
 
@@ -35,7 +35,14 @@ MAX_RESPONSE = 1024 * 1024
 # answer capped at these lengths in turn; the ids and the way back to each
 # full answer (wait with that id alone) always survive.
 ANSWER_SHORTENING_STEPS = (20000, 8000, 3000, 1000, 300, 0)
-REQUEST_TIMEOUT = 55.0
+# One call's budget: up to spawn_exec.WAIT_MAX_S (300 s) of waiting and the
+# answer, less where the engine bounds a tool call more tightly than that
+# (bridge_calls). Codex is told CALL_SECONDS for this bridge; a request
+# without a budget keeps the 55 s every call once had.
+LONGEST_CALL = 315.0
+CALL_SECONDS = 330
+DEFAULT_BUDGET = 55.0
+SHORTEST_BUDGET = 5.0
 
 TOOL_INSTRUCTIONS = (
     "Spawned agents are engine runs Puppy starts on its own nodes: one prompt "
@@ -61,13 +68,15 @@ TOOL_INSTRUCTIONS = (
     "call passing those values verbatim, and build the spawned agent's prompt "
     "from the task text plus whatever context it needs. "
     "count > 1 starts that many identical parallel runs; each agent works "
-    "independently and returns its own answer. Wait until every agent has "
-    "finished - keep calling wait with the still-running job ids - and only "
-    "then act on the collected answers as the user's task directs (judge, "
-    "filter, deduplicate, aggregate). For large fan-outs, tell the agents to "
-    "answer concisely so the combined results stay readable; if a combined "
-    "result had to be shortened it says so, and wait with one job id alone "
-    "returns that agent's full answer. Otherwise, call "
+    "independently and returns its own answer. spawn returns the job ids at "
+    "once; wait then blocks until one of the named agents has an answer you "
+    "have not had (until all: every one), or the user steers you, and "
+    "returns each answer once. Call it again with the ids still running "
+    "until every agent has finished, and only then act on the collected "
+    "answers as the user's task directs (judge, filter, deduplicate, "
+    "aggregate). For large fan-outs, tell the agents to answer concisely; "
+    "if a combined result had to be shortened it says so, and wait with one "
+    "job id alone returns that agent's full answer. Otherwise, call "
     "targets to discover "
     "node names, engines, models, efforts, and permission modes; then call "
     "spawn with a complete self-contained prompt - the spawned agent does not "
@@ -127,8 +136,15 @@ def _tool(name, description, properties=None, required=None, read_only=False,
     }
 
 
+_UNTIL = {"type": "string", "enum": ["any", "all"], "default": "any",
+          "description": ("any: return once one named agent has an answer "
+                          "you have not had; all: once every one has.")}
+_WAIT_S = {"type": "integer", "minimum": 1, "maximum": 300,
+           "description": ("Longest this call may block (default: as long "
+                           "as the engine allows one tool call, up to 300).")}
+
 _JOBS_PROPERTY = {
-    "type": "array", "minItems": 1, "maxItems": 16,
+    "type": "array", "minItems": 1, "maxItems": 24,
     "items": {"type": "string", "pattern": "^[a-f0-9]{8}$"},
     "description": "Job id(s) reported by spawn.",
 }
@@ -154,7 +170,8 @@ TOOLS = [
         "mention (no \"to\" separator is required), whose named "
         "node/engine/model/effort must be "
         "passed verbatim (\"@Spawn 10 agents ...\" means count 10). Returns "
-        "finished answers for quick runs, otherwise job ids to pass to wait.",
+        "the job ids at once - with the answer of a run done within wait_s - "
+        "to pass to wait.",
         {
             "prompt": {
                 "type": "string", "maxLength": 120000,
@@ -204,17 +221,22 @@ TOOLS = [
                                      "agent receives the same prompt and "
                                      "returns its own answer; wait for every "
                                      "job id before acting on the results."},
+            "wait_s": {"type": "integer", "minimum": 0, "maximum": 300,
+                       "default": 2,
+                       "description": "How long spawn looks for a quick "
+                                      "answer before returning the job ids."},
         }, required=["prompt"], destructive=True),
     _tool(
         "wait",
-        "Wait for spawned agents and return their results, plus the ids "
-        "still running. Keep calling this with the still-running job ids "
-        "until every agent completes.",
+        "Wait for spawned agents: returns as soon as one of them has an "
+        "answer you have not had (until all: once every one has), when the "
+        "user steers you, or after wait_s - each answer once, plus what the "
+        "agents still running are doing. Call it again with their ids until "
+        "every agent completes.",
         {
             "jobs": _JOBS_PROPERTY,
-            "wait_s": {"type": "integer", "minimum": 1, "maximum": 30,
-                       "default": 25,
-                       "description": "How long this call may block."},
+            "until": _UNTIL,
+            "wait_s": _WAIT_S,
         }, required=["jobs"], read_only=True),
     _tool(
         "reply",
@@ -232,8 +254,8 @@ TOOLS = [
                                "its own earlier work and this message: "
                                "quote another agent's answer in full when "
                                "you want it weighed."},
-            "wait_s": {"type": "integer", "minimum": 0, "maximum": 30,
-                       "default": 25,
+            "until": _UNTIL,
+            "wait_s": {"type": "integer", "minimum": 0, "maximum": 300,
                        "description": "How long this call may wait for the "
                                       "new answers; 0 returns at once."},
         }, required=["jobs", "message"], destructive=True),
@@ -303,6 +325,8 @@ def turn_mcp(session_id: int, turn_id: str):
         "command": sys.executable,
         "args": ["-m", "puppy.spawn_agent"],
         "engine_guidance": policy,
+        # waits block for minutes: the engine's own tool-call limit for it
+        "call_seconds": CALL_SECONDS,
         # Claude Code's allow list: these only look, so its auto mode runs
         # them without first asking its safety check (drivers/claude.py)
         "read_only_tools": [tool["name"] for tool in TOOLS
@@ -372,7 +396,19 @@ def _peer_is_owner(writer) -> bool:
         return False
 
 
+def _budget(request) -> float:
+    """What the stdio child said this call may take (its engine's limit)."""
+    try:
+        budget = float((request or {}).get("budget_s"))
+    except (TypeError, ValueError, AttributeError):
+        return DEFAULT_BUDGET
+    if budget != budget:
+        return DEFAULT_BUDGET
+    return min(LONGEST_CALL, max(SHORTEST_BUDGET, budget))
+
+
 async def _dispatch(request: dict) -> dict:
+    budget = _budget(request)
     try:
         session_id = int(request.get("session_id"))
     except (TypeError, ValueError):
@@ -399,11 +435,14 @@ async def _dispatch(request: dict) -> dict:
         if method == "targets":
             return await spawn_exec.targets_for_turn(session, params)
         if method == "spawn":
-            return await spawn_exec.start_for_turn(session, turn_id, params)
+            return await spawn_exec.start_for_turn(session, turn_id, params,
+                                                   budget)
         if method == "wait":
-            return await spawn_exec.wait_for_turn(session, turn_id, params)
+            return await spawn_exec.wait_for_turn(session, turn_id, params,
+                                                  budget)
         if method == "reply":
-            return await spawn_exec.reply_for_turn(session, turn_id, params)
+            return await spawn_exec.reply_for_turn(session, turn_id, params,
+                                                   budget)
         if method == "update_limits":
             return await spawn_exec.update_limits_for_turn(
                 session, turn_id, params)
@@ -479,7 +518,7 @@ async def _handle_connection(reader, writer) -> None:
         if not isinstance(request, dict):
             raise SpawnAgentError("invalid spawn agent request")
         result = await asyncio.wait_for(_dispatch(request),
-                                        timeout=REQUEST_TIMEOUT)
+                                        timeout=_budget(request))
         response = {"ok": True, "result": result}
     except SpawnAgentError as exc:
         response = {"ok": False, "error": str(exc)}
@@ -503,36 +542,28 @@ async def _handle_connection(reader, writer) -> None:
 
 # ---- stdio MCP subprocess ----
 
-def _bridge_call(method: str, params: dict) -> dict:
+def _bridge_call(method: str, params: dict, token=None) -> dict:
     path = os.environ.get("PUPPY_SPAWN_SOCKET", "")
     session_id = os.environ.get("PUPPY_SPAWN_SESSION_ID", "")
     turn_id = os.environ.get("PUPPY_SPAWN_TURN_ID", "")
     if not path or not session_id or not turn_id:
         raise SpawnAgentError("Puppy spawn bridge environment is incomplete")
+    budget = bridge_calls.call_budget(LONGEST_CALL, token)
     request = _encode({
         "session_id": session_id, "turn_id": turn_id,
-        "method": method, "params": params,
+        "method": method, "params": params, "budget_s": budget,
     })
     if len(request) > MAX_REQUEST:
         raise SpawnAgentError("spawn tool request is too large")
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(REQUEST_TIMEOUT + 5.0)
     try:
-        client.connect(path)
-        client.sendall(request)
-        chunks = bytearray()
-        while b"\n" not in chunks:
-            chunk = client.recv(65536)
-            if not chunk:
-                break
-            chunks.extend(chunk)
-            if len(chunks) > MAX_RESPONSE:
-                raise SpawnAgentError("spawn bridge response is too large")
+        chunks = bridge_calls.exchange(
+            path, request, budget + 5.0, MAX_RESPONSE, token=token,
+            write=_write_mcp, label="waiting for spawned agents")
+    except bridge_calls.BridgeResponseTooLarge:
+        raise SpawnAgentError("spawn bridge response is too large")
     except (OSError, socket.timeout) as exc:
         raise SpawnAgentError(
             "could not reach Puppy's spawn bridge: {}".format(exc))
-    finally:
-        client.close()
     try:
         payload = json.loads(bytes(chunks).split(b"\n", 1)[0].decode("utf-8"))
     except Exception:
@@ -604,7 +635,8 @@ def mcp_main() -> None:
                     raise SpawnAgentError(
                         "spawn tool arguments must be an object")
                 try:
-                    called = _bridge_call(name, arguments)
+                    called = _bridge_call(name, arguments,
+                                          bridge_calls.progress_token(params))
                     result = {"content": [{"type": "text", "text": str(
                         called.get("text") or "Spawn action completed.")}],
                               "isError": False}

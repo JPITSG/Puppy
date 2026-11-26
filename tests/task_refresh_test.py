@@ -230,12 +230,12 @@ async def concurrency_and_cancel():
     before = snapshot(sid, path)
     loop = asyncio.get_running_loop()
     copying, release = asyncio.Event(), threading.Event()
-    original_copy = tasks._copy_project
+    original_copy = tasks._snapshot_into
     def slow_copy(*args):
         loop.call_soon_threadsafe(copying.set)
         assert release.wait(10)
         return original_copy(*args)
-    with patch.object(tasks, '_copy_project', slow_copy):
+    with patch.object(tasks, '_snapshot_into', slow_copy):
         job = asyncio.create_task(tasks.refresh(parent, sid))
         try:
             await asyncio.wait_for(copying.wait(), 5)
@@ -251,7 +251,7 @@ async def concurrency_and_cancel():
     token = operations._current.set(op)
     copying.clear(); release.clear()
     try:
-        with patch.object(tasks, '_copy_project', slow_copy):
+        with patch.object(tasks, '_snapshot_into', slow_copy):
             job = asyncio.create_task(tasks.refresh(parent, sid))
             try:
                 await asyncio.wait_for(copying.wait(), 5)

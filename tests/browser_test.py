@@ -5397,7 +5397,8 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert 'No "to" separator is required' in spawn_agent.TOOL_INSTRUCTIONS
     assert "passing those values verbatim" in spawn_agent.TOOL_INSTRUCTIONS
     assert '"@Spawn 10 agents ..."' in spawn_agent.TOOL_INSTRUCTIONS
-    assert "Wait until every agent has finished" in spawn_agent.TOOL_INSTRUCTIONS
+    assert "until every agent has finished, and only then act" in \
+        spawn_agent.TOOL_INSTRUCTIONS
     assert "Settings > Timeouts" in spawn_agent.TOOL_INSTRUCTIONS
     assert "Zero means unlimited" in spawn_agent.TOOL_INSTRUCTIONS
     assert "user sends steering" in spawn_agent.TOOL_INSTRUCTIONS
@@ -5416,6 +5417,12 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     wait_schema = spawn_tools["wait"]["inputSchema"]
     assert wait_schema["properties"]["jobs"]["type"] == "array"
     assert wait_schema["required"] == ["jobs"]
+    # a wait returns on the first new answer by default, for up to five minutes
+    assert wait_schema["properties"]["until"]["enum"] == ["any", "all"]
+    assert wait_schema["properties"]["until"]["default"] == "any"
+    assert wait_schema["properties"]["wait_s"]["maximum"] == 300
+    assert "default" not in wait_schema["properties"]["wait_s"]
+    assert spawn_limits["wait_s"]["default"] == 2
     update_schema = spawn_tools["update_limits"]["inputSchema"]
     assert update_schema["required"] == ["jobs"]
     assert update_schema["anyOf"] == [
