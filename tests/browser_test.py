@@ -5408,6 +5408,12 @@ run().catch(e=>{console.error(e&&e.stack||e);process.exit(1);});
     assert 'no "to" separator is required' in spawn_tools["spawn"]["description"]
     count_schema = spawn_tools["spawn"]["inputSchema"]["properties"]["count"]
     assert count_schema["minimum"] == 1 and count_schema["maximum"] == 12
+    # several kinds of agent in one call, one entry each
+    agents_schema = spawn_tools["spawn"]["inputSchema"]["properties"]["agents"]
+    assert agents_schema["maxItems"] == 12 and set(
+        agents_schema["items"]["properties"]) == {
+            "node", "engine", "model", "effort", "permission_mode", "count"}
+    assert "one agents entry each" in spawn_agent.TOOL_INSTRUCTIONS
     spawn_limits = spawn_tools["spawn"]["inputSchema"]["properties"]
     assert spawn_limits["idle_timeout_s"]["minimum"] == 0
     assert "default" not in spawn_limits["idle_timeout_s"]

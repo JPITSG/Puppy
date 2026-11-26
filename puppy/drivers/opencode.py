@@ -389,6 +389,12 @@ class OpenCodeDriver(Driver):
     # Request timed out", and answers when it sends progress every 15 s.
     mcp_call_limit = 60
     mcp_progress_resets = True
+    # A picture's fate is its provider's: Anthropic's models read Claude's
+    # sizes, while OpenAI's shrink one to 2048 px and then to 768 px on its
+    # shorter side unless asked otherwise, and OpenCode asks nothing. So a
+    # model of any other provider, or the default whose provider is not
+    # known here, gets the sizes every one of them reads as they are.
+    cautious_picture_limits = (2000, 3750000, 768)
     # The official curl installer uses this when no custom/XDG/HOME-bin target
     # wins, then updates interactive shell files. A service manager does not
     # source those files, so check the documented installation directly too.
@@ -544,15 +550,21 @@ class OpenCodeDriver(Driver):
         return {"OPENCODE_CONFIG_CONTENT": json.dumps(
             inline, ensure_ascii=False, separators=(",", ":"))}
 
+    def model_picture_limits(self, session) -> tuple:
+        model = str((session or {}).get("model") or "").strip()
+        if model.split("/", 1)[0] == "anthropic" and "/" in model:
+            return tuple(self.picture_limits)
+        return tuple(self.cautious_picture_limits)
+
     def _mcp_servers(self, browser_mcp, terminal_mcp=None, vnc_mcp=None,
                      spawn_mcp=None, session_mcp=None, task_mcp=None,
-                     files_mcp=None) -> list:
+                     files_mcp=None, session=None) -> list:
         servers = []
         for mcp in (item for item in (browser_mcp, terminal_mcp, vnc_mcp,
                                       spawn_mcp, session_mcp, task_mcp, files_mcp)
                     if item):
             environment = []
-            for name, value in self.mcp_env(mcp).items():
+            for name, value in self.mcp_env(mcp, session).items():
                 environment.append({"name": str(name), "value": str(value)})
             servers.append({
                 "name": mcp["name"], "command": mcp["command"],
@@ -576,7 +588,8 @@ class OpenCodeDriver(Driver):
             "model": str(session.get("model") or ""),
             "effort": str(session.get("effort") or ""),
             "mcp_servers": self._mcp_servers(browser_mcp, terminal_mcp, vnc_mcp,
-                                             spawn_mcp, session_mcp, task_mcp, files_mcp),
+                                             spawn_mcp, session_mcp, task_mcp, files_mcp,
+                                             session=session),
             "session_method": "",
             "session_id": "",
             "setup": [],

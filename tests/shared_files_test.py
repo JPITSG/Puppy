@@ -838,12 +838,94 @@ async def fixture_turn():
           "and links it in its answer, and the link's file downloads")
 
 
+def test_reads():
+    """Every byte of a share is read once: hashed while it is copied, and an
+    unchanged file shared again is not read at all."""
+    path = project("reads")
+    sid = db.create_session("Reads fixture", "claude", str(path), "", "", "", "default")
+    big = path / "build" / "scan.bin"
+    big.write_bytes(os.urandom(3 * shared_files.COPY_CHUNK + 5))
+    size = big.stat().st_size
+    stack, _temp, _home = place()
+    reads = []
+    real_read = os.read
+    real_open = Path.open
+
+    def counting(fd, count):
+        data = real_read(fd, count)
+        reads.append(len(data))
+        return data
+
+    try:
+        with stack, patch.object(shared_files.os, "read", counting), \
+                patch.object(shared_files.Path, "open", side_effect=AssertionError(
+                    "a share was read again")):
+            first = shared_files.share(sid, "build/scan.bin")
+            assert sum(reads) == size and not first["reused"], (sum(reads), first)
+            # just written: a coarse clock could hide a change within the same
+            # tick, so the file is read again - once - and found the same
+            reads.clear()
+            again = shared_files.share(sid, "build/scan.bin")
+            assert again["id"] == first["id"] and again["reused"] and sum(reads) == size
+            assert len(shares_of(sid)) == 1, "the duplicate copy went again"
+            # left alone long enough, it is known by its identity alone
+            with patch.object(shared_files, "SETTLED_SECONDS", -5.0):
+                reads.clear()
+                assert shared_files.share(sid, "build/scan.bin")["reused"]
+                reads.clear()
+                assert shared_files.share(sid, "build/scan.bin")["id"] == first["id"]
+                assert reads == [], "an untouched file is not read to be compared"
+                # written again with the same bytes: one read, the same share
+                with open(big, "rb") as handle:
+                    same = handle.read()
+                with open(big, "wb") as handle:
+                    handle.write(same)
+                reads.clear()
+                assert shared_files.share(sid, "build/scan.bin")["id"] == first["id"]
+                assert sum(reads) == size
+                # other bytes of the same size: one read, a new share
+                data = bytearray(same)
+                data[7] ^= 0xFF
+                with open(big, "wb") as handle:
+                    handle.write(bytes(data))
+                reads.clear()
+                changed = shared_files.share(sid, "build/scan.bin")
+                assert not changed["reused"] and sum(reads) == size
+                assert len(shares_of(sid)) == 2
+                # with no room for a copy it looks first, still reading it once
+                held = sum(item["size"] for item in shared_files.shared(sid))
+                with patch.object(shared_files, "MAX_SESSION_BYTES", held + 1):
+                    shared_files._known.clear()
+                    reads.clear()
+                    with patch.object(shared_files.Path, "open", real_open):
+                        assert shared_files.share(sid, "build/scan.bin")["id"] == changed["id"]
+                    assert sum(reads) == size
+        # after a restart a share is read once to be compared, then known
+        shared_files._known.clear()
+        opened = []
+
+        def opening(self, *args, **kwargs):
+            opened.append(self.name)
+            return real_open(self, *args, **kwargs)
+
+        with stack, patch.object(shared_files.Path, "open", opening):
+            assert shared_files.share(sid, "build/scan.bin")["id"] == changed["id"]
+            assert shared_files.share(sid, "build/scan.bin")["id"] == changed["id"]
+        assert opened == ["scan.bin"], opened
+    finally:
+        uploads.remove_session_storage(sid)
+        db.delete_session(sid)
+    print("PASS: a share's bytes are read once - hashed while copied, an untouched file not "
+          "at all, a coarse clock's tick read again, an earlier share once per process")
+
+
 async def main():
     config.load()
     config.set_value("auth.api_token", TOKEN)
     db.connect()
     test_policy()
     test_storage()
+    test_reads()
     await runtime_contract(build_app)
     await runtime_contract(backend_app)
     await proxy_contract()

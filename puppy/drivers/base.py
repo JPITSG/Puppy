@@ -694,17 +694,35 @@ class Driver:
     # spawned-agent and task waits - size each call by it (bridge_calls).
     mcp_call_limit = 60
     mcp_progress_resets = False
+    # The largest picture this engine's model reads at its own size, as
+    # (longest side, pixels, shortest side or 0): its API shrinks a larger
+    # one, and a position read off the shrunk picture would then miss.
+    # Puppy's remote-screen pictures are reduced to fit (vnc_agent). This is
+    # Claude's once a conversation holds more than twenty pictures.
+    picture_limits = (2000, 3750000, 0)
+    # The detail an MCP picture asks to be read at ("" for the engine's own
+    # choice), through the block's ``codex/imageDetail``.
+    picture_detail = ""
 
     def mcp_call_seconds(self, mcp: dict) -> int:
         """The per-call limit this engine puts on one Puppy bridge."""
         return int(self.mcp_call_limit)
 
-    def mcp_env(self, mcp: dict) -> dict:
+    def model_picture_limits(self, session) -> tuple:
+        """``picture_limits`` for the model this session's turn runs."""
+        return tuple(self.picture_limits)
+
+    def mcp_env(self, mcp: dict, session=None) -> dict:
         """A Puppy bridge's environment as this engine launches it: its own,
-        plus what the engine allows one of its tool calls."""
+        plus what the engine allows one of its tool calls and the pictures
+        its model reads as they are."""
         env = dict(mcp.get("env") or {})
         env["PUPPY_MCP_CALL_LIMIT"] = str(int(self.mcp_call_seconds(mcp)))
         env["PUPPY_MCP_PROGRESS_RESETS"] = "1" if self.mcp_progress_resets else "0"
+        env["PUPPY_IMAGE_LIMITS"] = " ".join(
+            str(int(value)) for value in self.model_picture_limits(session or {}))
+        if self.picture_detail:
+            env["PUPPY_IMAGE_DETAIL"] = self.picture_detail
         return env
 
     def tool_options(self):

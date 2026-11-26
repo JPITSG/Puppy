@@ -45,6 +45,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 import unicodedata
 from urllib.parse import quote
 
@@ -82,6 +83,18 @@ _turn_lock = threading.Lock()
 _turn_counts = {}
 _session_locks_guard = threading.Lock()
 _session_locks = {}
+# What is known of a share's bytes without reading them again, in memory
+# only: its SHA-256, taken while it was copied, beside the stored copy's
+# identity, and the identity of the source it was last found equal to.
+# Sharing the same file again then reads nothing, and a share is read at
+# most once in a process's life (after a restart, the first time it is
+# compared). A file's times prove nothing about a change made within the
+# same tick of a coarse clock (a network drive's can be two seconds), so a
+# source is only remembered when it had been left alone that long.
+_known_lock = threading.Lock()
+_known = {}
+KNOWN_SHARES = 1024
+SETTLED_SECONDS = 2.0
 
 
 class ShareError(RuntimeError):
@@ -301,14 +314,58 @@ def _new_directory(session_id: int) -> Path:
     raise OSError("could not allocate private storage for a shared file")
 
 
-def _digest(path: Path) -> str:
+def _identity(info) -> tuple:
+    """A file's identity and times: equal for a file nobody wrote to since."""
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns)
+
+
+def _settled(info, read_at: float) -> bool:
+    return max(info.st_mtime_ns, info.st_ctime_ns) / 1e9 < read_at - SETTLED_SECONDS
+
+
+def _remember(session_id: int, file_id: str, copy: tuple, digest: str,
+              source=None) -> None:
+    with _known_lock:
+        _known.pop((int(session_id), file_id), None)
+        _known[(int(session_id), file_id)] = {"copy": copy, "digest": digest,
+                                              "source": source}
+        while len(_known) > KNOWN_SHARES:
+            _known.pop(next(iter(_known)))
+
+
+def _recalled(session_id: int, file_id: str):
+    """What is known of a share whose stored copy is still the one it was."""
+    try:
+        path = uploads._validated_upload_file(int(session_id), file_id)
+        copy = _identity(path.lstat())
+    except OSError:
+        return None, None
+    with _known_lock:
+        known = _known.get((int(session_id), file_id))
+    return (known if known and known["copy"] == copy else None), (path, copy)
+
+
+def _share_digest(session_id: int, file_id: str):
+    """A share's SHA-256: remembered, or read once and remembered."""
+    known, stored = _recalled(session_id, file_id)
+    if known:
+        return known["digest"]
+    if stored is None:
+        return None
+    path, copy = stored
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while True:
-            block = handle.read(COPY_CHUNK)
-            if not block:
-                return digest.hexdigest()
-            digest.update(block)
+    try:
+        with path.open("rb") as handle:
+            while True:
+                block = handle.read(COPY_CHUNK)
+                if not block:
+                    break
+                digest.update(block)
+    except OSError:
+        return None
+    _remember(session_id, file_id, copy, digest.hexdigest())
+    return digest.hexdigest()
 
 
 def _digest_fd(fd: int) -> str:
@@ -323,6 +380,13 @@ def _digest_fd(fd: int) -> str:
             raise ShareError("that file grew past {} while it was being shared".format(
                 _size(MAX_FILE_BYTES)))
         digest.update(block)
+
+
+def _same_share(session_id: int, alike: list, digest: str):
+    for item in alike:
+        if _share_digest(session_id, item["id"]) == digest:
+            return item
+    return None
 
 
 @contextmanager
@@ -352,6 +416,11 @@ def _count_turn(turn: str) -> None:
         _turn_counts[turn] = count + 1
         while len(_turn_counts) > 256:
             _turn_counts.pop(next(iter(_turn_counts)))
+
+
+def _turn_room(turn: str) -> bool:
+    with _turn_lock:
+        return _turn_counts.get(turn, 0) < MAX_TURN_SHARES
 
 
 def _uncount_turn(turn: str) -> None:
@@ -387,18 +456,32 @@ def share(session_id: int, path, name=None, turn: str = "") -> dict:
             existing = shared(session_id)
             alike = [item for item in existing
                      if item["name"] == label and item["size"] == info.st_size]
-            if alike:
-                fingerprint = _digest_fd(fd)
-                for item in alike:
-                    try:
-                        same = _digest(uploads._validated_upload_file(int(session_id), item["id"]))
-                    except OSError:
-                        continue
-                    if same == fingerprint:
-                        return {"id": item["id"], "name": label, "size": item["size"],
-                                "reused": True, "link": markdown_link(item["id"], label)}
-                os.lseek(fd, 0, os.SEEK_SET)
+            source = _identity(info)
+
+            def reused(item, read_at=None):
+                if read_at is not None and _settled(info, read_at):
+                    known, stored = _recalled(session_id, item["id"])
+                    if known:
+                        _remember(session_id, item["id"], stored[1], known["digest"],
+                                  source)
+                return {"id": item["id"], "name": label, "size": item["size"],
+                        "reused": True, "link": markdown_link(item["id"], label)}
+
+            for item in alike:
+                known, _stored = _recalled(session_id, item["id"])
+                if known and known["source"] == source:
+                    # shared before, from this very file, untouched since
+                    return reused(item)
             held = sum(item["size"] for item in existing)
+            if alike and (held + info.st_size > MAX_SESSION_BYTES or
+                          (turn and not _turn_room(turn))):
+                # No room for a copy, so look before copying: it may be a
+                # file shared already.
+                read_at = time.time()
+                same = _same_share(session_id, alike, _digest_fd(fd))
+                if same is not None:
+                    return reused(same, read_at)
+                os.lseek(fd, 0, os.SEEK_SET)
             if held + info.st_size > MAX_SESSION_BYTES:
                 raise ShareError(_session_full(held))
             if turn:
@@ -406,9 +489,12 @@ def share(session_id: int, path, name=None, turn: str = "") -> dict:
                 counted = True
             directory = _new_directory(session_id)
             total = 0
+            digest = hashlib.sha256()
+            read_at = time.time()
             out = os.open(str(directory / label), os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                           getattr(os, "O_NOFOLLOW", 0), 0o600)
             with os.fdopen(out, "wb") as sink:
+                # every byte read once: hashed as it is copied
                 while True:
                     block = os.read(fd, COPY_CHUNK)
                     if not block:
@@ -417,9 +503,20 @@ def share(session_id: int, path, name=None, turn: str = "") -> dict:
                     if total > MAX_FILE_BYTES:
                         raise ShareError("that file grew past {} while it was being shared".format(
                             _size(MAX_FILE_BYTES)))
+                    digest.update(block)
                     sink.write(block)
                 sink.flush()
-                os.fsync(sink.fileno())
+                fingerprint = digest.hexdigest()
+                same = _same_share(session_id, alike, fingerprint) \
+                    if total == info.st_size else None
+                if same is None:
+                    os.fsync(sink.fileno())
+            if same is not None:
+                # the same bytes are shared already: this copy goes again
+                if counted:
+                    _uncount_turn(turn)
+                    counted = False
+                return reused(same, read_at)
             if held + total > MAX_SESSION_BYTES:
                 raise ShareError(_session_full(held))
             dirfd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
@@ -428,7 +525,14 @@ def share(session_id: int, path, name=None, turn: str = "") -> dict:
             finally:
                 os.close(dirfd)
             file_id = directory.name
+            stored = directory / label
             directory = None
+            try:
+                _remember(session_id, file_id, _identity(stored.lstat()), fingerprint,
+                          source if _settled(info, read_at) and total == info.st_size
+                          else None)
+            except OSError:
+                pass
         log.info("session %s shared %s (%s bytes) as %s", session_id, resolved, total, file_id)
         return {"id": file_id, "name": label, "size": total, "reused": False,
                 "link": markdown_link(file_id, label)}

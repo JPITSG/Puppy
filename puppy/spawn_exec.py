@@ -1885,12 +1885,142 @@ async def _start_remote_fleet(session: dict, turn_id: str, target: dict,
     return jobs
 
 
+# What one entry of spawn's agents list may name; what it leaves out is the
+# call's own field of that name.
+AGENT_FIELDS = ("node", "engine", "model", "effort", "permission_mode", "count")
+
+
+def _agent_groups(params: dict) -> list:
+    """spawn's agents list as one dict per entry: its node, engine, model,
+    effort, permission mode and count, every run of the call at most
+    MAX_SPAWN_COUNT."""
+    values = params.get("agents")
+    if not isinstance(values, list) or not values:
+        raise SpawnError("agents must be a list with one entry for each kind "
+                         "of agent to start")
+    if "count" in params:
+        raise SpawnError("with agents, give each entry its own count instead "
+                         "of count beside them")
+    groups = []
+    for index, entry in enumerate(values, 1):
+        if not isinstance(entry, dict):
+            raise SpawnError("agents entry {} must be an object".format(index))
+        unknown = sorted(str(key)[:40] for key in entry if key not in AGENT_FIELDS)
+        if unknown:
+            raise SpawnError("agents entry {} does not take {}. It takes: "
+                             "{}.".format(index, ", ".join(unknown),
+                                          ", ".join(AGENT_FIELDS)))
+        group = {key: entry[key] if key in entry else params.get(key)
+                 for key in AGENT_FIELDS if key != "count"}
+        try:
+            group["count"] = _validated_count(entry.get("count"))
+        except SpawnError as exc:
+            raise SpawnError("agents entry {}: {}".format(index, exc))
+        groups.append(group)
+    total = sum(group["count"] for group in groups)
+    if total > MAX_SPAWN_COUNT:
+        raise SpawnError("agents asks for {} runs in all; one spawn call "
+                         "starts at most {}".format(total, MAX_SPAWN_COUNT))
+    return groups
+
+
+async def _start_agents(session: dict, turn_id: str, params: dict,
+                        budget_s=None) -> dict:
+    """A spawn call naming several kinds of agent: each entry of agents on
+    its own node, engine, model and effort, all with the one prompt. Every
+    entry is checked before any agent starts, and the call starts all of
+    them or none: a start that fails cancels the ones it made."""
+    groups = _agent_groups(params)
+    limits = {name: _validated_seconds(params[name], name)
+              for name in ("idle_timeout_s", "max_runtime_s") if name in params}
+    plans = []
+    local_runs = 0
+    for index, group in enumerate(groups, 1):
+        try:
+            target = resolve_target(group["node"])
+            body = {
+                "engine": str(group["engine"] or "").strip() or
+                str(session.get("engine") or ""),
+                "model": group["model"],
+                "effort": group["effort"],
+                "permission_mode": group["permission_mode"],
+                "prompt": params.get("prompt"),
+                "cwd": str(params.get("cwd") or "").strip() or
+                _default_cwd(session, target),
+            }
+            body.update(limits)
+            plan = {"index": index, "target": target, "body": body,
+                    "count": group["count"]}
+            if target["bid"]:
+                plan["channel"] = _spawn_channel(target["bid"])
+                _check_timeout_capability(plan["channel"], body)
+            else:
+                plan["request"] = await prepare_request(body)
+                local_runs += group["count"]
+        except SpawnError as exc:
+            raise SpawnError("agents entry {}: {}".format(index, exc), exc.status)
+        plans.append(plan)
+    if local_runs:
+        manager().ensure_capacity(local_runs)
+    limit = _wait_limit(budget_s)
+    initial_wait = _clamp_wait(params.get("wait_s"), default=SPAWN_WAIT_S,
+                               limit=limit)
+    remote = [plan for plan in plans if plan["target"]["bid"]]
+    fleets = await asyncio.gather(
+        *(_start_remote_fleet(session, turn_id, plan["target"], plan["channel"],
+                              plan["body"], plan["count"], 0) for plan in remote),
+        return_exceptions=True)
+    started = []           # (plan, job payload) of every relayed start
+    failure = None
+    for plan, outcome in zip(remote, fleets):
+        if isinstance(outcome, BaseException):
+            failure = failure or (plan, outcome)
+        else:
+            started.extend((plan, job) for job in outcome)
+    local = []
+    if failure is None:
+        owner = ("turn", int(session["id"]), str(turn_id))
+        try:
+            for plan in plans:
+                if not plan["target"]["bid"]:
+                    for _ in range(plan["count"]):
+                        local.append((plan, manager().start_job(plan["request"], owner)))
+        except SpawnError as exc:
+            failure = (plan, exc)
+    if failure is not None:
+        await asyncio.gather(
+            *[_cancel_remote(plan["channel"], job["id"]) for plan, job in started],
+            *[manager().cancel(job, "another agent of the same spawn call did "
+                                    "not start") for _plan, job in local],
+            return_exceptions=True)
+        for _plan, job in local:
+            manager().jobs.pop(job.id, None)
+        plan, exc = failure
+        if isinstance(exc, SpawnError):
+            raise SpawnError("agents entry {}: {}{}".format(
+                plan["index"], exc, " - no agent was started" if len(plans) > 1
+                else ""), exc.status)
+        raise SpawnError("agents entry {}: node '{}' failed while starting: "
+                         "{}".format(plan["index"], plan["target"]["name"], exc), 502)
+    entries = []
+    for plan, job in started:
+        handle = manager().remote.get(str(job.get("id") or ""))
+        if handle is not None:
+            entries.append(("remote", str(job["id"]), handle))
+    entries.extend(("local", job.id, job) for _plan, job in local)
+    results, reason = await _collect(session, entries, initial_wait, "all")
+    return _rendered(results, note=_wait_note(
+        _cut_note(params.get("wait_s"), limit), reason))
+
+
 async def start_for_turn(session: dict, turn_id: str, params: dict,
                          budget_s=None) -> dict:
-    target = resolve_target(params.get("node"))
-    count = _validated_count(params.get("count"))
     if "timeout_s" in params:
         raise SpawnError("timeout_s is unsupported; use max_runtime_s")
+    if "agents" in params:
+        return await _start_agents(session, turn_id, params, budget_s)
+    target = resolve_target(params.get("node"))
+    count = _validated_count(params.get("count"))
     body = {
         "engine": str(params.get("engine") or "").strip() or
         str(session.get("engine") or ""),

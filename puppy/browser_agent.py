@@ -22,7 +22,7 @@ import stat
 import struct
 import sys
 
-from puppy import config, system_prompts
+from puppy import bridge_calls, config, system_prompts
 
 log = logging.getLogger("puppy.browser.agent")
 
@@ -627,85 +627,17 @@ def _bridge_call(method: str, params: dict) -> dict:
 
 
 def _write_mcp(payload: dict) -> None:
-    sys.stdout.buffer.write(json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n")
-    sys.stdout.buffer.flush()
-
-
-def _mcp_response(request_id, result=None, error=None) -> dict:
-    response = {"jsonrpc": "2.0", "id": request_id}
-    if error is not None:
-        response["error"] = error
-    else:
-        response["result"] = result if result is not None else {}
-    return response
-
-
-def _tool_content(result: dict) -> list:
-    content = []
-    text = result.get("text")
-    if text is not None:
-        content.append({"type": "text", "text": str(text)})
-    image = result.get("image")
-    if isinstance(image, dict) and image.get("data"):
-        content.append({"type": "image", "data": str(image["data"]),
-                        "mimeType": str(image.get("mime_type") or "image/jpeg")})
-    if not content:
-        content.append({"type": "text", "text": "Browser action completed."})
-    return content
+    bridge_calls.write_message(payload)
 
 
 def mcp_main() -> None:
-    """Minimal MCP stdio server; stdout is reserved exclusively for JSON-RPC."""
-    for raw in sys.stdin.buffer:
-        if len(raw) > MAX_REQUEST:
-            continue
-        try:
-            message = json.loads(raw.decode("utf-8"))
-        except Exception:
-            continue
-        if not isinstance(message, dict):
-            continue
-        method = message.get("method")
-        request_id = message.get("id")
-        if request_id is None:
-            continue
-        try:
-            if method == "initialize":
-                params = message.get("params") or {}
-                requested = params.get("protocolVersion") if isinstance(params, dict) else None
-                result = {
-                    "protocolVersion": requested if isinstance(requested, str) else "2024-11-05",
-                    "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": "Puppy managed browser", "version": "4"},
-                    "instructions": instructions(),
-                }
-            elif method == "ping":
-                result = {}
-            elif method == "tools/list":
-                result = {"tools": TOOLS}
-            elif method == "tools/call":
-                params = message.get("params") or {}
-                name = str(params.get("name") or "") if isinstance(params, dict) else ""
-                arguments = ((params.get("arguments") or {})
-                             if isinstance(params, dict) else {})
-                if name not in {item["name"] for item in TOOLS}:
-                    raise BrowserAgentError("unknown browser tool: " + name[:80])
-                if not isinstance(arguments, dict):
-                    raise BrowserAgentError("browser tool arguments must be an object")
-                try:
-                    called = _bridge_call(name, arguments)
-                    result = {"content": _tool_content(called), "isError": False}
-                except BrowserAgentError as exc:
-                    result = {"content": [{"type": "text", "text": str(exc)}],
-                              "isError": True}
-            else:
-                _write_mcp(_mcp_response(request_id, error={
-                    "code": -32601, "message": "method not found"}))
-                continue
-            _write_mcp(_mcp_response(request_id, result=result))
-        except Exception:
-            _write_mcp(_mcp_response(request_id, error={
-                "code": -32603, "message": "internal MCP server error"}))
+    """The stdio MCP server; stdout is reserved for JSON-RPC."""
+    bridge_calls.serve(
+        info={"name": "Puppy managed browser", "version": "4"}, instructions=instructions(),
+        tools=TOOLS, max_request=MAX_REQUEST, write=_write_mcp,
+        call=lambda name, arguments, token: _bridge_call(name, arguments),
+        failure=BrowserAgentError, fallback="Browser action completed.",
+        image_type="image/jpeg")
 
 
 if __name__ == "__main__":

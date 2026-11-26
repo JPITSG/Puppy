@@ -768,7 +768,7 @@ class ClaudeDriver(Driver):
             mcp_config = {"mcpServers": {item["name"]: {
                 "type": "stdio", "command": item["command"],
                 "args": list(item.get("args") or []),
-                "env": self.mcp_env(item),
+                "env": self.mcp_env(item, session),
             } for item in mcps}}
             argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
             # Tools that only look are allowed up front: in auto mode the CLI

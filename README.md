@@ -637,7 +637,8 @@ result, and a link whose file has since gone reads as unavailable. Copies stay
 with the session's other files: deleted with it, carried in its backups, and
 moved into Main when a task is folded into it. One file may be up to 256 MiB, a
 conversation may hold 1 GiB of them and a turn may share 20; sharing the same
-unchanged file again reuses its copy. Puppy's own data folder, the engines'
+unchanged file again reuses its copy. A file is read once, hashed while it is
+copied, and one shared before and untouched since is not read again at all. Puppy's own data folder, the engines'
 CLI homes, the hidden files and folders directly in the home folder (where
 sign-ins and keys live) and system locations such as `/etc/shadow` or `/proc`
 are never shared. The design is described in
@@ -920,11 +921,18 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   with notifications. Cached frames cannot change a disconnected pane back to
   *Connected*; that requires a successful reconnection status from the backend.
   The agent gets the same screen as a toolset: look at it, move, click or tap,
-  drag or swipe, scroll, type, press keys and shortcuts, wait for the picture to
-  settle or to change, and connect or disconnect. Screenshots are PNGs Puppy
-  builds from the decoded framebuffer itself, at most 2000 pixels a side, and
-  every coordinate is a remote screen pixel, so the agent works the machine the
-  way you would. Each action can return its own picture of the result: Puppy
+  drag or swipe, scroll, type, press keys and shortcuts, send a short batch of
+  such steps in one call (up to ten: click a field, type, Tab, type, Enter,
+  every step checked before the first is sent), wait for the picture to settle
+  or to change, and connect or disconnect. Screenshots are PNGs Puppy builds
+  from the decoded framebuffer itself, reduced by a whole factor to what the
+  engine's model reads at its own size - 2000 pixels a side for Claude, up to
+  6000 for Codex (which is asked to read them at their original detail), and
+  for OpenCode Claude's size with an Anthropic model and otherwise one whose
+  shorter side is at most 768 - so a position read off the picture stays true.
+  Every coordinate is a remote screen pixel, so the agent works the machine the
+  way you would, or a position the agent measured in its last picture, which
+  Puppy scales and offsets for it. Each action can return its own picture of the result: Puppy
   waits for the part of the screen the agent last looked at to react, says what
   changed and where or that nothing did, and answers a picture identical to the
   last one with a short note. A shortcut can be written as one key
@@ -983,7 +991,9 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
 
 - **Spawned agents.** `@Spawn an agent on build-node using codex at high effort
   and review the changes` starts a
-  non-interactive engine run on any backend, or up to twelve in parallel. The
+  non-interactive engine run on any backend, or up to twelve in parallel -
+  identical runs, or a mix of engines, models and backends in one call (one
+  directive for each, all started or none). The
   `@` menu's wizard inserts the selected settings without a trailing “to”,
   leaving the task wording to you. Sent directives render as blue mention
   tokens with or without “to”, each covering its whole directive with the model
@@ -1061,7 +1071,11 @@ On Claude Code the bridges' tools that only look - screenshots, page and
 screen snapshots, lists, reads and waits - are allowed up front, so in auto
 mode they run at once instead of each waiting for Claude Code's safety check;
 actions such as clicks, typing, sending and spawning still take whatever the
-session's permission mode decides.
+session's permission mode decides. Such look-only calls sent together - a
+conversation read, a page snapshot and a screenshot, say - are answered side
+by side rather than one after another (one turn's searches still take their
+place on the node one at a time); an action waits for them and runs alone, in
+order.
 The API-only headless package provides the same bridges without running a web
 UI, including the backend's configured browser, terminal, remote screen,
 spawn and task policies.
@@ -1602,6 +1616,7 @@ python3 tests/spawn_test.py          # spawned agents and their optional replies
 python3 tests/session_titles_test.py # generated titles: the record, the job and both runtimes' routes
 node tests/titles_ui_test.js         # the Session titles card and the dialogs' title choice
 python3 tests/mcp_startup_test.py     # source/zipapp MCP startup with filtered environments
+python3 tests/bridge_calls_test.py   # the bridges' stdio server: look-only calls side by side, actions in order
 python3 tests/workspace_sync_test.py # remote workspace sync and conflicts
 python3 tests/browser_test.py        # managed browsers against a stub Chromium
 python3 tests/vnc_test.py            # the VNC client and its agent tools against a stub RFB server

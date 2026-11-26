@@ -29,6 +29,21 @@ credentials, and that the copy is taken when it shares: a changed file is
 shared again. Sharing the same unchanged file under the same name again
 answers the earlier share instead of a second copy.
 
+Finding that out reads every byte once at most. A share is hashed (SHA-256)
+while it is copied, and the node remembers, in memory only, each share's
+digest beside the stored copy's identity and the identity - device, inode,
+size, modification and change times - of the source it was last found equal
+to. Sharing that source again while it is untouched reads nothing; a source
+written since, under the same name and size, is copied while it is hashed
+and the copy is dropped again (before any fsync) when its digest matches an
+earlier share's. Only when no copy fits - the conversation's or the turn's
+limit reached - is the source hashed first, to find the share it may already
+be. A source is remembered only once it was left alone two seconds
+(`SETTLED_SECONDS`) before it was read, because a coarse clock, a network
+drive's say, could hide a change made within the same tick. After a restart
+an earlier share is read once, the first time it is compared, and remembered
+from then on (`KNOWN_SHARES` entries at most).
+
 The bridge is the same shape as the browser, terminal, remote screen and
 session bridges: a stdio MCP child (`python -m puppy.files_agent`) started by
 the engine with the turn's identity, talking to the node over a mode-0600

@@ -1186,79 +1186,18 @@ def _bridge_call(method: str, params: dict, token=None) -> dict:
 
 
 def _write_mcp(payload: dict) -> None:
-    sys.stdout.buffer.write(
-        json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n")
-    sys.stdout.buffer.flush()
-
-
-def _mcp_response(request_id, result=None, error=None) -> dict:
-    response = {"jsonrpc": "2.0", "id": request_id}
-    if error is not None:
-        response["error"] = error
-    else:
-        response["result"] = result if result is not None else {}
-    return response
+    bridge_calls.write_message(payload)
 
 
 def mcp_main() -> None:
-    """Minimal MCP stdio server; stdout is reserved for JSON-RPC."""
+    """The stdio MCP server; stdout is reserved for JSON-RPC."""
     role = os.environ.get("PUPPY_TASKS_ROLE", "main")
     role = role if role in ROLES else "main"
-    tools = TOOLS[role]
-    tool_names = {item["name"] for item in tools}
-    for raw in sys.stdin.buffer:
-        if len(raw) > MAX_REQUEST:
-            continue
-        try:
-            message = json.loads(raw.decode("utf-8"))
-        except Exception:
-            continue
-        if not isinstance(message, dict) or message.get("id") is None:
-            continue
-        method = message.get("method")
-        request_id = message.get("id")
-        try:
-            if method == "initialize":
-                params = message.get("params") or {}
-                requested = params.get("protocolVersion") \
-                    if isinstance(params, dict) else None
-                result = {
-                    "protocolVersion": requested if isinstance(requested, str)
-                    else "2024-11-05",
-                    "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": "Puppy tasks", "version": "1"},
-                    "instructions": instructions(role),
-                }
-            elif method == "ping":
-                result = {}
-            elif method == "tools/list":
-                result = {"tools": tools}
-            elif method == "tools/call":
-                params = message.get("params") or {}
-                name = str(params.get("name") or "") if isinstance(params, dict) else ""
-                arguments = (params.get("arguments") or {}) \
-                    if isinstance(params, dict) else {}
-                if name not in tool_names:
-                    raise TaskAgentError("unknown task tool: " + name[:80])
-                if not isinstance(arguments, dict):
-                    raise TaskAgentError("task tool arguments must be an object")
-                try:
-                    called = _bridge_call(name, arguments,
-                                          bridge_calls.progress_token(params))
-                    result = {"content": [{"type": "text", "text": str(
-                        called.get("text") or "Task operation completed.")}],
-                              "isError": False}
-                except TaskAgentError as exc:
-                    result = {"content": [{"type": "text", "text": str(exc)}],
-                              "isError": True}
-            else:
-                _write_mcp(_mcp_response(request_id, error={
-                    "code": -32601, "message": "method not found"}))
-                continue
-            _write_mcp(_mcp_response(request_id, result=result))
-        except Exception:
-            _write_mcp(_mcp_response(request_id, error={
-                "code": -32603, "message": "internal MCP server error"}))
+    bridge_calls.serve(
+        info={"name": "Puppy tasks", "version": "1"}, instructions=instructions(role),
+        tools=TOOLS[role], max_request=MAX_REQUEST, write=_write_mcp,
+        call=lambda name, arguments, token: _bridge_call(name, arguments, token),
+        failure=TaskAgentError, fallback="Task operation completed.")
 
 
 if __name__ == "__main__":

@@ -706,6 +706,113 @@ async def test_parallel(cwd):
     print("parallel fleet start/wait/cancel and caps ok")
 
 
+class OtherFakeDriver(FakeDriver):
+    key = "fake2"
+    label = "Fake two"
+
+
+async def test_agent_mix(cwd):
+    """One spawn call, several kinds of agent: each entry its own engine,
+    model, node and count, every entry checked first and all started or
+    none."""
+    mgr = spawn_exec.manager()
+    sid = db.create_session("mix test", "fake", cwd, "", "", "blue", "standard")
+    hub = runner.hub(sid)
+    hub.status = "running"
+    hub._active_turn_id = "turn-m"
+    session = db.get_session(sid)
+    owned = lambda: [job for job in mgr.jobs.values()
+                     if job.owner == ("turn", sid, "turn-m")]
+
+    mixed = await spawn_exec.start_for_turn(session, "turn-m", {
+        "prompt": "count please", "wait_s": 25, "agents": [
+            {"engine": "fake", "model": "ok", "count": 2},
+            {"engine": "fake2", "model": "ok", "effort": "high"}]})
+    assert "3 of 3 finished." in mixed["text"], mixed
+    assert mixed["text"].count("FINAL ANSWER: 42") == 3, mixed
+    assert sorted(job.engine for job in owned()) == ["fake", "fake", "fake2"]
+    assert mixed["text"].count(" · fake · stub-1 · standard") == 2, mixed
+    assert " · fake2 · stub-1 · effort high · standard" in mixed["text"], mixed
+    # what an entry leaves out is the call's own field of that name
+    defaults = await spawn_exec.start_for_turn(session, "turn-m", {
+        "prompt": "count please", "model": "ok", "permission_mode": "loose",
+        "wait_s": 25, "agents": [{}, {"engine": "fake2"}]})
+    assert "2 of 2 finished." in defaults["text"], defaults
+    assert defaults["text"].count(" · stub-1 · loose") == 2, defaults
+    for job in owned():
+        mgr.jobs.pop(job.id, None)
+
+    for params, needle in (
+            ({"agents": [{"engine": "fake"}], "count": 2}, "give each entry its own count"),
+            ({"agents": []}, "agents must be a list"),
+            ({"agents": ["fake"]}, "agents entry 1 must be an object"),
+            ({"agents": [{"engine": "fake", "prompt": "other"}]},
+             "agents entry 1 does not take prompt. It takes: node, engine"),
+            ({"agents": [{"count": 7}, {"count": 6}]}, "13 runs in all"),
+            ({"agents": [{"count": 0}]}, "agents entry 1: count must be between"),
+            ({"agents": [{"model": "ok"}, {"engine": "nope"}]}, "agents entry 2: "),
+            ({"agents": [{"model": "ok"}, {"node": "nowhere"}]},
+             "agents entry 2: unknown node")):
+        try:
+            await spawn_exec.start_for_turn(session, "turn-m",
+                                            dict({"prompt": "hi"}, **params))
+        except spawn_exec.SpawnError as exc:
+            assert needle in str(exc), (params, str(exc))
+        else:
+            raise AssertionError("agents accepted: {}".format(params))
+        assert not owned(), "a refused entry starts no agent at all"
+
+    # a relayed entry beside a local one: a node that refuses it starts nothing
+    remote_bid = spawn_exec.resolve_target("build-node.lan")["bid"]
+    backends._mark_backend_online(remote_bid)
+    set_remote_capabilities(remote_bid, [
+        protocol.SPAWN_EXEC_CAPABILITY, protocol.SPAWN_LIMITS_CAPABILITY,
+        protocol.SPAWN_CLIENT_IDS_CAPABILITY, protocol.SPAWN_OWNER_LEASE_CAPABILITY])
+    calls = []
+    behaviour = {}
+    original_node_request = spawn_exec._node_request
+    spawn_exec._node_request = fake_requests(behaviour, calls)
+    agents = [{"model": "ok"}, {"node": "build-node.lan", "engine": "codex", "count": 2}]
+    try:
+        behaviour["POST"] = lambda path, body: spawn_exec.SpawnError(
+            "this node is already running too many spawned agents", 429)
+        behaviour["DELETE"] = lambda path, body: {"ok": True}
+        before = set(mgr.remote)
+        try:
+            await spawn_exec.start_for_turn(session, "turn-m", {
+                "prompt": "both", "cwd": cwd, "agents": agents})
+        except spawn_exec.SpawnError as exc:
+            assert "agents entry 2: this node is already running too many" in str(exc), exc
+            assert "no agent was started" in str(exc), exc
+        else:
+            raise AssertionError("a refused relayed entry was reported started")
+        assert not owned() and set(mgr.remote) == before
+        # and when it takes them, the call waits on the local and relayed alike
+        behaviour["POST"] = lambda path, body: finished_job(
+            body["job_id"], "REMOTE ANSWER", engine=body["engine"])
+        behaviour["GET"] = lambda path, body: finished_job(
+            path.split("/")[1].split("?")[0], "REMOTE ANSWER", engine="codex")
+        both = await spawn_exec.start_for_turn(session, "turn-m", {
+            "prompt": "both", "cwd": cwd, "wait_s": 25, "agents": agents})
+        posts = [call for call in calls if call["method"] == "POST"]
+        assert [call["body"]["engine"] for call in posts[-2:]] == ["codex", "codex"]
+        assert all(call["body"]["wait_s"] == 0 for call in posts[-2:])
+        assert "3 of 3 finished." in both["text"], both
+        assert both["text"].count("REMOTE ANSWER") == 2, both
+        assert "FINAL ANSWER: 42" in both["text"], both
+        assert len(owned()) == 1
+    finally:
+        spawn_exec._node_request = original_node_request
+        for job in owned():
+            mgr.jobs.pop(job.id, None)
+        for job_id in [key for key, handle in mgr.remote.items()
+                       if handle.get("turn_id") == "turn-m"]:
+            mgr.remote.pop(job_id, None)
+    hub.status = "idle"
+    hub._active_turn_id = ""
+    print("one spawn call starting a mix of engines, nodes and counts, all or none ok")
+
+
 def fake_requests(behaviour: dict, calls: list):
     """A stand-in for spawn_exec._node_request driven by ``behaviour``:
     per-method callables that return a payload or raise a SpawnError."""
@@ -2310,6 +2417,7 @@ async def main():
     with open(STUB_PATH, "w", encoding="utf-8") as handle:
         handle.write(STUB_SOURCE)
     drivers._DRIVERS["fake"] = FakeDriver()
+    drivers._DRIVERS["fake2"] = OtherFakeDriver()
     cwd = os.path.join(TEST_ROOT, "project")
     os.makedirs(cwd, exist_ok=True)
     try:
@@ -2321,6 +2429,7 @@ async def main():
         await test_waits(cwd)
         await test_turn_end_reaping(cwd)
         await test_relay_start(cwd)
+        await test_agent_mix(cwd)
         await test_replies(cwd)
         await test_relay_replies(cwd)
         await test_upgrade_gate(cwd)

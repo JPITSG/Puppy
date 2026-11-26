@@ -2328,9 +2328,11 @@ second/model-b
 
     ctx = driver.turn_context(session, True, "hello", "pin", browser_mcp=browser,
                               terminal_mcp=terminal_mcp)
-    # each bridge is told OpenCode's minute, which progress restarts
+    # each bridge is told OpenCode's minute, which progress restarts, and
+    # the pictures every provider's models read as they are
     limits = [{"name": "PUPPY_MCP_CALL_LIMIT", "value": "60"},
-              {"name": "PUPPY_MCP_PROGRESS_RESETS", "value": "1"}]
+              {"name": "PUPPY_MCP_PROGRESS_RESETS", "value": "1"},
+              {"name": "PUPPY_IMAGE_LIMITS", "value": "2000 3750000 768"}]
     assert ctx["mcp_servers"] == [{
         "name": "puppy_browser", "command": "/tmp/browser-agent",
         "args": ["--session", "9"],

@@ -149,7 +149,8 @@ resetting it whenever the viewer WebSocket opens.
 The same connection is what an engine turn works with. `puppy/vnc_agent.py` is
 the turn-bound stdio MCP bridge every driver receives, behind a mode-0600,
 same-uid Unix socket into the running node: `screens`, `connect`, `screenshot`,
-`move`, `click`, `drag`, `scroll`, `type`, `press`, `wait` and `disconnect`.
+`move`, `click`, `drag`, `scroll`, `type`, `press`, `batch`, `wait` and
+`disconnect`.
 Nothing in it speaks RFB - each tool is one high-level action on a connection
 the node already owns, so there is no second path to the server.
 
@@ -169,8 +170,8 @@ pixels) does not count as that change: the server draws the pointer into the
 picture, since Puppy never asks for the cursor as a separate shape. A log that
 has lost track counts as the whole region changing.
 
-Every action - `move`, `click`, `drag`, `scroll`, `type`, `press` - and `wait`
-takes a `screenshot` option, `{}` for its defaults, so one call acts and shows
+Every action - `move`, `click`, `drag`, `scroll`, `type`, `press`, `batch` -
+and `wait` takes a `screenshot` option, `{}` for its defaults, so one call acts and shows
 the result. The picture shows the region of the last picture this chat
 received of the screen (or the one passed, `{}` being the whole screen), and
 the action's wait watches that region: by default for a change caused after
@@ -193,6 +194,27 @@ taken as what they meant. `press` takes a shortcut written as one key
 `plus`, `comma`, `slash`, ...) and the keypad (`Numpad0`-`Numpad9`,
 `NumpadAdd`, `NumpadEnter`, ...; RDP sends the keypad's own scan codes).
 
+`batch` sends a short run of input in one call with no picture between its
+steps - click a field, type, Tab, type, Enter - for where the agent already
+knows where each step lands. It takes `actions`, at most `BATCH_ACTIONS` (10)
+objects each naming its `action` (`move`, `click`, `drag`, `scroll`, `type`,
+`press`, or `pause` with `ms`) beside that tool's own arguments and aliases;
+drags and pauses together take at most `BATCH_TIME_MS` (20 s). Every step is
+checked before the first is sent - its arguments, its point on the screen,
+its key, button, direction and counts (`_batch_steps`, `_check_input`) - so a
+refused batch sends nothing; a step that fails once sending began says which
+steps were sent. The text numbers what each step did, and the batch's
+`screenshot` waits for the change the whole run caused.
+
+The pointer tools and `batch` take `coordinates`: `screen` (the default) for
+remote screen pixels, or `image` for a position measured in the last picture
+this chat received of the screen. Each capture keeps, beside its region, its
+reduction factor, its size and the screen's (`agent_views`), and `_on_screen`
+turns a picture's pixel into the middle of the screen pixels it stands for
+(`left + x * step + step // 2`, held inside the region), refusing a point
+outside the picture or a picture of a screen whose size has since changed.
+The action's text names both: `Left click at 101,81 (50,40 in your picture).`
+
 A screenshot is a PNG built from the framebuffer with `zlib` and nothing else.
 The rows are strided out as whole 32-bit pixels through one `memoryview` cast
 and their pad byte is dropped in a single C-level pass - on the event loop,
@@ -200,12 +222,31 @@ between two updates, because the reader paints into that same buffer and a
 worker reading it meanwhile could mix two frames - and only the deflate of
 that copy runs in the `jobs` pool: no image library, and no per-pixel Python,
 exactly like the decoders. A region larger than `max_dimension` (1920 by
-default, so 1080p is 1:1, and never above 2000) or than 3.75 megapixels is
-reduced by a whole factor - models take up to 2576 pixels, but once a
-conversation holds more than twenty images every side must fit 2000 and the
-area 3.75 MP, and a picture shrunk on the way in would make the stated scale
-wrong. The result states the screen size, the image size and the factor,
-because every coordinate an action takes is a remote screen pixel.
+default, so 1080p is 1:1) or than what the engine's model reads at its own size
+is reduced by a whole factor (`_picture_step`), because a picture the model's
+API shrinks on the way in would make the stated scale wrong. Each driver names
+those limits as `Driver.picture_limits`, (longest side, pixels, shortest side
+or 0), and puts them in every bridge's environment as `PUPPY_IMAGE_LIMITS`;
+the bridge passes them with each request as `pictures` and the node checks
+their bounds, using the defaults for anything else:
+
+- Claude (and the default): 2000 pixels a side and 3.75 MP - Claude reads up
+  to 2576 pixels, but once a conversation holds more than twenty images every
+  side must fit 2000 and the area 3.75 MP.
+- Codex: 6000 pixels a side and 10.24 MP, its models' original detail, which
+  the picture asks for itself: `PUPPY_IMAGE_DETAIL=original` puts
+  `_meta: {"codex/imageDetail": "original"}` on every image block
+  (`bridge_calls.image_block`; probed on 0.172.0, a 2400x1300 screenshot
+  reached the model unscaled).
+- OpenCode: a picture's fate is its provider's. An `anthropic/` model reads
+  Claude's sizes; any other, and the default whose provider is not known, gets
+  2000 pixels, 3.75 MP and a shorter side of at most 768 - OpenAI's models
+  shrink a picture to 2048 and then to 768 on its shorter side unless asked
+  otherwise, and OpenCode asks nothing.
+
+The result states the screen size, the image size and the factor, because
+every coordinate an action takes is a remote screen pixel unless it says
+`coordinates: image`.
 
 The chat box inserts `@VNC A8AR` for an open connection and
 `@VNC host:port password` for one to dial (`@RDP` likewise, with a user name

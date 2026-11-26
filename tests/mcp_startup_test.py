@@ -114,6 +114,24 @@ for kind, module in bridges.items():
     assert opencode_servers[name]["env"]["PUPPY_MCP_CALL_LIMIT"] == "60", kind
     assert opencode_servers[name]["env"]["PUPPY_MCP_PROGRESS_RESETS"] == "1", kind
 assert spawn_agent.CALL_SECONDS >= spawn_agent.LONGEST_CALL + 10
+# the pictures each engine's model reads at their own size, for the remote
+# screen's reductions: Claude's, Codex's original detail (asked for by the
+# picture itself), and for OpenCode the provider's - only an Anthropic model is
+# known to read Claude's, every other provider gets what all of them read
+for kind, module in bridges.items():
+    name = module.SERVER_NAME
+    assert claude_servers[name]["env"]["PUPPY_IMAGE_LIMITS"] == "2000 3750000 0", kind
+    assert "PUPPY_IMAGE_DETAIL" not in claude_servers[name]["env"], kind
+    assert codex_servers[name]["env"]["PUPPY_IMAGE_LIMITS"] == "6000 10240000 0", kind
+    assert codex_servers[name]["env"]["PUPPY_IMAGE_DETAIL"] == "original", kind
+    assert opencode_servers[name]["env"]["PUPPY_IMAGE_LIMITS"] == \
+        " ".join(str(value) for value in OpenCodeDriver().model_picture_limits(session)), kind
+    assert "PUPPY_IMAGE_DETAIL" not in opencode_servers[name]["env"], kind
+for model, limits in (("anthropic/claude-sonnet-5-5", (2000, 3750000, 0)),
+                      ("openai/gpt-6", (2000, 3750000, 768)),
+                      ("google/gemini-4-pro", (2000, 3750000, 768)),
+                      ("anthropic", (2000, 3750000, 768)), ("", (2000, 3750000, 768))):
+    assert OpenCodeDriver().model_picture_limits({"model": model}) == limits, model
 assert task_agent.CALL_SECONDS >= task_agent.LONGEST_CALL + 10
 
 config_bytes = (node_data / "config.json").read_bytes()

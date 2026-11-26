@@ -112,9 +112,11 @@ AGENT_QUICK_SYNC = 0.25           # a picture asked for with no settling at all
 AGENT_FIRST_FRAME = 10.0          # the very first picture of a screen
 AGENT_IMAGE_DIMENSION = 1920      # a 1080p screen is answered at 1:1
 AGENT_MIN_DIMENSION = 160
-# Models read up to 2576 px, but once a conversation holds more than twenty
+# Claude reads up to 2576 px, but once a conversation holds more than twenty
 # images every side must fit 2000 px and the area 3.75 MP: a larger picture
 # is shrunk on the way in, and the scale this tool states would then be wrong.
+# These are the limits when nobody says; each engine's driver names its
+# model's own (Driver.picture_limits), which the bridge passes along.
 AGENT_MAX_DIMENSION = 2000
 AGENT_IMAGE_PIXELS = 3750000
 AGENT_IMAGE_BYTES = 6 << 20       # beyond this the picture is halved again
@@ -494,11 +496,15 @@ def _near_pointer(box: tuple, points) -> bool:
     return False
 
 
-def _picture_step(width: int, height: int, limit: int) -> int:
-    """The whole factor that fits a region into the image limits."""
+def _picture_step(width: int, height: int, limit: int,
+                  pixels: int = AGENT_IMAGE_PIXELS, short: int = 0) -> int:
+    """The whole factor that fits a region into the image limits: its
+    longest side, its area and, where a model shrinks by it, its shortest
+    side."""
     step = 1
     while -(-max(width, height) // step) > limit or \
-            (-(-width // step)) * (-(-height // step)) > AGENT_IMAGE_PIXELS:
+            (-(-width // step)) * (-(-height // step)) > pixels or \
+            (short and -(-min(width, height) // step) > short):
         step += 1
     return step
 
@@ -1948,7 +1954,7 @@ class VncInstance:
         raise VncError("the remote screen has not been received yet")
 
     def agent_rows(self, region=None, max_dimension: int = AGENT_IMAGE_DIMENSION,
-                   step: int = 0) -> dict:
+                   step: int = 0, limits=None) -> dict:
         """Copy one region of the framebuffer out as finished RGB rows.
 
         This runs on the event loop, between two updates, so the picture is
@@ -1956,6 +1962,8 @@ class VncInstance:
         and a worker reading it meanwhile could mix two frames. The rows are
         strided out as whole 32-bit pixels and their pad byte is dropped in
         one C-level pass; only the deflate of this copy runs elsewhere.
+        ``limits`` is what the engine's model reads as it is: (longest side,
+        pixels, shortest side or 0), Claude's when not given.
         """
         frame, screen_width, screen_height = self.frame_snapshot()
         x, y, width, height = _agent_region(region, screen_width, screen_height)
@@ -1963,8 +1971,9 @@ class VncInstance:
             limit = int(max_dimension)
         except (TypeError, ValueError):
             raise VncError("max_dimension must be a whole number")
-        limit = min(AGENT_MAX_DIMENSION, max(AGENT_MIN_DIMENSION, limit))
-        step = max(int(step or 0), _picture_step(width, height, limit))
+        longest, pixels, short = limits or (AGENT_MAX_DIMENSION, AGENT_IMAGE_PIXELS, 0)
+        limit = min(longest, max(AGENT_MIN_DIMENSION, limit))
+        step = max(int(step or 0), _picture_step(width, height, limit, pixels, short))
         rows = _rgb_rows(frame, screen_width, x, y, width, height, step)
         return {"rows": rows, "x": x, "y": y, "width": width, "height": height,
                 "out_width": len(rows[0]) // 3 if rows else 0,

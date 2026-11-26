@@ -25,7 +25,7 @@ import struct
 import sys
 import time
 
-from puppy import config, system_prompts, workers
+from puppy import bridge_calls, config, system_prompts, workers
 
 log = logging.getLogger("puppy.vnc.agent")
 
@@ -58,9 +58,12 @@ TOOL_INSTRUCTIONS = (
     "worked. To see the result, pass screenshot on the action itself rather "
     "than calling wait or screenshot afterwards: it waits for the screen to "
     "react, says when nothing changed, and shows the region of your last "
-    "picture unless you pass another. Coordinates are always pixels of the "
-    "remote screen, whose exact size every screenshot reports, with 0,0 at "
-    "the top left. click is also a tap (count 2 double, 3 triple), drag is "
+    "picture unless you pass another. Coordinates are pixels of the remote "
+    "screen, whose exact size every screenshot reports, with 0,0 at the top "
+    "left; to click a place measured in a reduced picture, pass coordinates "
+    "image with the position as you measured it in your last picture. batch "
+    "sends a few known steps (click a field, type, Tab, type, Enter) in one "
+    "call. click is also a tap (count 2 double, 3 triple), drag is "
     "also a swipe, and scroll turns the wheel where the pointer is, in "
     "clicks of one notch (1-50). Keyboard input is type for literal text and "
     "press for one key or shortcut: Enter, Tab, Escape, ArrowDown, F2, minus, "
@@ -130,9 +133,10 @@ def _region(description: str) -> dict:
 
 
 _MAX_DIMENSION = {
-    "type": "integer", "minimum": 160, "maximum": 2000, "default": 1920,
+    "type": "integer", "minimum": 160, "maximum": 6000, "default": 1920,
     "description": ("Longest side of the image. A larger region is reduced by "
-                    "a whole factor, and the result names it."),
+                    "a whole factor, and the result names it; no picture is "
+                    "larger than your model reads at its own size."),
 }
 _FORCE = {
     "type": "boolean", "default": False,
@@ -156,7 +160,7 @@ def _action_picture(waits: bool = True) -> dict:
                    "properties": {"x": whole, "y": whole, "width": size,
                                   "height": size},
                    "additionalProperties": False},
-        "max_dimension": {"type": "integer", "minimum": 160, "maximum": 2000,
+        "max_dimension": {"type": "integer", "minimum": 160, "maximum": 6000,
                           "default": 1920},
     }
     if waits:
@@ -182,6 +186,18 @@ def _action_picture(waits: bool = True) -> dict:
                         "the defaults)."),
     }
 
+
+_COORDINATES = {
+    "type": "string", "enum": ["screen", "image"], "default": "screen",
+    "description": ("screen: x and y are remote screen pixels; image: pixels "
+                    "of your last picture of this screen, as you measured "
+                    "them in it - Puppy scales and offsets them."),
+}
+# A batch is a short run of input with no picture between its steps: a form
+# filled in, a menu walked. It is bounded so one call stays one action.
+BATCH_ACTIONS = 10
+BATCH_TIME_MS = 20000
+_BATCH_KINDS = ("move", "click", "drag", "scroll", "type", "press", "pause")
 
 _MODIFIERS = {
     "type": "array", "maxItems": 4,
@@ -260,7 +276,8 @@ TOOLS = [
         "move",
         "Move the pointer without pressing anything: hover a menu, a tooltip or "
         "a hot corner.",
-        {"x": _point("Horizontal position"), "y": _point("Vertical position")},
+        {"x": _point("Horizontal position"), "y": _point("Vertical position"),
+         "coordinates": _COORDINATES},
         required=["x", "y"], with_screenshot=True),
     _tool(
         "click",
@@ -273,6 +290,7 @@ TOOLS = [
                        "default": "left"},
             "count": {"type": "integer", "minimum": 1, "maximum": 5, "default": 1},
             "modifiers": _MODIFIERS,
+            "coordinates": _COORDINATES,
         }, required=["x", "y"], with_screenshot=True),
     _tool(
         "drag",
@@ -295,6 +313,7 @@ TOOLS = [
                             "default": 250,
                             "description": ("How long the gesture takes; a swipe "
                                             "is short, a careful drag longer.")},
+            "coordinates": _COORDINATES,
         }, required=["x", "y", "to_x", "to_y"], with_screenshot=True),
     _tool(
         "scroll",
@@ -308,6 +327,7 @@ TOOLS = [
             "clicks": {"type": "integer", "minimum": 1, "maximum": 50,
                        "default": 3,
                        "description": "Wheel notches to turn, at most 50."},
+            "coordinates": _COORDINATES,
         }, required=["x", "y"], with_screenshot=True),
     _tool(
         "type",
@@ -330,6 +350,52 @@ TOOLS = [
             "count": {"type": "integer", "minimum": 1, "maximum": 5,
                       "default": 1},
         }, required=["key"], with_screenshot=True),
+    _tool(
+        "batch",
+        "Send a short run of input in one call, in order, with no picture "
+        "between the steps: click a field, type, press Tab, type, press "
+        "Enter. Each step is an object naming its action - move, click, "
+        "drag, scroll, type, press, or pause (ms) - with that tool's own "
+        "arguments. Every step is checked before the first is sent; use it "
+        "only where you already know where each step lands, and look at the "
+        "result through screenshot.",
+        {
+            "actions": {
+                "type": "array", "minItems": 1, "maxItems": BATCH_ACTIONS,
+                "description": ("Up to {} steps; drags and pauses together "
+                                "at most {} s.").format(BATCH_ACTIONS,
+                                                        BATCH_TIME_MS // 1000),
+                "items": {
+                    "type": "object", "required": ["action"],
+                    "properties": {
+                        "action": {"type": "string", "enum": list(_BATCH_KINDS)},
+                        "x": _point("Horizontal position"),
+                        "y": _point("Vertical position"),
+                        "to_x": _point("Drag's end, horizontal"),
+                        "to_y": _point("Drag's end, vertical"),
+                        "button": {"type": "string",
+                                   "enum": ["left", "middle", "right"]},
+                        "count": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "modifiers": _MODIFIERS,
+                        "steps": {"type": "integer", "minimum": 1, "maximum": 64},
+                        "duration_ms": {"type": "integer", "minimum": 0,
+                                        "maximum": 5000},
+                        "direction": {"type": "string",
+                                      "enum": ["up", "down", "left", "right"]},
+                        "clicks": {"type": "integer", "minimum": 1, "maximum": 50},
+                        "text": {"type": "string", "maxLength": 4096},
+                        "key": {"type": "string", "maxLength": 40},
+                        "ms": {"type": "integer", "minimum": 0, "maximum": 5000,
+                               "description": "pause: how long."},
+                        "coordinates": _COORDINATES,
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            "coordinates": dict(_COORDINATES, description=(
+                "The default for every step: screen pixels, or pixels of your "
+                "last picture.")),
+        }, required=["actions"], with_screenshot=True),
     _tool(
         "wait",
         "Wait on the remote screen while an application starts, a dialog "
@@ -362,7 +428,9 @@ TOOLS = [
         destructive=True),
 ]
 _PROPERTIES = {tool["name"]: tool["inputSchema"]["properties"] for tool in TOOLS}
-_INPUT_TOOLS = {"move", "click", "drag", "scroll", "type", "press"}
+_INPUT_TOOLS = {"move", "click", "drag", "scroll", "type", "press", "batch"}
+_POINTS = {"move": (("x", "y"),), "click": (("x", "y"),), "scroll": (("x", "y"),),
+           "drag": (("x", "y"), ("to_x", "to_y"))}
 
 # Names agents write for arguments these tools take under another name. Each
 # was seen in real calls: an argument that is silently ignored looks like it
@@ -615,7 +683,7 @@ def _encode(rows: list, width: int, height: int, previous):
 
 
 async def _capture(instance, session_id: int, turn_id: str, region,
-                   max_dimension, force: bool) -> dict:
+                   max_dimension, force: bool, limits=None) -> dict:
     """One picture of the screen, with the facts a coordinate needs."""
     from puppy import vnc
     area = None if region is None else {"x": region[0], "y": region[1],
@@ -624,7 +692,7 @@ async def _capture(instance, session_id: int, turn_id: str, region,
     # writes into the same buffer, so only the deflate - over the copy - runs
     # off the event loop, where a whole screen's never holds up the turns and
     # sockets this node is also serving.
-    shot = instance.agent_rows(area, max_dimension)
+    shot = instance.agent_rows(area, max_dimension, limits=limits)
     seq = instance.frame_seq
     key = (shot["x"], shot["y"], shot["width"], shot["height"], shot["step"])
     view = instance.agent_views.get(session_id) or {}
@@ -634,7 +702,7 @@ async def _capture(instance, session_id: int, turn_id: str, region,
         _encode, shot["rows"], shot["out_width"], shot["out_height"], previous)
     while image is not None and len(image) > vnc.AGENT_IMAGE_BYTES and shot["step"] < 8:
         # A photographic desktop can defeat any single guess at a useful size.
-        shot = instance.agent_rows(area, max_dimension, shot["step"] + 1)
+        shot = instance.agent_rows(area, max_dimension, shot["step"] + 1, limits)
         seq = instance.frame_seq
         key = (shot["x"], shot["y"], shot["width"], shot["height"], shot["step"])
         digest, image = await workers.jobs.run(
@@ -642,6 +710,9 @@ async def _capture(instance, session_id: int, turn_id: str, region,
     instance.agent_views[session_id] = {
         "region": (shot["x"], shot["y"], shot["width"], shot["height"]),
         "key": key, "digest": digest, "turn": turn_id, "seq": seq,
+        # what coordinates measured in this picture need
+        "step": shot["step"], "image": (shot["out_width"], shot["out_height"]),
+        "screen": (shot["screen_width"], shot["screen_height"]),
         "at": time.monotonic() if image is not None else view.get("at", time.monotonic()),
     }
     if image is None:
@@ -657,7 +728,8 @@ async def _capture(instance, session_id: int, turn_id: str, region,
         note = ("Image is {}x{} for the region {}x{} at {},{} of the {}x{} "
                 "screen{}. Coordinates for every action are screen pixels, so "
                 "multiply a position measured in this image by {}, then add "
-                "{},{}.").format(
+                "{},{} - or pass coordinates image with the position as "
+                "measured.").format(
             shot["out_width"], shot["out_height"], shot["width"], shot["height"],
             shot["x"], shot["y"], shot["screen_width"], shot["screen_height"],
             "" if shot["step"] == 1 else " reduced {}x".format(shot["step"]),
@@ -665,6 +737,187 @@ async def _capture(instance, session_id: int, turn_id: str, region,
     return {"text": note, "image": {
         "data": base64.b64encode(image).decode("ascii"),
         "mime_type": "image/png"}}
+
+
+def _picture_limits(value):
+    """The limits the bridge passed for its engine's model, (longest side,
+    pixels, shortest side or 0), or None for the defaults."""
+    from puppy import vnc
+    if not isinstance(value, list) or len(value) != 3 or not all(
+            isinstance(item, int) and not isinstance(item, bool) for item in value):
+        return None
+    longest, pixels, short = value
+    if not vnc.AGENT_MIN_DIMENSION <= longest <= vnc.MAX_DIMENSION or \
+            not vnc.AGENT_MIN_DIMENSION ** 2 <= pixels <= vnc.MAX_DIMENSION ** 2 or \
+            (short and not vnc.AGENT_MIN_DIMENSION <= short <= longest):
+        return None
+    return longest, pixels, short
+
+
+def _on_screen(instance, view: dict, method: str, arguments: dict, mode) -> tuple:
+    """A pointer action's arguments in screen pixels: as given, or measured
+    in the last picture this chat received of the screen. Answers them and
+    a note naming the picture's positions."""
+    mode = "screen" if mode is None else mode
+    if mode not in ("screen", "image"):
+        raise VncAgentError("coordinates must be screen or image")
+    if mode == "screen" or method not in _POINTS:
+        return arguments, ""
+    picture = view.get("image")
+    if not picture:
+        raise VncAgentError("coordinates image needs a picture of this screen "
+                            "first: take a screenshot")
+    if tuple(view.get("screen") or ()) != (instance.width, instance.height):
+        raise VncAgentError(
+            "the screen is {}x{} now, not the {}x{} of your last picture: take "
+            "a new screenshot".format(instance.width, instance.height,
+                                      *(view.get("screen") or (0, 0))))
+    left, top, width, height = view["region"]
+    step = int(view.get("step") or 1)
+    out = dict(arguments)
+    seen = []
+    for across, down in _POINTS[method]:
+        try:
+            ix, iy = float(arguments.get(across)), float(arguments.get(down))
+        except (TypeError, ValueError, OverflowError):
+            raise VncAgentError("{} needs {} and {} as pixels of your picture".format(
+                method, across, down))
+        if not (0 <= ix < picture[0] and 0 <= iy < picture[1]):
+            raise VncAgentError("{},{} is outside your last picture, which is "
+                                "{}x{}".format(int(ix), int(iy), *picture))
+        # the middle of the screen pixels the picture's pixel stands for
+        out[across] = min(left + int(ix) * step + step // 2, left + width - 1)
+        out[down] = min(top + int(iy) * step + step // 2, top + height - 1)
+        seen.append("{},{}".format(int(ix), int(iy)))
+    return out, " ({} in your picture)".format(" to ".join(seen))
+
+
+def _check_input(instance, method: str, arguments: dict) -> None:
+    """Refuse what an input action would refuse, before anything is sent."""
+    from puppy import vnc
+    for pair in _POINTS.get(method, ()):
+        if arguments.get(pair[0]) is None or arguments.get(pair[1]) is None:
+            raise VncAgentError("{} needs {} and {}".format(method, *pair))
+        instance._agent_point(arguments[pair[0]], arguments[pair[1]])
+    if method in ("click", "drag"):
+        vnc._agent_button(arguments.get("button", "left"))
+    if method == "click":
+        vnc._agent_count(arguments.get("count"), vnc.AGENT_MAX_CLICKS, "click count")
+        vnc._agent_modifiers(arguments.get("modifiers"))
+    elif method == "drag":
+        vnc._agent_count(arguments.get("steps"), vnc.AGENT_MAX_STEPS, "steps")
+        _whole(arguments.get("duration_ms"), "duration_ms", 0,
+               vnc.AGENT_MAX_GESTURE_MS, 250)
+    elif method == "scroll":
+        if str(arguments.get("direction", "down") or "").lower() not in (
+                "up", "down", "left", "right"):
+            raise VncAgentError("scroll direction must be up, down, left or right")
+        vnc._agent_count(arguments.get("clicks"), vnc.AGENT_MAX_WHEEL, "clicks")
+    elif method == "type":
+        if not vnc._bounded_text(arguments.get("text"), vnc.MAX_TEXT, "text"):
+            raise VncAgentError("supply the text to type")
+    elif method == "press":
+        key, modifiers = vnc.agent_shortcut(arguments.get("key"),
+                                            arguments.get("modifiers"))
+        vnc.agent_keysym(key)
+        vnc._agent_modifiers(modifiers)
+        vnc._agent_count(arguments.get("count"), vnc.AGENT_MAX_CLICKS, "count")
+
+
+def _batch_steps(instance, view: dict, arguments: dict) -> list:
+    """A batch's steps as (action, screen-pixel arguments, note), every one
+    checked before the first is sent."""
+    from puppy import vnc
+    actions = arguments.get("actions")
+    if not isinstance(actions, list) or not actions:
+        raise VncAgentError("batch needs actions: a list of steps")
+    if len(actions) > BATCH_ACTIONS:
+        raise VncAgentError("a batch takes at most {} steps".format(BATCH_ACTIONS))
+    default = arguments.get("coordinates")
+    steps = []
+    spent = 0
+    for index, raw in enumerate(actions, 1):
+        where = "step {}".format(index)
+        if not isinstance(raw, dict):
+            raise VncAgentError("{} must be an object".format(where))
+        kind = raw.get("action")
+        if kind not in _BATCH_KINDS:
+            raise VncAgentError("{} needs an action: {}".format(
+                where, ", ".join(_BATCH_KINDS)))
+        step = {key: value for key, value in raw.items() if key != "action"}
+        where = "{} ({})".format(where, kind)
+        try:
+            if kind == "pause":
+                step = _rename(kind, step, {"ms": None}, {"duration_ms": "ms"}, where)
+                ms = _whole(step.get("ms"), "ms", 0, 5000, 500)
+                spent += ms
+                steps.append((kind, {"ms": ms}, ""))
+                continue
+            known = {key: value for key, value in _PROPERTIES[kind].items()
+                     if key not in ("screenshot", "screen_id")}
+            aliases = dict(_ALIASES.get(kind, {}))
+            step = _rename(kind, step, known, aliases, where)
+            mode = step.pop("coordinates", default)
+            step, seen = _on_screen(instance, view, kind, step, mode)
+            _check_input(instance, kind, step)
+        except (VncAgentError, vnc.VncError) as exc:
+            text = str(exc)
+            raise VncAgentError(text if text.startswith(where) else
+                                "{}: {}".format(where, text))
+        if kind == "drag":
+            spent += _whole(step.get("duration_ms"), "duration_ms", 0, 5000, 250)
+        steps.append((kind, step, seen))
+    if spent > BATCH_TIME_MS:
+        raise VncAgentError("a batch's drags and pauses take at most {} s; these "
+                            "take {:.1f} s".format(BATCH_TIME_MS // 1000, spent / 1000.0))
+    return steps
+
+
+async def _perform(instance, method: str, arguments: dict, points: list,
+                   seen: str = "") -> str:
+    """Send one input action and say what was sent."""
+    def said(text: str) -> str:
+        return text[:-1] + seen + "." if seen else text
+
+    if method == "pause":
+        await asyncio.sleep(arguments["ms"] / 1000.0)
+        return "Paused {} ms.".format(arguments["ms"])
+    if method == "move":
+        point = await instance.agent_move(arguments.get("x"), arguments.get("y"))
+        return said("Moved the pointer to {},{}.".format(*point))
+    if method == "click":
+        point = await instance.agent_click(
+            arguments.get("x"), arguments.get("y"),
+            arguments.get("button", "left"), arguments.get("count", 1),
+            arguments.get("modifiers"))
+        return said("{} click{} at {},{}.".format(
+            str(arguments.get("button", "left")).title(),
+            "" if (arguments.get("count") or 1) == 1 else
+            " x{}".format(int(arguments["count"])), *point))
+    if method == "drag":
+        path = await instance.agent_drag(
+            arguments.get("x"), arguments.get("y"),
+            arguments.get("to_x"), arguments.get("to_y"),
+            arguments.get("button", "left"), arguments.get("steps", 12),
+            arguments.get("duration_ms", 250))
+        points.append(tuple(path[:2]))
+        return said("Dragged from {},{} to {},{}.".format(*path))
+    if method == "scroll":
+        point = await instance.agent_scroll(
+            arguments.get("x"), arguments.get("y"),
+            arguments.get("direction", "down"), arguments.get("clicks", 3))
+        return said("Scrolled {} {} notch(es) at {},{}.".format(
+            str(arguments.get("direction", "down")).lower(),
+            int(arguments.get("clicks") or 3), *point))
+    if method == "type":
+        typed = await instance.agent_type(arguments.get("text"))
+        return "Typed {} character(s).".format(typed)
+    pressed = await instance.agent_press(
+        arguments.get("key"), arguments.get("modifiers"),
+        arguments.get("count", 1))
+    return "Pressed {}{}.".format(
+        pressed, "" if (arguments.get("count") or 1) == 1 else
+        " x{}".format(int(arguments["count"])))
 
 
 async def _dispatch(request: dict) -> dict:
@@ -733,13 +986,14 @@ async def _dispatch(request: dict) -> dict:
             "this VNC tool belongs to a turn that is no longer running")
 
     try:
-        return await _act(instance, session_id, turn_id, method, arguments)
+        return await _act(instance, session_id, turn_id, method, arguments,
+                          _picture_limits(request.get("pictures")))
     except vnc.VncError as exc:
         raise VncAgentError(str(exc))
 
 
 async def _act(instance, session_id: int, turn_id: str, method: str,
-               arguments: dict) -> dict:
+               arguments: dict, limits=None) -> dict:
     from puppy import vnc
     manager = vnc.manager()
     head = _screen_line(instance)
@@ -794,6 +1048,13 @@ async def _act(instance, session_id: int, turn_id: str, method: str,
         max_dimension = _whole(picture.get("max_dimension"), "max_dimension", 1,
                                vnc.MAX_DIMENSION, vnc.AGENT_IMAGE_DIMENSION)
 
+    steps = seen = None
+    if method == "batch":
+        steps = _batch_steps(instance, view, arguments)
+    elif method in _POINTS:
+        arguments, seen = _on_screen(instance, view, method, arguments,
+                                     arguments.pop("coordinates", None))
+
     if action and picture is not None and until == "change" and \
             not instance._current():
         # Updates had stopped coming: catch up first, so what changes from
@@ -805,43 +1066,22 @@ async def _act(instance, session_id: int, turn_id: str, method: str,
     said = ""
     if method == "connect":
         said = "Connected. This chat's tools now use it unless another ID is named."
-    elif method == "move":
-        point = await instance.agent_move(arguments.get("x"), arguments.get("y"))
-        said = "Moved the pointer to {},{}.".format(*point)
-    elif method == "click":
-        point = await instance.agent_click(
-            arguments.get("x"), arguments.get("y"),
-            arguments.get("button", "left"), arguments.get("count", 1),
-            arguments.get("modifiers"))
-        said = "{} click{} at {},{}.".format(
-            str(arguments.get("button", "left")).title(),
-            "" if (arguments.get("count") or 1) == 1 else
-            " x{}".format(int(arguments["count"])), *point)
-    elif method == "drag":
-        path = await instance.agent_drag(
-            arguments.get("x"), arguments.get("y"),
-            arguments.get("to_x"), arguments.get("to_y"),
-            arguments.get("button", "left"), arguments.get("steps", 12),
-            arguments.get("duration_ms", 250))
-        points.append(tuple(path[:2]))
-        said = "Dragged from {},{} to {},{}.".format(*path)
-    elif method == "scroll":
-        point = await instance.agent_scroll(
-            arguments.get("x"), arguments.get("y"),
-            arguments.get("direction", "down"), arguments.get("clicks", 3))
-        said = "Scrolled {} {} notch(es) at {},{}.".format(
-            str(arguments.get("direction", "down")).lower(),
-            int(arguments.get("clicks") or 3), *point)
-    elif method == "type":
-        typed = await instance.agent_type(arguments.get("text"))
-        said = "Typed {} character(s).".format(typed)
-    elif method == "press":
-        pressed = await instance.agent_press(
-            arguments.get("key"), arguments.get("modifiers"),
-            arguments.get("count", 1))
-        said = "Pressed {}{}.".format(
-            pressed, "" if (arguments.get("count") or 1) == 1 else
-            " x{}".format(int(arguments["count"])))
+    elif method == "batch":
+        lines = []
+        for index, (kind, step, note) in enumerate(steps, 1):
+            try:
+                lines.append("{}. {}".format(index, await _perform(
+                    instance, kind, step, points, note)))
+            except vnc.VncError as exc:
+                raise VncAgentError("Step {} ({}) failed: {}. {}".format(
+                    index, kind, exc, "Nothing was sent." if index == 1 else
+                    "Steps 1-{} were sent, nothing after them.".format(index - 1)
+                    if index > 2 else "Step 1 was sent, nothing after it."))
+            points.append(instance.pointer)
+        said = "Ran {} step{}:\n{}".format(len(steps), "" if len(steps) == 1 else "s",
+                                           "\n".join(lines))
+    elif action:
+        said = await _perform(instance, method, arguments, points, seen or "")
     points.append(instance.pointer)
 
     if method == "wait":
@@ -874,7 +1114,8 @@ async def _act(instance, session_id: int, turn_id: str, method: str,
     result = {}
     if picture is not None:
         result = await _capture(instance, session_id, turn_id, shown,
-                                max_dimension, picture.get("force") is True)
+                                max_dimension, picture.get("force") is True,
+                                limits)
         parts.append(result["text"])
     result["text"] = "\n".join(parts)
     return result
@@ -926,6 +1167,8 @@ def _bridge_call(method: str, params: dict) -> dict:
     request = json.dumps({
         "session_id": session_id, "turn_id": turn_id,
         "method": method, "params": params,
+        # what this engine's model reads at its own size (Driver.mcp_env)
+        "pictures": bridge_calls.picture_limits(),
     }, separators=(",", ":")).encode("utf-8") + b"\n"
     if len(request) > MAX_REQUEST:
         raise VncAgentError("VNC tool request is too large")
@@ -965,87 +1208,17 @@ def _bridge_call(method: str, params: dict) -> dict:
 
 
 def _write_mcp(payload: dict) -> None:
-    sys.stdout.buffer.write(
-        json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n")
-    sys.stdout.buffer.flush()
-
-
-def _mcp_response(request_id, result=None, error=None) -> dict:
-    response = {"jsonrpc": "2.0", "id": request_id}
-    if error is not None:
-        response["error"] = error
-    else:
-        response["result"] = result if result is not None else {}
-    return response
-
-
-def _tool_content(result: dict) -> list:
-    content = []
-    text = result.get("text")
-    if text is not None:
-        content.append({"type": "text", "text": str(text)})
-    image = result.get("image")
-    if isinstance(image, dict) and image.get("data"):
-        content.append({"type": "image", "data": str(image["data"]),
-                        "mimeType": str(image.get("mime_type") or "image/png")})
-    if not content:
-        content.append({"type": "text", "text": "VNC action completed."})
-    return content
+    bridge_calls.write_message(payload)
 
 
 def mcp_main() -> None:
-    """Minimal MCP stdio server; stdout is reserved for JSON-RPC."""
-    tool_names = {item["name"] for item in TOOLS}
-    for raw in sys.stdin.buffer:
-        if len(raw) > MAX_REQUEST:
-            continue
-        try:
-            message = json.loads(raw.decode("utf-8"))
-        except Exception:
-            continue
-        if not isinstance(message, dict) or message.get("id") is None:
-            continue
-        method = message.get("method")
-        request_id = message.get("id")
-        try:
-            if method == "initialize":
-                params = message.get("params") or {}
-                requested = params.get("protocolVersion") \
-                    if isinstance(params, dict) else None
-                result = {
-                    "protocolVersion": requested if isinstance(requested, str)
-                    else "2024-11-05",
-                    "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": "Puppy remote screen", "version": "1"},
-                    "instructions": instructions(),
-                }
-            elif method == "ping":
-                result = {}
-            elif method == "tools/list":
-                result = {"tools": TOOLS}
-            elif method == "tools/call":
-                params = message.get("params") or {}
-                name = str(params.get("name") or "") if isinstance(params, dict) else ""
-                arguments = (params.get("arguments") or {}) \
-                    if isinstance(params, dict) else {}
-                if name not in tool_names:
-                    raise VncAgentError("unknown VNC tool: " + name[:80])
-                if not isinstance(arguments, dict):
-                    raise VncAgentError("VNC tool arguments must be an object")
-                try:
-                    called = _bridge_call(name, arguments)
-                    result = {"content": _tool_content(called), "isError": False}
-                except VncAgentError as exc:
-                    result = {"content": [{"type": "text", "text": str(exc)}],
-                              "isError": True}
-            else:
-                _write_mcp(_mcp_response(request_id, error={
-                    "code": -32601, "message": "method not found"}))
-                continue
-            _write_mcp(_mcp_response(request_id, result=result))
-        except Exception:
-            _write_mcp(_mcp_response(request_id, error={
-                "code": -32603, "message": "internal MCP server error"}))
+    """The stdio MCP server; stdout is reserved for JSON-RPC."""
+    bridge_calls.serve(
+        info={"name": "Puppy remote screen", "version": "1"}, instructions=instructions(),
+        tools=TOOLS, max_request=MAX_REQUEST, write=_write_mcp,
+        call=lambda name, arguments, token: _bridge_call(name, arguments),
+        failure=VncAgentError, fallback="VNC action completed.",
+        image_type="image/png")
 
 
 if __name__ == "__main__":

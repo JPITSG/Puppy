@@ -1948,7 +1948,7 @@ async def check_agent_bridge(session_id: int) -> None:
         for method, params, expected in (
                 ("scroll", {"x": 1, "y": 1, "pixels": 300},
                  "scroll does not take pixels. It takes: x, y, direction, "
-                 "clicks, screenshot, screen_id."),
+                 "clicks, coordinates, screenshot, screen_id."),
                 ("scroll", {"x": 1, "y": 1, "amount": 500},
                  "clicks must be between 1 and 50"),
                 ("scroll", {"x": 1, "y": 1, "amount": 2, "clicks": 3},
@@ -1970,6 +1970,123 @@ async def check_agent_bridge(session_id: int) -> None:
             else:
                 raise AssertionError("{} {} was accepted".format(method, params))
 
+        # Coordinates measured in a reduced picture: Puppy scales and offsets
+        # them, to the middle of the screen pixels a picture pixel stands for.
+        halved = await call("screenshot", max_dimension=200, settle_ms=0)
+        assert "Image is 200x150 for the region 400x300 at 0,0 of the 400x300 " \
+            "screen reduced 2x." in halved["text"], halved
+        assert "or pass coordinates image" in halved["text"]
+        server.pointer_events.clear()
+        aimed = await call("click", x=50, y=40, coordinates="image")
+        assert "Left click at 101,81 (50,40 in your picture)." in aimed["text"], aimed
+        await wait_for(lambda: any(event[1:] == (101, 81) for event in server.pointer_events),
+                       label="the click where the picture said")
+        boxed = await call("screenshot", region={"x": 100, "y": 50, "width": 200,
+                                                 "height": 100},
+                           max_dimension=160, settle_ms=0)
+        assert "Image is 100x50 for the region 200x100 at 100,50" in boxed["text"], boxed
+        moved_to = await call("move", x=99, y=49, coordinates="image")
+        assert "Moved the pointer to 299,149 (99,49 in your picture)." in \
+            moved_to["text"], "the last pixel stays inside the region"
+        swiped = await call("drag", x=0, y=0, to_x=10, to_y=20, duration_ms=0,
+                            coordinates="image")
+        assert "Dragged from 101,51 to 121,91 (0,0 to 10,20 in your picture)." in \
+            swiped["text"], swiped
+        await asyncio.sleep(0.1)     # what was sent has arrived
+        server.pointer_events.clear()
+        for params, expected in (
+                ({"x": 100, "y": 10}, "100,10 is outside your last picture, which is 100x50"),
+                ({"x": 1, "y": 1, "coordinates": "pixels"},
+                 "coordinates must be screen or image")):
+            try:
+                await call("click", **dict({"coordinates": "image"}, **params))
+            except vnc_agent.VncAgentError as exc:
+                assert expected in str(exc), (expected, str(exc))
+            else:
+                raise AssertionError("click took {}".format(params))
+        instance = registry.instances[vnc_id]
+        instance.agent_views[session_id]["screen"] = (800, 600)
+        try:
+            await call("click", x=1, y=1, coordinates="image")
+        except vnc_agent.VncAgentError as exc:
+            assert "the screen is 400x300 now, not the 800x600 of your last " \
+                "picture" in str(exc), exc
+        else:
+            raise AssertionError("a picture of another screen size was used")
+        await asyncio.sleep(0.1)
+        assert not server.pointer_events, "a refused click sends nothing"
+
+        # What the engine's model reads at its own size bounds every picture:
+        # here a shortest side of 160 halves the 400x300 screen.
+        limited = await vnc_agent._dispatch({
+            "session_id": session_id, "turn_id": "vnc-turn", "method": "screenshot",
+            "params": {"settle_ms": 0, "force": True}, "pictures": [400, 3750000, 160]})
+        assert "Image is 200x150 for the region 400x300" in limited["text"], limited
+        for wrong in ([400, 3750000], [100, 3750000, 0], [400, 3750000, 500],
+                      [400, True, 0], "400 3750000 0"):
+            whole_again = await vnc_agent._dispatch({
+                "session_id": session_id, "turn_id": "vnc-turn",
+                "method": "screenshot", "params": {"settle_ms": 0, "force": True},
+                "pictures": wrong})
+            assert "the whole 400x300 screen at 1:1" in whole_again["text"], wrong
+        assert vnc._picture_step(1920, 1080, 2000, 3750000, 768) == 2
+        assert vnc._picture_step(2560, 1440, 6000, 10240000, 0) == 1
+        assert vnc._picture_step(3840, 2160, 2000, 3750000, 0) == 2
+
+        # A batch: a few known steps in one call, in order, no picture
+        # between them, every one checked before the first is sent.
+        await asyncio.sleep(0.1)
+        server.pointer_events.clear()
+        server.key_events.clear()
+        ran = await call("batch", actions=[
+            {"action": "click", "x": 30, "y": 40},
+            {"action": "type", "text": "hi"},
+            {"action": "press", "key": "Tab"},
+            {"action": "pause", "ms": 20},
+            {"action": "press", "key": "Enter", "times": 2},
+        ], screenshot={"timeout_ms": 200, "region": {}, "force": True})
+        assert ran["text"].splitlines()[1:6] == [
+            "Ran 5 steps:", "1. Left click at 30,40.", "2. Typed 2 character(s).",
+            "3. Pressed Tab.", "4. Paused 20 ms."], ran["text"]
+        assert "5. Pressed Enter x2." in ran["text"] and ran["image"], ran
+        await wait_for(lambda: len([event for event in server.key_events if event[0]]) >= 5,
+                       label="the batch's keys")
+        assert [sym for down, sym in server.key_events if down][:5] == [
+            ord("h"), ord("i"), 0xFF09, 0xFF0D, 0xFF0D], server.key_events
+        assert any(event[1:] == (30, 40) for event in server.pointer_events)
+        # image coordinates apply to every step that has a point
+        await call("screenshot", max_dimension=200, settle_ms=0, force=True)
+        both = await call("batch", coordinates="image", actions=[
+            {"action": "move", "x": 10, "y": 10},
+            {"action": "click", "x": 20, "y": 20, "coordinates": "screen"}])
+        assert "1. Moved the pointer to 21,21 (10,10 in your picture)." in both["text"]
+        assert "2. Left click at 20,20." in both["text"], both
+        await asyncio.sleep(0.1)
+        server.pointer_events.clear()
+        server.key_events.clear()
+        for actions, expected in (
+                ([{"action": "click", "x": 1, "y": 1}, {"action": "press", "key": "Nokey"}],
+                 "step 2 (press): unknown key: Nokey"),
+                ([{"action": "click", "x": 1, "y": 1, "screenshot": {}}],
+                 "step 1 (click) does not take screenshot"),
+                ([{"action": "click", "y": 1}], "step 1 (click): click needs x and y"),
+                ([{"action": "type", "text": ""}], "step 1 (type): supply the text"),
+                ([{"action": "wait"}], "step 1 needs an action: move, click"),
+                ([{"action": "scroll", "x": 1, "y": 1, "direction": "in"}],
+                 "step 1 (scroll): scroll direction must be"),
+                ([{"action": "pause", "ms": 5000}] * 5, "drags and pauses take at most 20 s"),
+                ([{"action": "press", "key": "a"}] * 11, "at most 10 steps")):
+            try:
+                await call("batch", actions=actions)
+            except vnc_agent.VncAgentError as exc:
+                assert expected in str(exc), (expected, str(exc))
+            else:
+                raise AssertionError("batch took {}".format(actions))
+        await asyncio.sleep(0.1)
+        assert not server.pointer_events and not server.key_events, \
+            "a refused batch sends nothing at all"
+
+        await call("screenshot", settle_ms=0, force=True)
         # An explicit ID selects; an unknown one is refused, not invented.
         named = await call("screenshot", screen_id=vnc_id, settle_ms=0)
         assert named["text"].startswith("VNC {} ".format(vnc_id)), named
@@ -2010,7 +2127,7 @@ def check_agent_contract() -> None:
     """The wording and shape the console and the engine both depend on."""
     names = {tool["name"] for tool in vnc_agent.TOOLS}
     assert names == {"screens", "connect", "screenshot", "move", "click", "drag",
-                     "scroll", "type", "press", "wait", "disconnect"}, names
+                     "scroll", "type", "press", "batch", "wait", "disconnect"}, names
     for tool in vnc_agent.TOOLS:
         assert tool["inputSchema"]["additionalProperties"] is False, tool["name"]
         assert tool["description"] and tool["annotations"], tool["name"]

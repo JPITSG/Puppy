@@ -843,6 +843,13 @@ class CodexDriver(Driver):
     # Puppy sets each bridge's tool_timeout_sec itself: 70 s, or what a
     # bridge whose calls block asks for as its descriptor's call_seconds.
     mcp_call_limit = 70
+    # Every bundled model reads a picture at its original detail (models
+    # catalog, supports_image_detail_original), which keeps up to 10.24 MP
+    # and 6000 px a side as they are; an MCP picture asks for it through its
+    # block's codex/imageDetail (probed on 0.172.0: a 2400x1300 screenshot
+    # reached the model unscaled).
+    picture_limits = (6000, 10240000, 0)
+    picture_detail = "original"
 
     def mcp_call_seconds(self, mcp: dict) -> int:
         try:
@@ -1030,7 +1037,7 @@ class CodexDriver(Driver):
                      "-c", prefix + ".startup_timeout_sec=10",
                      "-c", prefix + ".tool_timeout_sec={}".format(
                          self.mcp_call_seconds(mcp))]
-            for key, value in sorted(self.mcp_env(mcp).items()):
+            for key, value in sorted(self.mcp_env(mcp, session).items()):
                 argv += ["-c", "{}.env.{}={}".format(
                     prefix, key, json.dumps(str(value)))]
         return argv

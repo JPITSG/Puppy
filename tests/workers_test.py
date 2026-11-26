@@ -64,6 +64,8 @@ OWN_THREADS = {
     ("puppy/place_scout.py", "threading.Thread"),  # in a process of its own
     ("puppy/workers.py", "threading.Thread"),     # the watchdog speaks while the pools are stuck,
                                                   # and the last word when Puppy stops
+    ("puppy/bridge_calls.py", "threading.Thread"),  # a bridge child's look-only call, in a
+                                                    # process of its own beside its other calls
 }
 
 
