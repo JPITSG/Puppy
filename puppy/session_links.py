@@ -120,10 +120,19 @@ def excerpt(text, limit):
         len(text) - head - tail) + (text[-tail:] if tail else "")
 
 
+def _word(text):
+    """"all" or "this" as an agent may write it - any case, or in the
+    brackets and quotes of the notation that describes it ("[all]")."""
+    word = text.strip().strip("[]\"' ").lower()
+    return word if word in ("all", "this") else None
+
+
 def expand_refs(refs):
     """Refs as the tools take them: stable references, "all", "this", or a
     session's four-character ID - bare, or in its @Session-NAME-XXXX
     mention - resolved on this controller, which allocated it."""
+    if isinstance(refs, str) and _word(refs):
+        return [_word(refs)]
     if not isinstance(refs, list):
         return refs
     out = []
@@ -131,8 +140,8 @@ def expand_refs(refs):
         if isinstance(ref, str):
             text = ref.strip()
             # "all" and "this" in any case are those words, never a short ID
-            if text.lower() in ("all", "this") or REF_RE.fullmatch(text.lower()):
-                out.append(text.lower())
+            if _word(text) or REF_RE.fullmatch(text.lower()):
+                out.append(_word(text) or text.lower())
                 continue
             match = CODE_REF_RE.fullmatch(text)
             if match:
@@ -143,6 +152,37 @@ def expand_refs(refs):
                 continue
         out.append(ref)     # refused later in the usual words
     return list(dict.fromkeys(out))
+
+
+def scoped(scope):
+    """Whether the user's mentions selected particular sessions - the
+    boundary every read, search and send stays inside, across turns, until
+    they mention others. None (nothing mentioned yet) and @Session-All
+    select every session."""
+    return bool(scope and scope["refs"] != ["all"])
+
+
+def selection_refs(scope, reachable, source):
+    """What ["all"] names: the sessions the user selected, or with every
+    session selected each one reachable - never the asking session, whose
+    own conversation is ["this"]."""
+    refs = scope["refs"] if scoped(scope) else reachable
+    return [ref for ref in refs if ref != source]
+
+
+def outside_selection(ref, scope, known, source, data, what="session"):
+    """The refusal of a ref past the user's selection, naming what was
+    selected - so the call can be made again inside it - and that only the
+    user widens it."""
+    label = lambda item: known[item]["mention"] if item in known else item
+    chosen = [label(item) for item in scope["refs"] if item != source]
+    shown = ", ".join(chosen[:10]) + (", and {} more".format(len(chosen) - 10) if len(chosen) > 10 else "")
+    return SessionLinkError(
+        "{} {} is outside the sessions the user selected ({}); refs [\"all\"] or no refs "
+        "mean those, [\"this\"] this conversation. Only the user widens the selection, by "
+        "mentioning the session or {} for every one".format(
+            what, label(ref), shown or "none but this conversation",
+            data.get("all_mention") or "@Session-All"))
 
 
 def validate_scope(value):
@@ -560,11 +600,20 @@ async def broker(source, method, args, scope=None):
         limit = integer(args.get("limit", 100), "limit", 1, 200)
         listed = ([dict(known[source], this=True)] if source in known else []) + \
             list(available.values())
+        if scoped(scope):
+            # what read, search and send reach: the user's selection
+            listed = [dict(row, selected=True) if row["ref"] in scope["refs"] and
+                      not row.get("this") else row for row in listed]
         rows = [s for s in listed if query in
                 (s["title"] + " " + s["cwd"] + " " + s["node_name"] + " " + s["mention"]).lower()]
         listing = {"controller": data["controller"], "sessions": rows[offset:offset + limit],
                    "total": len(rows),
                    "next_offset": offset + limit if offset + limit < len(rows) else None}
+        if scoped(scope):
+            listing["selection"] = (
+                "the user selected the sessions marked selected: read, search and send reach "
+                "those and this one; only the user widens that, by mentioning sessions "
+                "({} for every one)".format(data["all_mention"]))
         if data["unavailable"]:
             listing["unavailable"] = data["unavailable"]
         return listing
@@ -574,21 +623,28 @@ async def broker(source, method, args, scope=None):
     if not isinstance(refs, list) or not refs or len(refs) > 512:
         raise SessionLinkError("select sessions with @Session, supply refs from sessions, "
                                "or pass [\"this\"] for this conversation")
+    # ["all"] is the user's selection - every session only when they
+    # selected every one, or nothing yet
     every = refs == ["all"]
     if every:
-        refs = list(available)
+        refs = selection_refs(scope, list(available), source)
+        if not refs and scoped(scope):
+            raise SessionLinkError(
+                "the user selected no session but this conversation: pass refs [\"this\"] to "
+                "read it; only the user widens the selection, by mentioning sessions ({} for "
+                "every one)".format(data["all_mention"]))
     refs = [source if ref == "this" else ref for ref in refs]
     for ref in refs:
         parse_ref(ref)
         if ref == source:
             continue    # its own conversation is always the turn's to read
-        if scope and scope["refs"] != ["all"] and ref not in scope["refs"]:
-            raise SessionLinkError("session is outside the selected references")
+        if scoped(scope) and ref not in scope["refs"]:
+            raise outside_selection(ref, scope, known, source, data)
     groups = {}
     # A node that cannot be reached is named where it costs coverage: in a
     # read or search of every session, or for a session that is not found -
     # never beside a session that answered.
-    errors = list(data["unavailable"]) if every else []
+    errors = list(data["unavailable"]) if every and not scoped(scope) else []
     unreached = ", ".join(item["node"] for item in data["unavailable"])
     for ref in dict.fromkeys(refs):
         row = known.get(ref)

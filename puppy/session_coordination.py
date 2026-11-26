@@ -107,22 +107,26 @@ async def create(source, args, scope):
         if sum(plan["source"] == source and plan["status"] not in FINAL for plan in actions.records(PREFIX)) >= 8:
             raise links.SessionLinkError("this session already has eight unfinished workflows")
         data = await links.catalog()
-        available = {row["ref"] for row in data["sessions"] if row["ref"] != source}
+        known = {row["ref"]: row for row in data["sessions"]}
+        available = {ref for ref in known if ref != source}
         steps = []
         for original in supplied:
             if not isinstance(original, dict):
                 raise links.SessionLinkError("invalid workflow step")
             step = dict(original)
             if step.get("refs") == ["all"]:
-                step["refs"] = sorted(available)
+                # the user's selection; every other session only when they
+                # selected every one, or nothing yet
+                step["refs"] = sorted(links.selection_refs(scope, sorted(available), source))
             steps.append(step)
         _validate_steps(steps)
         for step in steps:
             for ref in step["refs"]:
+                if links.scoped(scope) and ref not in scope["refs"] and ref != source:
+                    raise links.outside_selection(ref, scope, known, source, data,
+                                                  "workflow destination")
                 if ref not in available:
                     raise links.SessionLinkError("workflow destination is unavailable or is the originating session")
-                if scope and scope["refs"] != ["all"] and ref not in scope["refs"]:
-                    raise links.SessionLinkError("workflow destination is outside the selected references")
         now = time.time()
         plan = {"format": 1, "id": rid, "source": source, "title": title,
                 "signature": signature, "created_at": now, "deadline": now + timeout,

@@ -25,10 +25,13 @@ TOOL_INSTRUCTIONS = (
     "Use them when the user references sessions, including @Session mentions. "
     "A mention is @Session-NAME-XXXX, where XXXX is a permanent four-character "
     "alphanumeric ID allocated by the selecting controller; NAME is only a label. "
-    "Mentions are resolved before the turn; omitted refs reuse that selection. "
+    "Mentions are resolved before the turn and stay your boundary across turns until the "
+    "user mentions others: no refs or refs [\"all\"] mean the sessions they selected "
+    "(marked selected in sessions); only @Session-All, or no mention yet, selects every "
+    "session - archived ones on connected nodes too, never this one - and only the user "
+    "widens it. "
     "refs take a stable ref from sessions, a session's four-character short_id, or "
     "its mention as written; older UUID mentions also work. "
-    "The selected sessions are your reference boundary. "
     "search finds relevant excerpts; "
     "Search pages across sessions with session_offset and within matches with offset. "
     "Follow next_session_offset until null before claiming complete search coverage. "
@@ -36,7 +39,6 @@ TOOL_INSTRUCTIONS = (
     "OR and -exclusion work. Search with distinctive words, one search at a time: a search "
     "that takes too long is stopped and says so, and is then narrowed, never repeated. "
 
-    "All includes archived conversations on connected nodes, every one but this session. "
     "This conversation is yours to read and search as well: pass refs [\"this\"] "
     "(sessions lists it first, marked this, and the user can mention it) for its whole "
     "history, not only what your context still holds. read pages a conversation: by "
@@ -78,9 +80,10 @@ def instructions():
 
 REFS = {"type": "array", "minItems": 1, "maxItems": 512,
         "items": {"type": "string"},
-        "description": "Stable refs from sessions, short_ids or mentions; [all] means every "
-                       "other session and [this] this conversation (read and search only). "
-                       "Omit to reuse the user's mentions."}
+        "description": "Refs, short_ids or mentions from sessions. [\"all\"] is every session "
+                       "the user selected (every other session only after @Session-All or "
+                       "with none selected), [\"this\"] this conversation (read and search "
+                       "only). Omit for the user's selection."}
 TOOLS = [
     _tool("sessions", "Find sessions by title, node, or project folder. Returns stable references and availability.",
           {"query": {"type": "string", "maxLength": 400},

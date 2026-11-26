@@ -1037,7 +1037,11 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   one prompt per row with that turn's final answer unless it asks for the
   messages, and every page is sized to fit one tool result: a long text keeps
   its start and its end and says how to read it whole. **All sessions** means
-  every session but the one you are typing in. An unreachable backend is
+  every session but the one you are typing in. The sessions you mention stay
+  the agent's boundary in later messages too, until you mention others: its
+  "all" then means those, and a session outside them is refused with the ones
+  you chose named, since only your mentions widen it (with nothing mentioned
+  yet it may read every session). An unreachable backend is
   named only where it leaves something out - a search of every session, or a
   session it could not find - never beside sessions that answered. Each request leaves a
   **View request** card in the transcript; its sheet shows the request's state,

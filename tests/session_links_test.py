@@ -478,7 +478,7 @@ async def own_history():
     assert (await links.dispatch(a, "scoped", "read", {"refs": ["this"], "limit": 1}))["results"]
     assert (await links.dispatch(a, "scoped", "read", {"refs": [own], "limit": 1}))["results"]
     await rejected(links.dispatch(a, "scoped", "read", {"refs": [rd]}), "outside")
-    # "all" is every other session
+    # "all" is every other session once the user selects all of them
     await links.prepare_turn(a, "every", "@session all find bugs")
     every = await links.dispatch(a, "every", "search", {"query": "bug"})
     assert own not in json.dumps(every["results"]) and every["selected"] >= 2
@@ -695,6 +695,75 @@ async def agent_results():
           "requests and workflows newest first, answers kept by their ends")
 
 
+async def selection_boundary():
+    """refs ["all"] is the user's selection: the sessions they mentioned,
+    kept across turns until they mention others, and every other session
+    only with none mentioned or after @Session-All. A ref past it is refused
+    naming what was selected and how only the user widens it, the listing
+    marks the selection, and "[all]" written as the notation reads as all."""
+    a, b, c, d = session("Picker"), session("Chosen one"), session("Chosen two"), session("Left out")
+    own, rb, rc, rd = (links.reference(x) for x in (a, b, c, d))
+    for sid in (b, c, d):
+        db.add_event(sid, "assistant", {"text": "boundary marker in {}".format(sid)})
+    search.reconcile()
+    data = await links.catalog(force=True)
+    rows = {row["ref"]: row for row in data["sessions"]}
+    await links.prepare_turn(a, "pick", "{} and {} compare".format(rows[rb]["mention"], rows[rc]["mention"]))
+    hits = lambda got: {row["sid"] for value in got["results"] for row in value["results"]}
+    for refs in (["all"], "all", "[all]", ["[all]"], ['"all"'], [" ALL "]):
+        got = await links.dispatch(a, "pick", "search", {"refs": refs, "query": "boundary"})
+        assert got["selected"] == 2 and hits(got) == {b, c}, (refs, got)
+        assert "unavailable" not in got, got
+    assert links.expand_refs(["[this]", "[all]"]) == ["this", "all"]
+    # the selection outlives the turn that made it
+    links.end_turn(a, "pick")
+    await links.prepare_turn(a, "later", "and now the other one")
+    got = await links.dispatch(a, "later", "search", {"refs": ["all"], "query": "boundary"})
+    assert hits(got) == {b, c}, got
+    try:
+        await links.dispatch(a, "later", "read", {"refs": [rd]})
+    except ValueError as exc:
+        text = str(exc)
+    else:
+        raise AssertionError("a session outside the selection was read")
+    assert "outside the sessions the user selected" in text, text
+    assert rows[rd]["mention"] in text and rows[rb]["mention"] in text and rows[rc]["mention"] in text
+    assert data["all_mention"] in text and "Only the user widens" in text, text
+    assert rows[rd]["mention"] not in text.split("(")[1], "the refused session is not listed as selected"
+    listing = await links.dispatch(a, "later", "sessions", {})
+    marked = {row["ref"] for row in listing["sessions"] if row.get("selected")}
+    assert marked == {rb, rc}, listing
+    assert listing["sessions"][0].get("this") and "selected" not in listing["sessions"][0]
+    assert data["all_mention"] in listing["selection"], listing
+    # a send and a workflow stay inside it too, saying the same
+    await rejected(links.dispatch(a, "later", "send", {"refs": [rd], "request_id": "out", "text": "hi"}),
+                   "destination " + rows[rd]["mention"] + " is outside the sessions the user selected")
+    await rejected(links.dispatch(a, "later", "coordinate", {"request_id": "wf-out", "steps": [
+        {"id": "s", "refs": [rd], "action": "task", "text": "x", "after": []}]}),
+        "workflow destination " + rows[rd]["mention"] + " is outside")
+    assert links.selection_refs({"refs": [own, rb]}, [rb, rc, rd, own], own) == [rb]
+    assert links.selection_refs({"refs": ["all"]}, [rb, own, rd], own) == [rb, rd]
+    assert links.selection_refs(None, [rb, own], own) == [rb]
+    # only this conversation selected: ["all"] says what it can read instead
+    await links.prepare_turn(a, "self", rows[own]["mention"] + " what did we decide")
+    await rejected(links.dispatch(a, "self", "search", {"refs": ["all"], "query": "boundary"}),
+                   "no session but this conversation")
+    await rejected(links.dispatch(a, "self", "read", {"refs": [rd]}),
+                   "(none but this conversation)")
+    # @Session-All, or nothing mentioned yet, selects every other session
+    await links.prepare_turn(a, "every", data["all_mention"] + " look everywhere")
+    got = await links.dispatch(a, "every", "search", {"refs": ["all"], "query": "boundary", "session_limit": 50})
+    assert {b, c, d} <= hits(got) and a not in hits(got), got
+    listing = await links.dispatch(a, "every", "sessions", {})
+    assert "selection" not in listing and not any(row.get("selected") for row in listing["sessions"])
+    e = session("Fresh")
+    await links.prepare_turn(e, "fresh", "nothing mentioned")
+    got = await links.dispatch(e, "fresh", "search", {"refs": "[all]", "query": "boundary", "session_limit": 50})
+    assert {b, c, d} <= hits(got), got
+    assert (await links.dispatch(e, "fresh", "read", {"refs": [rd], "view": "events"}))["results"]
+    print("refs [\"all\"] is the user's selection, refused refs name it, the listing marks it")
+
+
 async def main():
     config.ensure_dirs()
     await references()
@@ -704,6 +773,7 @@ async def main():
     await many_readers()
     await workflows()
     await agent_results()
+    await selection_boundary()
     await fleet_and_drivers()
 
 

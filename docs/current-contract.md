@@ -227,7 +227,7 @@ still contain a value written before that release.
   false meanwhile). This changes no stored format or wire capability.
 - The session tools read and search the asking session's own history:
   `refs: ["this"]` or its own reference pass the mentions' scope, `sessions`
-  lists it first marked `this`, and `["all"]` still means every other session.
+  lists it first marked `this`, and `["all"]` never includes it.
   A session is never sent requests or workflow steps by itself; a send reusing
   mentions that name it goes to the others. `read` accepts `view: "turns"`
   (`after_seq`, `limit` up to 50 turns): one row per prompt with that turn's
@@ -247,6 +247,15 @@ still contain a value written before that release.
   with bounded answers, listings without answers - while the console's routes
   keep the full records. A request's stored answer keeps the end of the turn
   that gave it. No stored format or wire capability changes.
+- Since v1.0.658 a tool call's `["all"]` is the user's selection: the
+  sessions their mentions named, kept across turns until they mention others,
+  and every other session only after `@Session-All` or with nothing
+  mentioned yet (`selection_refs`, for read, search, send and workflow steps
+  alike). A ref outside the selection is refused naming the selected
+  sessions' mentions and the `@Session-All` link (`outside_selection`); the
+  agent's `sessions` listing marks them `selected` and says so in
+  `selection`. `"[all]"` and `"[this]"`, the notation's spelling, read as
+  those words. No stored format or wire capability changes.
 - A session's `background_tasks` rows (snapshot and live) carry three optional
   additive fields: `tool_use_id`, the call the engine said started the task;
   `call_seq`, that call's event in the transcript when this turn wrote it; and

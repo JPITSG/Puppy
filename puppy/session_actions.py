@@ -419,8 +419,11 @@ async def send(source, args, scope=None, workflow=""):
         rows = {row["ref"]: row for row in data["sessions"]}
         if source not in rows:
             raise links.SessionLinkError("the originating session is unavailable")
-        targets = list(rows) if refs == ["all"] else list(dict.fromkeys(refs))
-        if refs == ["all"] or implicit:
+        # ["all"] is the user's selection, as omitted refs are; every other
+        # session only when they selected every one, or nothing yet
+        targets = links.selection_refs(scope, list(rows), source) if refs == ["all"] \
+            else list(dict.fromkeys(refs))
+        if implicit:
             targets = [ref for ref in targets if ref != source]
         if "this" in targets:
             raise links.SessionLinkError("cannot send a request to the originating session; "
@@ -431,8 +434,8 @@ async def send(source, args, scope=None, workflow=""):
             links.parse_ref(target)
             if target == source:
                 raise links.SessionLinkError("cannot send a request to the originating session")
-            if scope and scope["refs"] != ["all"] and target not in scope["refs"]:
-                raise links.SessionLinkError("destination is outside the selected references")
+            if links.scoped(scope) and target not in scope["refs"]:
+                raise links.outside_selection(target, scope, rows, source, data, "destination")
         if action in ("task", "question") and _cycle(source, targets):
             raise links.SessionLinkError("this request would create a waiting cycle between sessions")
         if action in ("steer", "stop") and any(not expected.get(target) for target in targets):
