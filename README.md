@@ -831,17 +831,21 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
 - **Shared terminals.** Open a terminal tab on any backend (xterm.js over a
   node-owned PTY, your configured shell command). Every terminal has a
   four-character ID and can be linked to one chat. Turns on a terminal-enabled
-  backend carry a private bridge into these same PTYs (snapshot, type, press
-  keys, wait for output), and the shipped guidance tells the model to use it
-  only when you ask, with `@Terminal A8AR` or `@New terminal`. You both see and
-  type in one screen. Ordinary shell work still uses the engine's own tools.
+  backend carry a private bridge into these same PTYs (snapshot, type with or
+  without Enter, press keys, wait for output), and the shipped guidance tells
+  the model to use it only when you ask, with `@Terminal A8AR` or `@New
+  terminal`. You both see and type in one screen. Typing and key presses say
+  where the output they cause begins, and a wait looks at what follows the
+  agent's last input - never at the line echoing the command it typed, which
+  holds the very text that command was told to print. Ordinary shell work still uses the engine's own tools.
   Input resumes on PTY write readiness; ready output is combined into bounded
   bursts without a batching timer. Resizing signals the foreground application
   only when the grid changes. Each viewer's pending output queue is capped at
   4 MiB or 512 messages; a viewer that falls behind is disconnected without
   blocking other viewers or the terminal. Agent snapshots render only the
   requested tail after stripping terminal escapes, keeping large scrollback
-  reads from needlessly processing every old line. See the
+  reads from needlessly processing every old line, and a wait reads the
+  stripped output at most every 50 ms while it keeps arriving. See the
   [terminal latency audit](docs/terminal-latency.md) for measurements and limits.
 - **The engine CLIs themselves.** Every installed engine's name in the
   footer's status box is a link: it opens that backend's own `claude`, `codex`

@@ -500,6 +500,100 @@ async def check_process_outliving_its_pty() -> None:
         terminal._manager = old_manager
 
 
+async def check_agent_echo() -> None:
+    """A wait looks past the terminal echoing an agent's own input: the
+    command line it typed holds the very text it waits for. Synthetic
+    output, so every case is exact: an echoed line then its output, a line
+    typed without Enter, a line wrapped at the margin, a heredoc's lines, a
+    full-screen redraw with no line end, output before the input, progress
+    rewritten with carriage returns, a match far behind the transcript's
+    tail, and a wait that reads a flood of output only so often."""
+    instance = terminal.TerminalInstance("EC01", "/bin/sh", str(TEST_ROOT), 80, 24)
+
+    def typed(data: bytes) -> int:
+        mark = instance.output_sequence
+        instance.agent_inputs.append((mark, data))
+        return mark
+
+    out = instance._append_output
+    out(b"$ ")
+    before = instance.output_sequence
+    out(b"DONE from earlier\r\n$ ")
+    mark = typed(b"make && echo DONE\r")
+    out(b"make && echo DO")
+    assert instance._search("DONE", mark) is None
+    out(b"NE")
+    assert instance._search("DONE", mark) == "echo", "a line still being echoed"
+    out(b"\r\n")
+    assert instance._search("DONE", mark) == "echo"
+    out(b"building\r\nDONE\r\n$ ")
+    assert instance._search("DONE", mark) == "output"
+    assert instance._search("DONE", before) == "output", "output before the input counts"
+    assert instance._search("building", mark) == "output"
+    # typed without Enter: everything after it is its line until a line ends
+    mark = typed(b"echo NEVER_RUN")
+    out(b"echo NEVER_RUN")
+    assert instance._search("NEVER_RUN", mark) == "echo"
+    enter = typed(b"\r")
+    out(b"\r\nNEVER_RUN\r\n$ ")
+    assert instance._search("NEVER_RUN", mark) == "output"
+    assert instance._search("NEVER_RUN", enter) == "output"
+    # a line past the margin: readline's space and carriage return wrap it
+    # inside the line, and the raw bytes still hold one line end
+    command = b"true WRAP_TOKEN " + b"x" * 90 + b"; echo WRAP_TOKEN"
+    mark = typed(command + b"\r")
+    out(command[:78] + b" \r" + command[78:] + b"\r\n")
+    assert instance._search("WRAP_TOKEN", mark) == "echo"
+    out(b"WRAP_TOKEN\r\n$ ")
+    assert instance._search("WRAP_TOKEN", mark) == "output"
+    # a heredoc: three lines typed, three echoed, then the output
+    mark = typed(b"cat <<'EOF'\nline HEREDOC\nEOF\n")
+    out(b"cat <<'EOF'\r\n> line HEREDOC\r\n> EOF\r\n")
+    assert instance._search("HEREDOC", mark) == "echo"
+    out(b"line HEREDOC\r\n$ ")
+    assert instance._search("HEREDOC", mark) == "output"
+    # a full-screen program redraws without ending a line: no echo to skip
+    mark = typed(b"\r")
+    out(b"\x1b[H" + b"\x1b[2;1Hrow" * 300 + b"\x1b[24;1HSaved")
+    assert instance._search("Saved", mark) == "output"
+    # progress rewritten in place, and a match far behind the shown tail
+    mark = typed(b"fetch\r")
+    out(b"fetch\r\n50%\r100%\rFETCHED\r\n")
+    assert instance._search("100%", mark) == "output"
+    assert instance._search("FETCHED", mark) == "output"
+    out(b"".join(b"line %d\r\n" % n for n in range(400)))
+    assert "FETCHED" not in instance.transcript(sequence=mark)["output"]
+    assert instance._search("FETCHED", mark) == "output"
+    # the wait itself: after the last input by default, saying where it
+    # looked and why a text that stood only on the echo did not count
+    typed(b"echo NOT_YET")
+    out(b"echo NOT_YET")
+    waited = await instance.wait_for(text="NOT_YET", timeout_ms=150)
+    assert waited["timed_out"] and waited["echo_only"], waited
+    assert waited["basis"] == "input" and waited["searched_after"] == instance.last_agent_input()
+    waited = await instance.wait_for(text="DONE from earlier", sequence=before, timeout_ms=0)
+    assert waited.get("matched") and waited["basis"] == "given", waited
+    fresh = terminal.TerminalInstance("EC02", "/bin/sh", str(TEST_ROOT), 80, 24)
+    fresh._append_output(b"ready\r\n")
+    waited = await fresh.wait_for(text="ready", timeout_ms=0)
+    assert waited.get("matched") and waited["basis"] == "all", waited
+    # a flood of output wakes the wait for every burst; it reads at most so often
+    reads = []
+    search = fresh._search
+    fresh._search = lambda text, start: reads.append(1) or search(text, start)
+
+    async def flood():
+        until = time.monotonic() + 0.6
+        while time.monotonic() < until:
+            fresh._append_output(b"noise\r\n")
+            await asyncio.sleep(0.002)
+
+    task = asyncio.ensure_future(flood())
+    waited = await fresh.wait_for(text="NEVER", timeout_ms=600)
+    await task
+    assert waited["timed_out"] and len(reads) <= 0.6 / terminal.MATCH_EVERY + 3, len(reads)
+
+
 async def check_terminal_lifecycle(session_id: int, other_session_id: int) -> None:
     registry = terminal.TerminalRegistry()
     old_manager = terminal._manager
@@ -576,6 +670,36 @@ async def check_terminal_lifecycle(session_id: int, other_session_id: int) -> No
         })
         assert "Requested text was observed." in waited["text"], waited
         assert "\x1b" not in waited["text"]
+        # A command that prints what it was told to after a pause: the wait
+        # is for the output, never the command line echoing it back
+        call = lambda method, **params: terminal_agent._dispatch({
+            "session_id": session_id, "turn_id": "terminal-turn",
+            "method": method, "params": dict(params, terminal_id=instance.terminal_id)})
+        typed = await call("type", text="sleep 1; echo SLOW_DONE", enter=True)
+        assert "and Enter." in typed["text"], typed
+        mark = int(typed["text"].split("Sequence: ", 1)[1].split(" ", 1)[0])
+        began = time.monotonic()
+        waited = await call("wait_for", text="SLOW_DONE", timeout_ms=5000)
+        assert "Requested text was observed." in waited["text"], waited
+        assert time.monotonic() - began >= 0.8, "the echoed command line was taken for its output"
+        assert "Looked for after sequence {}, your last input here.".format(mark) in waited["text"]
+        again = await call("wait_for", text="SLOW_DONE", after_sequence=mark, timeout_ms=1000)
+        assert "Looked for after sequence {}.".format(mark) in again["text"], again
+        # typed but never run: the text stands only on its own line, and says so
+        await call("type", text="echo NOT_RUN_YET")
+        waited = await call("wait_for", text="NOT_RUN_YET", timeout_ms=600)
+        assert "Condition was not observed" in waited["text"], waited
+        assert "only on the line echoing input sent here" in waited["text"], waited
+        pressed = await call("press", key="Enter")
+        assert "Sent Enter.\nSequence: " in pressed["text"], pressed
+        waited = await call("wait_for", text="NOT_RUN_YET", timeout_ms=3000)
+        assert "Requested text was observed." in waited["text"], waited
+        try:
+            await call("type", text="x", enter="yes")
+        except terminal_agent.TerminalAgentError as exc:
+            assert "enter must be true or false" in str(exc)
+        else:
+            raise AssertionError("a non-boolean enter was taken")
         await wait_for(lambda: any(item.get("type") == "agent_input"
                                    for item in viewer.messages))
         await wait_for(lambda: any(item.get("type") == "terminal_activity"
@@ -923,6 +1047,7 @@ async def main() -> None:
         check_mcp_protocol()
         check_driver_wiring(session_id)
         check_transcript_tail()
+        await check_agent_echo()
         check_cli_home()
         check_engine_cli_lookup()
         await check_output_drain()

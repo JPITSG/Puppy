@@ -256,6 +256,15 @@ still contain a value written before that release.
   agent's `sessions` listing marks them `selected` and says so in
   `selection`. `"[all]"` and `"[this]"`, the notation's spelling, read as
   those words. No stored format or wire capability changes.
+- Since v1.0.659 the terminal bridge's `type` takes an optional `enter`
+  (Enter after the text, in one write) and `type`/`press` answer the output
+  sequence their input was written at. `wait_for` without `after_sequence`
+  looks after the last input an agent sent to that terminal (everything
+  retained when there is none), never on the line the terminal echoes an
+  agent's input on, reads the whole searched output as stripped text at most
+  every 50 ms, and its answer names where it looked and when the text stood
+  only on that echo. Bridge-local; no route, stored format or capability
+  changes.
 - A session's `background_tasks` rows (snapshot and live) carry three optional
   additive fields: `tool_use_id`, the call the engine said started the task;
   `call_seq`, that call's event in the transcript when this turn wrote it; and

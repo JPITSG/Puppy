@@ -65,6 +65,16 @@ _CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)", re.S)
 _ESC_RE = re.compile(r"\x1b[@-_]")
 _CONTROL_RE = re.compile(r"[\x00-\x07\x0b\x0c\x0e-\x1f\x7f]")
+# what a wait reads: the same text with backspaces gone too (no cursor model)
+_MATCH_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# A wait looks past the terminal echoing an agent's own input back (the
+# command line it typed holds the very text it waits for): the inputs
+# remembered for that, the bytes an echoed line may carry beyond twice the
+# input itself (prompt redraws), and how often a wait reads the output
+# while it keeps arriving.
+AGENT_INPUTS = 64
+ECHO_SLACK = 1024
+MATCH_EVERY = 0.05
 
 _active_terminals = 0
 _manager = None
@@ -344,6 +354,8 @@ class TerminalInstance:
         self.output_sequence = 0
         self.output_truncated = False
         self.output_event = asyncio.Event()
+        # (output sequence when written, bytes) of the latest agent inputs
+        self.agent_inputs = collections.deque(maxlen=AGENT_INPUTS)
         self.idle_task = None
         self.end_task = None
 
@@ -518,33 +530,133 @@ class TerminalInstance:
             "reason": self.ended_reason,
         }
 
+    def last_agent_input(self):
+        """The output sequence at the last input an agent sent here, or None."""
+        return self.agent_inputs[-1][0] if self.agent_inputs else None
+
+    def _oldest(self) -> int:
+        return self.raw_chunks[0][0] if self.raw_chunks else self.output_sequence
+
+    def _echoes(self, raw_start: int, raw: bytes) -> list:
+        """Where the terminal may be echoing an agent's own input back, as
+        (start, end) sequences: from the input to the end of the line it
+        leaves the cursor on - its max(lines, 1)-th newline, raw bytes, so a
+        wrapped command line is one line - when that comes within twice the
+        input's length and ECHO_SLACK. An input still short of it covers
+        everything after it so far (the line is still being echoed, or was
+        typed without Enter); one followed by that much output with no line
+        end, a full-screen program's redraw, covers nothing."""
+        end = raw_start + len(raw)
+        regions = []
+        for mark, data in self.agent_inputs:
+            if mark < raw_start or mark >= end:
+                continue
+            lines = max(1, data.count(b"\n") + data.count(b"\r") - data.count(b"\r\n"))
+            position = mark - raw_start
+            limit = position + 2 * len(data) + ECHO_SLACK
+            found, cursor = 0, position
+            while found < lines:
+                newline = raw.find(b"\n", cursor, limit)
+                if newline < 0:
+                    break
+                found, cursor = found + 1, newline + 1
+            if found == lines:
+                regions.append((mark, raw_start + cursor))
+            elif len(raw) < limit:
+                regions.append((mark, end))
+        return regions
+
+    @staticmethod
+    def _match_text(raw: bytes) -> str:
+        text = raw.decode("utf-8", errors="replace")
+        text = _OSC_RE.sub("", text)
+        text = _CSI_RE.sub("", text)
+        text = _ESC_RE.sub("", text)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        return _MATCH_CONTROL_RE.sub("", text)
+
+    def _search(self, text: str, start: int):
+        """Where text stands in the output after start: "output" anywhere
+        outside the echoes of an agent's own input, "echo" only on them,
+        else None. The output is read as text stripped of terminal controls
+        (a carriage return a line break), never rendered: a wait reads it
+        again and again."""
+        # an input whose echo bound ends before the start cannot reach it
+        base = min([start] + [mark for mark, data in self.agent_inputs
+                              if mark + 2 * len(data) + ECHO_SLACK > start])
+        raw_start = max(base, self._oldest())
+        raw, _truncated = self._raw_since(raw_start)
+        end = raw_start + len(raw)
+        cursor = max(start, raw_start)
+        shown, echoed = [], []
+        for first, last in sorted(self._echoes(raw_start, raw)):
+            first = max(first, cursor)
+            if last <= first:
+                continue
+            if first > cursor:
+                shown.append((cursor, first))
+            echoed.append((first, last))
+            cursor = last
+        shown.append((cursor, end))
+        piece = lambda first, last: self._match_text(raw[first - raw_start:last - raw_start])
+        if any(last > first and text in piece(first, last) for first, last in shown):
+            return "output"
+        if any(text in piece(first, last) for first, last in echoed):
+            return "echo"
+        return None
+
     async def wait_for(self, text: str = "", sequence=None, timeout_ms: int = 5000,
                        exit_requested: bool = False, quiet_ms: int = 0) -> dict:
+        """Wait for text, the process's exit or a quiet interval. The text
+        is looked for after sequence - by default the last input an agent
+        sent here, else everything retained - and never on the line the
+        terminal echoes an agent's own input on, which holds the very text
+        a command was told to print."""
         timeout_ms = _bounded_int(timeout_ms, 5000, 0, 30000)
         quiet_ms = _bounded_int(quiet_ms, 0, 0, 10000)
+        if sequence is None:
+            start = self.last_agent_input()
+            basis = "input" if start is not None else "all"
+            shown_from = start
+        else:
+            start = _bounded_int(sequence, 0, 0, 1 << 62)
+            basis, shown_from = "given", start
+        if start is None:
+            start = self._oldest()
         deadline = time.monotonic() + timeout_ms / 1000.0
         last_sequence = self.output_sequence
         quiet_since = time.monotonic()
+        read_at = 0.0
+        found = None
+
+        def result(**flags):
+            snapshot = self.transcript(sequence=shown_from)
+            snapshot.update(flags, searched_after=start, basis=basis)
+            return snapshot
+
         while True:
+            # output arriving without pause wakes the wait for every burst;
+            # it reads at most every MATCH_EVERY
+            pause = min(read_at + MATCH_EVERY, deadline) - time.monotonic()
+            if pause > 0:
+                await asyncio.sleep(pause)
             event = self.output_event
-            snapshot = self.transcript(sequence=sequence)
-            if text and text in snapshot["output"]:
-                snapshot["matched"] = True
-                return snapshot
+            read_at = time.monotonic()
+            if text:
+                found = self._search(text, start)
+                if found == "output":
+                    return result(matched=True)
             if exit_requested and not self.running:
-                snapshot["exited"] = True
-                return snapshot
+                return result(exited=True)
             now = time.monotonic()
             if self.output_sequence != last_sequence:
                 last_sequence = self.output_sequence
                 quiet_since = now
             if quiet_ms and (now - quiet_since) * 1000 >= quiet_ms:
-                snapshot["quiet"] = True
-                return snapshot
+                return result(quiet=True)
             remaining = deadline - now
             if remaining <= 0:
-                snapshot["timed_out"] = True
-                return snapshot
+                return result(timed_out=True, echo_only=found == "echo")
             try:
                 await asyncio.wait_for(event.wait(), timeout=min(remaining, 0.25))
             except asyncio.TimeoutError:
@@ -588,9 +700,12 @@ class TerminalInstance:
         except OSError:
             pass
 
-    async def write(self, data: bytes, source: str = "user") -> None:
+    async def write(self, data: bytes, source: str = "user"):
+        """Write input; answers the output sequence it was written at (what
+        it causes comes after), and remembers an agent's input so a wait can
+        look past its echo."""
         if not isinstance(data, (bytes, bytearray)) or not data:
-            return
+            return self.output_sequence
         if len(data) > MAX_INPUT:
             raise TerminalError("terminal input is too large")
         if not self.running or self.master is None:
@@ -599,6 +714,9 @@ class TerminalInstance:
             self._broadcast_json({
                 "type": "agent_input", "terminal_id": self.terminal_id})
         async with self.input_lock:
+            mark = self.output_sequence
+            if source == "agent":
+                self.agent_inputs.append((mark, bytes(data)))
             offset = 0
             pending = memoryview(data)
             deadline = time.monotonic() + 5.0
@@ -619,6 +737,7 @@ class TerminalInstance:
                 if written <= 0:
                     raise TerminalError("terminal input failed")
                 offset += written
+        return mark
 
     async def resize(self, cols: int, rows: int) -> None:
         cols = _bounded_int(cols, 80, 10, 500)

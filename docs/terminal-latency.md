@@ -28,6 +28,19 @@ handling, and the shared terminal agent's snapshot/wait path.
   lines are rendered. Ordinary text and CRLF lines use a string fast path.
   Carriage returns, backspaces, tabs, truncation, and output cursors retain
   their existing semantics.
+- **Agent waits:** `wait_for` reads the output it searches as text stripped of
+  terminal controls (a carriage return read as a line break), never rendered
+  character by character, and at most every 50 ms (`MATCH_EVERY`) while
+  output keeps arriving, where it used to read again on every burst. It
+  searches all of the output after its start rather than the rendered
+  200-line tail, so a match followed by a long run of output is still found.
+  Its start is the last input an agent sent to the terminal unless the call
+  names a sequence, and the line the terminal echoes an agent's own input on
+  is never a match: the command line `type` sent holds the very text it was
+  told to print. That line runs from the input to its line end in the raw
+  bytes - a heredoc's every line, a wrapped command line still one - within
+  twice the input's length and 1 KiB (`ECHO_SLACK`); a full-screen program
+  that redraws past that without ending a line has nothing excluded.
 - **Resizing:** xterm's actual grid-change event sends resize messages, instead
   of every container observer callback. Attach and showing a tab still announce
   its dimensions, including after another viewer resized the shared PTY.
@@ -91,7 +104,9 @@ character processing in agent snapshots.
 
 - `python3 tests/terminal_test.py`: partial/blocked input, ordering, timeout,
   cancellation, closure, bounded draining, EOF, slow-viewer isolation, replay,
-  transcript controls, lifecycle, and shared-agent behavior.
+  transcript controls, lifecycle, and shared-agent behavior, including waits
+  past an agent's own echo on synthetic output and in a real bash, and the
+  read cadence under a flood of output.
 - `python3 tests/console_browser_test.py`: real xterm keyboard input, burst
   rendering, Unicode, fractional container resizing, and foreground SIGWINCH,
   alongside the existing console checks.
