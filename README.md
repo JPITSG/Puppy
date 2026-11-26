@@ -1098,7 +1098,11 @@ session's permission mode decides. Such look-only calls sent together - a
 conversation read, a page snapshot and a screenshot, say - are answered side
 by side rather than one after another (one turn's searches still take their
 place on the node one at a time); an action waits for them and runs alone, in
-order.
+order. Claude Code otherwise holds MCP tools back until the model looks them
+up, and every turn is a fresh start: so a bridge the session called or looked
+up within its last 5000 events, or that the prompt names with one of the `@`
+mentions, has its tools loaded up front, and the model calls them without a
+lookup first.
 The API-only headless package provides the same bridges without running a web
 UI, including the backend's configured browser, terminal, remote screen,
 spawn and task policies.
@@ -1640,6 +1644,7 @@ python3 tests/session_titles_test.py # generated titles: the record, the job and
 node tests/titles_ui_test.js         # the Session titles card and the dialogs' title choice
 python3 tests/mcp_startup_test.py     # source/zipapp MCP startup with filtered environments
 python3 tests/bridge_calls_test.py   # the bridges' stdio server: look-only calls side by side, actions in order
+python3 tests/tool_loading_test.py   # which bridges' tools Claude Code loads up front, through real turns
 python3 tests/workspace_sync_test.py # remote workspace sync and conflicts
 python3 tests/browser_test.py        # managed browsers against a stub Chromium
 python3 tests/vnc_test.py            # the VNC client and its agent tools against a stub RFB server

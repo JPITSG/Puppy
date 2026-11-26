@@ -256,6 +256,13 @@ still contain a value written before that release.
   agent's `sessions` listing marks them `selected` and says so in
   `selection`. `"[all]"` and `"[this]"`, the notation's spelling, read as
   those words. No stored format or wire capability changes.
+- Since v1.0.660 a Claude Code turn's `--mcp-config` carries
+  `"alwaysLoad": true` for each Puppy bridge whose tools the session called
+  or looked up within its last 5000 events, or that the prompt names with a
+  composer mention (`tool_loading.mark`, for drivers with `defers_mcp_tools`),
+  so those tools are sent in full instead of waiting behind the CLI's tool
+  search. Other engines load every MCP tool already and are not marked. No
+  route, stored format or capability changes.
 - Since v1.0.659 the terminal bridge's `type` takes an optional `enter`
   (Enter after the text, in one write) and `type`/`press` answer the output
   sequence their input was written at. `wait_for` without `after_sequence`

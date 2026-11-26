@@ -531,6 +531,9 @@ class ClaudeDriver(Driver):
     # Probed on 2.1.332: a 100 s MCP call answered normally; the CLI's own
     # per-call default (MCP_TOOL_TIMEOUT unset) is 1e8 ms.
     mcp_call_limit = 0
+    # MCP tools wait behind ToolSearch unless their server says alwaysLoad
+    # (probed on 2.1.332: only such a server's tools reach the API request)
+    defers_mcp_tools = True
     dynamic_model_options = True
     release_source = {"kind": "npm", "package": "@anthropic-ai/claude-code"}
     upgrade_source = {"kind": "self", "args": ["update"]}
@@ -765,11 +768,14 @@ class ClaudeDriver(Driver):
             [item for item in (browser_mcp, terminal_mcp, vnc_mcp, spawn_mcp,
                                session_mcp, task_mcp, files_mcp) if item]
         if mcps:
-            mcp_config = {"mcpServers": {item["name"]: {
+            mcp_config = {"mcpServers": {item["name"]: dict({
                 "type": "stdio", "command": item["command"],
                 "args": list(item.get("args") or []),
                 "env": self.mcp_env(item, session),
-            } for item in mcps}}
+            # a tool set this session uses loads up front, sparing the model
+            # a tool search before its first call every turn (tool_loading)
+            }, **({"alwaysLoad": True} if item.get("always_load") else {}))
+                for item in mcps}}
             argv += ["--mcp-config", json.dumps(mcp_config, separators=(",", ":"))]
             # Tools that only look are allowed up front: in auto mode the CLI
             # otherwise asks its safety model before every call - probed on

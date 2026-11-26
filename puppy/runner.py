@@ -19,7 +19,7 @@ from puppy import (agent_notes, browser_agent, config, db, engine_defaults, file
                    system_prompts, task_agent, terminal_agent, vnc_agent,
                    session_agent, session_directories, session_git, session_links, uploads, workspace_sync,
                    workers, workspaces, schedules, session_tasks, session_titles, timeouts,
-                   token_usage, tool_calls)
+                   token_usage, tool_calls, tool_loading)
 from puppy.drivers import get_driver
 from puppy.drivers import base as driver_base
 from puppy.drivers import messages as engine_messages
@@ -3629,6 +3629,10 @@ class SessionHub:
             # Main's agent manages its tasks; a task's agent its own apply
             task_mcp = None if tool else task_agent.turn_mcp(
                 self.id, pinned, task_agent.role_for(session))
+            if not tool and driver.defers_mcp_tools:
+                await tool_loading.mark(self.id, text, (
+                    browser_mcp, terminal_mcp, vnc_mcp, spawn_mcp, session_mcp,
+                    task_mcp, files_mcp))
             system_prompt_text = "" if tool else system_prompts.turn_prompt(
                 remote_workspace=descriptor is not None)
             if not tool:

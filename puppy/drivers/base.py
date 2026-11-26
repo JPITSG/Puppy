@@ -703,6 +703,10 @@ class Driver:
     # The detail an MCP picture asks to be read at ("" for the engine's own
     # choice), through the block's ``codex/imageDetail``.
     picture_detail = ""
+    # Whether this engine defers MCP tools behind a tool search, so that
+    # Puppy's bridges a session uses are worth loading up front: the runner
+    # then marks their descriptors ``always_load`` (tool_loading).
+    defers_mcp_tools = False
 
     def mcp_call_seconds(self, mcp: dict) -> int:
         """The per-call limit this engine puts on one Puppy bridge."""
