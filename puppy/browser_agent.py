@@ -55,8 +55,10 @@ TOOL_INSTRUCTIONS = (
     "arbitrary path. For a separate upload button, click it and then call "
     "upload_file without ref to satisfy its intercepted chooser. downloads and "
     "read_download are limited to the current "
-    "Browser's private download directory. Element refs belong to the latest "
-    "snapshot, and page/download refs are temporary."
+    "Browser's private download directory. An element keeps its ref until the "
+    "page loads a new document; page and download refs are temporary. An "
+    "action's wait_for that is not seen in time is reported in its result, not "
+    "as a failure."
 )
 
 
@@ -69,17 +71,17 @@ def instructions() -> str:
     return TOOL_INSTRUCTIONS
 
 
+_BROWSER_ID = {
+    "type": "string",
+    "description": "From a \"@Browser A8AR\" mention; omit for this chat's.",
+}
+
+
 def _tool(name, description, properties=None, required=None, read_only=False,
           browser_target=True):
     properties = dict(properties or {})
     if browser_target:
-        properties["browser_id"] = {
-            "type": "string", "pattern": "^[A-Z0-9]{4}$",
-            "description": (
-                "Existing Browser ID named by the user, e.g. via a "
-                "\"@Browser A8AR\" mention. Omit to use this session's "
-                "current browser, creating a fresh one if needed."),
-        }
+        properties["browser_id"] = dict(_BROWSER_ID)
     schema = {"type": "object", "properties": properties,
               "additionalProperties": False}
     if required:
@@ -88,133 +90,110 @@ def _tool(name, description, properties=None, required=None, read_only=False,
         "name": name,
         "description": description,
         "inputSchema": schema,
-        "annotations": {
-            "readOnlyHint": bool(read_only),
-            "destructiveHint": False,
-            "idempotentHint": bool(read_only),
-            "openWorldHint": True,
-        },
+        # MCP's defaults say the rest: open world, and not idempotent unless
+        # it only looks
+        "annotations": dict({"readOnlyHint": bool(read_only), "destructiveHint": False},
+                            **({"idempotentHint": True} if read_only else {})),
     }
 
 
-def _wait_condition_schema():
+def _ref(description=None) -> dict:
+    ref = {"type": "string", "pattern": "^b[1-9][0-9]*$"}
+    if description:
+        ref["description"] = description
+    return ref
+
+
+def _wait_condition_properties() -> dict:
+    """The conditions the wait_for tool confirms, described once there."""
     return {
-        "type": "object",
-        "description": "Optional observable page condition to confirm after the action.",
-        "properties": {
-            "text": {
-                "type": "string", "maxLength": 500,
-                "description": "Wait until visible page text contains this exact text.",
-            },
-            "text_absent": {
-                "type": "string", "maxLength": 500,
-                "description": "Wait until visible page text no longer contains this text.",
-            },
-            "url_contains": {
-                "type": "string", "maxLength": 500,
-                "description": "Wait until the current URL contains this text.",
-            },
-            "load_state": {
-                "type": "string", "enum": ["domcontentloaded", "load"],
-                "description": "Wait for an interactive or fully loaded document.",
-            },
-            "timeout_ms": {
-                "type": "integer", "minimum": 0, "maximum": 30000,
-                "default": 5000,
-            },
-        },
-        "additionalProperties": False,
-        "anyOf": [
-            {"required": ["text"]}, {"required": ["text_absent"]},
-            {"required": ["url_contains"]}, {"required": ["load_state"]},
-        ],
+        "text": {"type": "string", "maxLength": 500,
+                 "description": ("Until the visible page text contains this; case "
+                                 "and spacing are ignored.")},
+        "text_absent": {"type": "string", "maxLength": 500,
+                        "description": "Until the page text no longer contains this."},
+        "url_contains": {"type": "string", "maxLength": 500,
+                         "description": "Until the URL contains this."},
+        "load_state": {"type": "string", "enum": ["domcontentloaded", "load"],
+                       "description": "Until the document is interactive or loaded."},
+        "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 30000,
+                       "default": 5000},
     }
 
 
 def _action_options():
+    # The actions' wait_for names its keys and points at the wait_for tool
+    # rather than repeating their schema: it rides on thirteen tools, and the
+    # node refuses a key it does not know by name.
     return {
-        "wait_for": _wait_condition_schema(),
-        "include_snapshot": {
-            "type": "boolean", "default": False,
-            "description": "Also return a fresh accessibility snapshot after the action.",
+        "wait_for": {
+            "type": "object",
+            "description": ("A condition to confirm afterwards, with the wait_for "
+                            "tool's keys: text, text_absent, url_contains, "
+                            "load_state, timeout_ms. Not seeing it in time is "
+                            "reported, not an error."),
         },
+        "include_snapshot": {"type": "boolean",
+                             "description": "Also return a fresh snapshot."},
+        "include_screenshot": {"type": "boolean",
+                               "description": "Also return a viewport screenshot."},
     }
 
 
 TOOLS = [
     _tool(
         "snapshot",
-        "Inspect the shared, user-visible Puppy browser page as a compact "
-        "accessibility tree. Interactive elements receive refs such as b1 for "
-        "later actions. Search by text or scope the tree to a ref when a full "
-        "page is large. Take a fresh snapshot after substantial page changes.",
+        "Read the shared, user-visible Puppy browser page as an accessibility "
+        "tree. Interactive elements get refs such as b1, each kept until the page "
+        "loads a new document. Narrow a large page with query or scope_ref.",
         {
-            "query": {
-                "type": "string", "maxLength": 200,
-                "description": "Show matching nodes and their ancestor context.",
-            },
-            "scope_ref": {
-                "type": "string", "pattern": "^b[1-9][0-9]*$",
-                "description": "Limit the tree to an element from the previous snapshot.",
-            },
-            "max_nodes": {
-                "type": "integer", "minimum": 1, "maximum": 400, "default": 400,
-                "description": "Maximum meaningful nodes to return.",
-            },
-            "include_screenshot": {
-                "type": "boolean",
-                "description": "Also return an image of the visible viewport.",
-                "default": False,
-            },
+            "query": {"type": "string", "maxLength": 200,
+                      "description": "Show matching nodes and their ancestors."},
+            "scope_ref": _ref("Show only this element's subtree."),
+            "max_nodes": {"type": "integer", "minimum": 1, "maximum": 400,
+                          "default": 400},
+            "include_screenshot": {"type": "boolean", "default": False,
+                                   "description": "Also return a viewport screenshot."},
         }, read_only=True),
     _tool(
         "navigate",
-        "Navigate the shared, user-visible Puppy browser. Bare public hosts use "
-        "HTTPS, LAN hosts use HTTP, and non-URLs become a DuckDuckGo search. "
-        "Waits for a real document state rather than assuming a fixed delay. "
-        "Backend-local file and browser-internal URL schemes are rejected.",
+        "Open a URL in the shared, user-visible Puppy browser: public hosts over "
+        "HTTPS, LAN hosts HTTP, other text a DuckDuckGo search, file and internal "
+        "URLs refused. Waits for the document; a move within the page and a "
+        "download say so at once.",
         {**{
             "url": {"type": "string", "description": "URL, hostname, or search text."},
-            "wait_until": {
-                "type": "string", "enum": ["none", "domcontentloaded", "load"],
-                "default": "domcontentloaded",
-            },
+            "wait_until": {"type": "string",
+                           "enum": ["none", "domcontentloaded", "load"],
+                           "default": "domcontentloaded"},
             "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 30000,
                            "default": 10000},
             "wait_ms": {"type": "integer", "minimum": 0, "maximum": 10000,
-                        "default": 0,
-                        "description": "Optional additional quiet delay after loading."},
+                        "default": 0, "description": "Extra delay after loading."},
         }, **_action_options()}, required=["url"]),
     _tool(
         "screenshot",
-        "Capture the viewport, full page, or one element of the shared, "
-        "user-visible Puppy browser as a bounded JPEG or PNG image.",
+        "Capture the viewport, the full page, or one element as a JPEG or PNG.",
         {
-            "format": {"type": "string", "enum": ["jpeg", "png"],
-                       "default": "jpeg"},
+            "format": {"type": "string", "enum": ["jpeg", "png"], "default": "jpeg"},
             "quality": {"type": "integer", "minimum": 30, "maximum": 100,
-                        "default": 70,
-                        "description": "JPEG quality; ignored for PNG."},
+                        "default": 70},
             "full_page": {"type": "boolean", "default": False},
-            "ref": {"type": "string", "pattern": "^b[1-9][0-9]*$",
-                    "description": "Capture one element from the latest snapshot."},
-        },
-        read_only=True),
+            "ref": _ref("Capture this element."),
+        }, read_only=True),
     _tool(
         "inspect_element",
-        "Inspect one snapshot ref without arbitrary JavaScript. Returns bounded "
-        "attributes, viewport geometry, visibility, state, and selected computed styles.",
-        {"ref": {"type": "string", "pattern": "^b[1-9][0-9]*$"}},
-        required=["ref"], read_only=True),
+        "Attributes, viewport box, visibility, state and selected computed "
+        "styles of one element, without page scripts.",
+        {"ref": _ref()}, required=["ref"], read_only=True),
     _tool(
         "click",
-        "Click an element from the latest snapshot by ref, or click viewport "
-        "coordinates from a screenshot using its reported viewport size. The "
-        "result distinguishes dispatched input from an observed page outcome.",
+        "Click an element by ref, or viewport coordinates measured in a "
+        "screenshot of its reported viewport size. The result tells the input "
+        "sent from what the page then did.",
         {**{
-            "ref": {"type": "string", "description": "Element ref such as b3."},
-            "x": {"type": "number", "description": "Viewport x coordinate."},
-            "y": {"type": "number", "description": "Viewport y coordinate."},
+            "ref": _ref(),
+            "x": {"type": "number"}, "y": {"type": "number"},
             "button": {"type": "string", "enum": ["left", "middle", "right"],
                        "default": "left"},
             "click_count": {"type": "integer", "minimum": 1, "maximum": 3,
@@ -222,135 +201,99 @@ TOOLS = [
         }, **_action_options()}),
     _tool(
         "type",
-        "Focus an element ref from the latest snapshot and insert text. Use "
-        "clear=true to replace the current field contents.",
+        "Focus a field by ref and insert text; clear replaces what it holds.",
         {**{
-            "ref": {"type": "string", "description": "Textbox/editable element ref."},
-            "text": {"type": "string", "description": "Text to insert."},
+            "ref": _ref(), "text": {"type": "string"},
             "clear": {"type": "boolean", "default": False},
         }, **_action_options()}, required=["ref", "text"]),
     _tool(
         "upload_file",
-        "Select one file the user already attached to this chat in a file input. "
-        "This transmits that file to the current webpage; use it only when the "
-        "user's request calls for the upload. Pass the Puppy upload ID embedded "
-        "in the attachment path, never a filesystem path.",
+        "Put a file the user attached to this chat into a file input (it goes to "
+        "the page: only when the request calls for it), by the upload ID in its "
+        "attachment path.",
         {**{
-            "ref": {"type": "string", "pattern": "^b[1-9][0-9]*$",
-                    "description": "File-input element ref from the latest snapshot. "
-                    "If the page uses a separate upload button, click it first and "
-                    "omit ref to use the intercepted file chooser."},
-            "upload_id": {"type": "string",
-                          "pattern": "^[0-9]{13}-[0-9a-f]{10}$",
-                          "description": "ID from this chat's user-provided attachment path."},
+            "ref": _ref("The file input. For a separate upload button, click it "
+                        "first and omit ref."),
+            "upload_id": {"type": "string", "pattern": "^[0-9]{13}-[0-9a-f]{10}$"},
         }, **_action_options()}, required=["upload_id"]),
     _tool(
         "press",
-        "Send a keyboard key to the focused page element.",
+        "Press a key in the focused element: a character types itself; Enter, "
+        "Tab, Escape, ArrowDown and so on by name; modifiers make a shortcut.",
         {**{
-            "key": {"type": "string", "description": "Key such as Enter, Tab, or Escape."},
-            "modifiers": {"type": "array", "items": {
-                "type": "string", "enum": ["Alt", "Control", "Meta", "Shift"]},
-                "uniqueItems": True, "default": []},
+            "key": {"type": "string", "maxLength": 32},
+            "modifiers": {"type": "array", "uniqueItems": True, "items": {
+                "type": "string", "enum": ["Alt", "Control", "Meta", "Shift"]}},
         }, **_action_options()}, required=["key"]),
     _tool(
         "hover",
-        "Move the pointer over a snapshot ref or viewport coordinates and observe "
-        "hover-driven page changes.",
-        {**{
-            "ref": {"type": "string"},
-            "x": {"type": "number"}, "y": {"type": "number"},
-        }, **_action_options()}),
+        "Move the pointer over an element by ref or viewport coordinates.",
+        {**{"ref": _ref(), "x": {"type": "number"}, "y": {"type": "number"}},
+         **_action_options()}),
     _tool(
         "select",
-        "Select an option in a select element from the latest snapshot by value "
-        "or visible label, then dispatch normal input/change events.",
-        {**{
-            "ref": {"type": "string"},
-            "value": {"type": "string"},
-            "label": {"type": "string"},
-        }, **_action_options()}, required=["ref"]),
+        "Choose an option of a select element by value or visible label.",
+        {**{"ref": _ref(), "value": {"type": "string"}, "label": {"type": "string"}},
+         **_action_options()}, required=["ref"]),
     _tool(
         "check",
-        "Set a checkbox or radio element from the latest snapshot to the requested state.",
-        {**{
-            "ref": {"type": "string"},
-            "checked": {"type": "boolean"},
-        }, **_action_options()}, required=["ref", "checked"]),
+        "Set a checkbox or radio element to checked or unchecked.",
+        {**{"ref": _ref(), "checked": {"type": "boolean"}}, **_action_options()},
+        required=["ref", "checked"]),
     _tool(
         "scroll",
-        "Scroll the Puppy browser viewport.",
-        {**{
-            "delta_y": {"type": "number", "description": "Vertical pixels; positive is down."},
-            "delta_x": {"type": "number", "description": "Horizontal pixels; positive is right.",
-                        "default": 0},
-        }, **_action_options()}, required=["delta_y"]),
+        "Scroll the viewport by pixels; positive is down or right.",
+        {**{"delta_y": {"type": "number"},
+            "delta_x": {"type": "number", "default": 0}}, **_action_options()},
+        required=["delta_y"]),
     _tool(
         "wait_for",
-        "Wait for observable page text, URL, disappearance, or document readiness. "
-        "Prefer this over a fixed sleep.",
-        _wait_condition_schema()["properties"], read_only=True),
-    _tool("back", "Go back once in the Puppy browser history and report the observed outcome.",
+        "Wait for page text, its absence, a URL, or document readiness; prefer "
+        "this to a fixed sleep.",
+        _wait_condition_properties(), read_only=True),
+    _tool("back", "Go back once in history and report the outcome.", _action_options()),
+    _tool("forward", "Go forward once in history and report the outcome.",
           _action_options()),
-    _tool("forward", "Go forward once in the Puppy browser history and report the observed outcome.",
-          _action_options()),
-    _tool("reload", "Reload the current Puppy browser page and wait for a real document state.",
-          _action_options()),
-    _tool(
-        "pages",
-        "List pages and popups inside the current Puppy browser. Returns temporary "
-        "page refs such as p1 for switch_page.",
-        read_only=True),
-    _tool(
-        "switch_page",
-        "Switch the shared Browser tab to a page ref returned by pages.",
-        {"page_ref": {"type": "string", "pattern": "^p[1-9][0-9]*$"}},
-        required=["page_ref"]),
+    _tool("reload", "Reload the page and wait for its document.", _action_options()),
+    _tool("pages", "List this browser's pages and popups as refs such as p1.",
+          read_only=True),
+    _tool("switch_page", "Show and control the page with this ref.",
+          {"page_ref": {"type": "string", "pattern": "^p[1-9][0-9]*$"}},
+          required=["page_ref"]),
     _tool(
         "console_messages",
-        "Read bounded console messages and uncaught exceptions captured from the "
-        "current page. Page-provided content is untrusted.",
+        "Read the page's console messages and uncaught exceptions (untrusted).",
         {
             "level": {"type": "string",
                       "enum": ["all", "error", "warning", "info", "debug"],
                       "default": "all"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100,
-                      "default": 50},
-            "clear": {"type": "boolean", "default": False,
-                      "description": "Clear the captured console buffer after reading."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
+            "clear": {"type": "boolean", "default": False},
         }, read_only=True),
     _tool(
         "network_failures",
-        "Read bounded failed requests and HTTP error responses captured from the "
-        "current page. Credentials, fragments, and query strings are redacted.",
+        "Read the page's failed requests and HTTP errors, credentials and query "
+        "strings removed.",
         {
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100,
-                      "default": 50},
-            "clear": {"type": "boolean", "default": False,
-                      "description": "Clear the captured failure buffer after reading."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
+            "clear": {"type": "boolean", "default": False},
         }, read_only=True),
-    _tool(
-        "downloads",
-        "List completed and in-progress files in this Browser's private download "
-        "directory. Completed files receive temporary refs such as d1.",
-        read_only=True),
+    _tool("downloads",
+          "List this browser's downloads; finished ones get refs such as d1.",
+          read_only=True),
     _tool(
         "read_download",
-        "Inspect a completed download ref returned by downloads. Text and safe "
-        "raster images are returned inline within strict limits; other files "
-        "return a validated local path for the session's file tools.",
+        "Read a finished download: text and pictures inline within limits, "
+        "anything else as a path for your file tools.",
         {"download_ref": {"type": "string", "pattern": "^d[1-9][0-9]*$"}},
         required=["download_ref"], read_only=True),
-    _tool(
-        "wait",
-        "Pause for a bounded fixed delay. Prefer wait_for for observable page conditions.",
-        {"milliseconds": {"type": "integer", "minimum": 0, "maximum": 10000,
-                          "default": 1000}}, read_only=True),
+    _tool("wait", "Pause for a fixed time; prefer wait_for.",
+          {"milliseconds": {"type": "integer", "minimum": 0, "maximum": 10000,
+                            "default": 1000}}, read_only=True),
     _tool(
         "new_browser",
-        "Open an additional isolated, user-visible Puppy browser and make it "
-        "this session's current browser. Use only when the user explicitly asks "
-        "for another browser, e.g. with a \"@New browser\" mention.",
+        "Open an additional isolated browser as this chat's current one, only "
+        "when asked, e.g. by a \"@New browser\" mention.",
         browser_target=False),
 ]
 

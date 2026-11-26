@@ -90,6 +90,17 @@ AX_CHILD_BATCH = 32
 MAX_WAIT_MS = 30000
 MAX_AGENT_WAIT_BUDGET_MS = 55000
 ACTION_NAV_OBSERVE_MS = 350
+# The page's state before an action is a reference point, not the action:
+# a page busy in a script or between documents answers late or never, and
+# the last known identity serves instead of a ten-second wait.
+BEFORE_STATE_TIMEOUT = 1.5
+IDENTITY_TIMEOUT = 2.0
+# One document's element refs; past this many a snapshot starts them afresh.
+MAX_AGENT_REFS = 5000
+# How long a navigation the browser abandoned is watched for the download
+# that took its place.
+DOWNLOAD_NOTICE_MS = 1500
+MAX_AGENT_DOWNLOADS = 32
 FRAME_FLOW_LOG_SECONDS = 60.0
 MAX_DIAGNOSTIC_ENTRIES = 200
 MAX_DIAGNOSTIC_TEXT = 1200
@@ -219,6 +230,17 @@ _AGENT_SCROLL_STATE_JS = r"""(async function puppyScrollState(x,y,settle) {
 
 class BrowserError(RuntimeError):
     pass
+
+
+class WaitTimeout(BrowserError):
+    """A page condition that was not seen in time: what the page was at the
+    end, so an action whose own input was sent can say so."""
+
+    def __init__(self, message: str, state: dict, labels: str, timeout_ms: int):
+        super().__init__(message)
+        self.state = state
+        self.labels = labels
+        self.timeout_ms = timeout_ms
 
 
 def _state_changed() -> None:
@@ -755,10 +777,42 @@ _VIRTUAL_KEYS = {
     "ArrowLeft": 37, "ArrowUp": 38, "ArrowRight": 39, "ArrowDown": 40,
     "Home": 36, "End": 35, "PageUp": 33, "PageDown": 34, "Insert": 45,
     "Shift": 16, "Control": 17, "Alt": 18, "Meta": 91, "ContextMenu": 93,
-    "F5": 116,
+    "F1": 112, "F2": 113, "F3": 114, "F4": 115, "F5": 116, "F6": 117,
+    "F7": 118, "F8": 119, "F9": 120, "F10": 121, "F11": 122, "F12": 123,
+    " ": 32,
 }
 _MOUSE_BUTTONS = ("none", "left", "middle", "right")
+_WAIT_KEYS = ("text", "text_absent", "url_contains", "load_state", "timeout_ms")
 _MOUSE_KINDS = {"down": "mousePressed", "up": "mouseReleased", "move": "mouseMoved"}
+
+
+def _agent_key_text(key: str, modifiers: int) -> tuple:
+    """The key an agent pressed, as the browser's key value and the text it
+    types: a printable key types its character as on a keyboard (shifted, a
+    capital), a shortcut with Alt, Control or Meta types nothing, and Space
+    may be written by name."""
+    if key in ("Space", "Spacebar"):
+        key = " "
+    if len(key) != 1 or not key.isprintable():
+        return key, ""
+    if modifiers & 7:
+        return key, ""
+    if modifiers & 8 and key.isalpha():
+        key = key.upper()
+    return key, key
+
+
+def _agent_key_code(key: str) -> str:
+    """The physical key's code, which some pages read instead of the key."""
+    if len(key) == 1:
+        if key.isascii() and key.isalpha():
+            return "Key" + key.upper()
+        if key.isascii() and key.isdigit():
+            return "Digit" + key
+        return "Space" if key == " " else ""
+    if key in ("Shift", "Control", "Alt", "Meta"):
+        return key + "Left"
+    return key if key in _VIRTUAL_KEYS else ""
 
 
 def _normalize_url(text: str) -> str:
@@ -900,6 +954,12 @@ class Manager:
         self.store_seed_id = ""
         self.store_seed_serial = -1
         self.agent_refs = {}
+        self.agent_ref_ids = {}
+        self.agent_ref_next = 1
+        self.agent_ref_document = None
+        self.agent_document = ""
+        self.agent_downloads = collections.OrderedDict()
+        self.agent_download_events = 0
         self.agent_page_refs = {}
         self.agent_download_refs = {}
         self.agent_file_chooser = None
@@ -1054,7 +1114,9 @@ class Manager:
             self.store_baseline_storage = {}
             self.store_seed_id = ""
             self.store_seed_serial = -1
-            self.agent_refs = {}
+            self._agent_forget_refs()
+            self.agent_document = ""
+            self.agent_downloads.clear()
             self.agent_page_refs = {}
             self.agent_download_refs = {}
             self.agent_file_chooser = None
@@ -1074,9 +1136,14 @@ class Manager:
                 await self.call("Target.setDiscoverTargets", {"discover": True})
                 try:
                     await self.call("Browser.setDownloadBehavior", {
-                        "behavior": "allow", "downloadPath": downloads})
+                        "behavior": "allow", "downloadPath": downloads,
+                        "eventsEnabled": True})
                 except BrowserError:
-                    pass   # best effort; downloads just land in the profile
+                    try:
+                        await self.call("Browser.setDownloadBehavior", {
+                            "behavior": "allow", "downloadPath": downloads})
+                    except BrowserError:
+                        pass   # best effort; downloads just land in the profile
                 await self._attach_page("")
                 await self._show_start_page()
                 if shared_storage_enabled():
@@ -1172,7 +1239,8 @@ class Manager:
         self.page_session = ""
         self.applied_color_scheme = None
         self.screencasting = False
-        self.agent_refs = {}
+        self._agent_forget_refs()
+        self.agent_document = ""
         self.agent_page_refs = {}
         self.agent_download_refs = {}
         self.agent_file_chooser = None
@@ -1379,6 +1447,14 @@ class Manager:
             frame = params.get("frame") or {}
             if frame.get("id") and not frame.get("parentId"):
                 self.main_frame = str(frame["id"])
+                # a new document: its nodes are new, and so are its refs
+                self.agent_document = str(frame.get("loaderId") or "")
+            return
+        if method == "Browser.downloadWillBegin":
+            self._agent_download_began(params)
+            return
+        if method == "Browser.downloadProgress":
+            self._agent_download_moved(params)
             return
         if method == "Page.navigatedWithinDocument" and \
                 event_session == self.page_session:
@@ -1504,7 +1580,6 @@ class Manager:
                 self.nav["url"] = info.get("url", self.nav["url"])
                 self.nav["title"] = info.get("title", self.nav["title"])
                 if url_changed or title_changed:
-                    self.agent_refs = {}
                     self._schedule_nav_refresh()
                 if url_changed:
                     self._schedule_visual_refresh()
@@ -1517,7 +1592,8 @@ class Manager:
                 self.page_target = ""
                 self.page_session = ""
                 self.screencasting = False
-                self.agent_refs = {}
+                self._agent_forget_refs()
+                self.agent_document = ""
                 asyncio.ensure_future(self._attach_page(""))
         elif method == "Page.javascriptDialogOpening":
             if message.get("sessionId") != self.page_session:
@@ -1568,7 +1644,8 @@ class Manager:
             self.cursor_epoch += 1
             self.applied_color_scheme = None
             self.agent_domain_session = ""
-            self.agent_refs = {}
+            self._agent_forget_refs()
+            self.agent_document = ""
             self.agent_page_refs = {}
             self.agent_file_chooser = None
             self.agent_lifecycle = {"domcontentloaded": 0, "load": 0}
@@ -2525,15 +2602,13 @@ class Manager:
             evaluated = await self.call("Runtime.evaluate", {
                 "expression": "JSON.stringify({url:location.href,title:document.title})",
                 "returnByValue": True,
-            }, session=self.page_session)
+            }, session=self.page_session, timeout=IDENTITY_TIMEOUT)
             value = (evaluated.get("result") or {}).get("value")
             identity = json.loads(value) if isinstance(value, str) else {}
             if isinstance(identity, dict):
                 url = str(identity.get("url") or "")[:MAX_URL_LENGTH]
                 title = str(identity.get("title") or "")[:500]
                 if url:
-                    if self.nav.get("url") and url != self.nav.get("url"):
-                        self.agent_refs = {}
                     self.nav["url"] = url
                 self.nav["title"] = title
         except (BrowserError, TypeError, ValueError):
@@ -2547,7 +2622,31 @@ class Manager:
                 label, maximum))
         return text
 
+    def _agent_forget_refs(self) -> None:
+        self.agent_refs = {}
+        self.agent_ref_ids = {}
+        self.agent_ref_next = 1
+        self.agent_ref_document = None
+
+    def _agent_current_refs(self) -> None:
+        """Element refs belong to one document: those of an earlier one go."""
+        if self.agent_ref_document != self.agent_document:
+            self._agent_forget_refs()
+            self.agent_ref_document = self.agent_document
+
+    def _agent_ref_for(self, backend_id) -> str:
+        """The element's ref: the one it already has in this document, or the
+        next number."""
+        ref = self.agent_ref_ids.get(backend_id)
+        if ref is None:
+            ref = "b{}".format(self.agent_ref_next)
+            self.agent_ref_next += 1
+            self.agent_refs[ref] = backend_id
+            self.agent_ref_ids[backend_id] = ref
+        return ref
+
     def _agent_backend_id(self, ref_value) -> tuple:
+        self._agent_current_refs()
         ref = str(ref_value or "").strip().lower()
         backend_id = self.agent_refs.get(ref)
         if backend_id is None:
@@ -2585,15 +2684,19 @@ class Manager:
         result = called.get("result") or {}
         return result.get("value")
 
-    async def _agent_page_state(self, condition=None) -> dict:
+    async def _agent_page_state(self, condition=None,
+                                timeout: float = CALL_TIMEOUT) -> dict:
         condition = condition or {}
         wanted = condition.get("text")
         absent = condition.get("text_absent")
         text_checks = wanted is not None or absent is not None
+        # Text is matched the way a person reads it: case and runs of
+        # spacing do not matter.
         inspect_text = """
- const body=document.body ? String(document.body.innerText || '') : '';
- textPresent=wanted===null?null:body.includes(wanted);
- textAbsent=absent===null?null:!body.includes(absent);""" if text_checks else ""
+ const fold=value=>String(value).replace(/\\s+/g,' ').trim().toLowerCase();
+ const body=document.body ? fold(document.body.innerText || '') : '';
+ textPresent=wanted===null?null:body.includes(fold(wanted));
+ textAbsent=absent===null?null:!body.includes(fold(absent));""" if text_checks else ""
         expression = """(() => {
  const wanted=%s, absent=%s;
  let textPresent=null, textAbsent=null;%s
@@ -2603,7 +2706,7 @@ class Manager:
 })()""" % (json.dumps(wanted), json.dumps(absent), inspect_text)
         evaluated = await self.call("Runtime.evaluate", {
             "expression": expression, "returnByValue": True,
-        }, session=self.page_session)
+        }, session=self.page_session, timeout=timeout)
         if evaluated.get("exceptionDetails"):
             raise BrowserError("could not inspect the current page state")
         value = (evaluated.get("result") or {}).get("value")
@@ -2615,12 +2718,19 @@ class Manager:
             "textPresent": state.get("textPresent"),
             "textAbsent": state.get("textAbsent"),
         }
-        old_url = self.nav.get("url") or ""
         self.nav["url"] = state["url"]
         self.nav["title"] = state["title"]
-        if old_url and state["url"] != old_url:
-            self.agent_refs = {}
         return state
+
+    async def _agent_before(self) -> dict:
+        """The page before an action, for telling what the action changed: a
+        short read, else the identity the node already holds."""
+        try:
+            return await self._agent_page_state(timeout=BEFORE_STATE_TIMEOUT)
+        except BrowserError:
+            return {"url": str(self.nav.get("url") or "about:blank"),
+                    "title": str(self.nav.get("title") or ""), "readyState": "",
+                    "textPresent": None, "textAbsent": None}
 
     async def _agent_scroll_state(self, x: float, y: float,
                                   settle: bool = False) -> dict:
@@ -2653,6 +2763,11 @@ class Manager:
             raw = {}
         if not isinstance(raw, dict):
             raise BrowserError("wait_for must be an object")
+        unknown = sorted(str(key)[:40] for key in raw if key not in _WAIT_KEYS)
+        if unknown:
+            # a key that is ignored looks like a condition that was met
+            raise BrowserError("wait_for does not take {}; it takes {}".format(
+                ", ".join(unknown), ", ".join(_WAIT_KEYS)))
         spec = {}
         for key in ("text", "text_absent", "url_contains"):
             if key in raw:
@@ -2694,7 +2809,8 @@ class Manager:
         last = {}
         while True:
             try:
-                last = await self._agent_page_state(spec)
+                last = await self._agent_page_state(spec, timeout=max(
+                    0.5, min(CALL_TIMEOUT, deadline - time.monotonic())))
             except BrowserError:
                 if not self.running or time.monotonic() >= deadline:
                     raise
@@ -2726,10 +2842,11 @@ class Manager:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 labels = " and ".join(self._agent_condition_labels(spec))
-                raise BrowserError(
+                raise WaitTimeout(
                     "timed out after {} ms waiting for {}\nPage: {}\nURL: {}".format(
                         spec["timeout_ms"], labels, last.get("title") or "(untitled)",
-                        last.get("url") or "about:blank"))
+                        last.get("url") or "about:blank"),
+                    last, labels, spec["timeout_ms"])
             await asyncio.sleep(min(0.1, remaining))
 
     async def _agent_observe_change(self, before: dict, lifecycle_before: dict,
@@ -2737,7 +2854,8 @@ class Manager:
         deadline = time.monotonic() + timeout_ms / 1000.0
         while True:
             try:
-                state = await self._agent_page_state()
+                state = await self._agent_page_state(timeout=max(
+                    0.3, min(CALL_TIMEOUT, deadline - time.monotonic())))
             except BrowserError:
                 remaining = deadline - time.monotonic()
                 if not self.running or remaining <= 0:
@@ -2763,14 +2881,45 @@ class Manager:
                         "was observed within {} ms.".format(timeout_ms))
             await asyncio.sleep(min(0.1, remaining))
 
+    async def _agent_awaited(self, raw, lifecycle_before: dict,
+                             previous_url: str) -> str:
+        """An action's own wait_for: what was observed, or that it was not.
+        The input was sent either way, so running out of time is a result
+        the agent reads, never the action failing."""
+        try:
+            _state, outcome = await self._agent_wait_condition(
+                raw, lifecycle_before=lifecycle_before, previous_url=previous_url)
+        except WaitTimeout as exc:
+            return "Not observed: {} within {} ms (the input itself was sent).".format(
+                exc.labels, exc.timeout_ms)
+        return outcome
+
+    async def _agent_extras(self, payload: dict, params: dict,
+                            downloads_before: int = None) -> dict:
+        """What an action adds to its own result when asked: a download it
+        started, a fresh snapshot, a screenshot of the viewport."""
+        if downloads_before is not None:
+            notice = self._agent_download_notice(downloads_before)
+            if notice:
+                payload["text"] += "\n" + notice
+        if params.get("include_snapshot") is True:
+            snapshot = await self._agent_snapshot({}, refresh_identity=False)
+            payload["text"] += "\n\n" + snapshot.get("text", "")
+        if params.get("include_screenshot") is True:
+            shot = await self._agent_screenshot({}, include_text=False)
+            payload["image"] = shot["image"]
+            payload["text"] += "\nScreenshot: the {}x{} viewport.".format(
+                self.viewport["width"], self.viewport["height"])
+        return payload
+
     async def _agent_finish_action(self, lead: str, params: dict, before: dict,
                                    lifecycle_before: dict, verification="",
                                    observe_ms: int = ACTION_NAV_OBSERVE_MS) -> dict:
+        downloads = self.agent_download_events
         requested = params.get("wait_for")
         if requested is not None:
-            _state, outcome = await self._agent_wait_condition(
-                requested, lifecycle_before=lifecycle_before,
-                previous_url=before.get("url", ""))
+            outcome = await self._agent_awaited(
+                requested, lifecycle_before, before.get("url", ""))
         elif observe_ms <= 0:
             outcome = "Input was dispatched; no page-level outcome wait was needed."
         else:
@@ -2780,13 +2929,8 @@ class Manager:
         text = lead + "\nOutcome: " + outcome
         if verification:
             text += "\nVerified: " + verification
-        payload = {"text": self._agent_page_text(text)}
-        if params.get("include_snapshot") is True:
-            snapshot = await self._agent_snapshot({}, refresh_identity=False)
-            payload["text"] += "\n\n" + snapshot.get("text", "")
-            if snapshot.get("image"):
-                payload["image"] = snapshot["image"]
-        return payload
+        return await self._agent_extras({"text": self._agent_page_text(text)}, params,
+                                        downloads)
 
     async def _agent_wait_for_result(self, params: dict) -> dict:
         state, observed = await self._agent_wait_condition(params, default_load=True)
@@ -2795,9 +2939,8 @@ class Manager:
                 "\nDocument state: {}".format(state.get("readyState") or "unknown")}
 
     async def _agent_history(self, direction: int, label: str, params: dict) -> dict:
-        before = await self._agent_page_state()
+        before = await self._agent_before()
         lifecycle = dict(self.agent_lifecycle)
-        self.agent_refs = {}
         self._clear_agent_diagnostics()
         moved = await self._history_step(direction)
         if not moved:
@@ -2808,16 +2951,16 @@ class Manager:
             observe_ms=1500)
 
     async def _agent_reload(self, params: dict) -> dict:
-        before = await self._agent_page_state()
+        before = await self._agent_before()
         lifecycle = dict(self.agent_lifecycle)
-        self.agent_refs = {}
+        downloads = self.agent_download_events
+        self._agent_forget_refs()    # a reload is always a new document
         self._clear_agent_diagnostics()
         await self.call("Page.reload", session=self.page_session)
         requested = params.get("wait_for")
         if requested is not None:
-            _state, outcome = await self._agent_wait_condition(
-                requested, lifecycle_before=lifecycle,
-                previous_url=before.get("url", ""))
+            outcome = await self._agent_awaited(requested, lifecycle,
+                                                before.get("url", ""))
         else:
             try:
                 _state, outcome = await self._agent_wait_condition(
@@ -2827,14 +2970,8 @@ class Manager:
                 outcome = await self._agent_observe_change(
                     before, lifecycle, timeout_ms=500)
         await self._refresh_nav()
-        payload = {"text": self._agent_page_text(
-            "Reload requested.\nOutcome: " + outcome)}
-        if params.get("include_snapshot") is True:
-            snapshot = await self._agent_snapshot({}, refresh_identity=False)
-            payload["text"] += "\n\n" + snapshot.get("text", "")
-            if snapshot.get("image"):
-                payload["image"] = snapshot["image"]
-        return payload
+        return await self._agent_extras({"text": self._agent_page_text(
+            "Reload requested.\nOutcome: " + outcome)}, params, downloads)
 
     async def _agent_ax_source(self, scope_backend=None) -> tuple:
         """Fetch a bounded AX graph instead of one unbounded JSON response.
@@ -2931,11 +3068,14 @@ class Manager:
         query = self._agent_text_argument(params.get("query"), "query", 200).strip()
         max_nodes = int(self._bounded_number(params.get("max_nodes", MAX_AX_NODES),
                                              1, MAX_AX_NODES, "max_nodes"))
-        previous_refs = dict(self.agent_refs)
+        self._agent_current_refs()
+        if len(self.agent_refs) > MAX_AGENT_REFS:
+            self._agent_forget_refs()
+            self.agent_ref_document = self.agent_document
         scope_ref = str(params.get("scope_ref") or "").strip().lower()
         scope_backend = None
         if scope_ref:
-            scope_backend = previous_refs.get(scope_ref)
+            scope_backend = self.agent_refs.get(scope_ref)
             if scope_backend is None:
                 raise BrowserError(
                     "unknown or stale scope_ref {}; take a fresh snapshot".format(scope_ref))
@@ -2968,7 +3108,6 @@ class Manager:
             "alert", "article", "dialog", "heading", "img", "list", "listitem",
             "main", "navigation", "region", "row", "statictext", "table",
         }
-        self.agent_refs = {}
         lines = [
             "Page: {}".format(self.nav.get("title") or "(untitled)"),
             "URL: {}".format(self.nav.get("url") or "about:blank"),
@@ -3026,17 +3165,18 @@ class Manager:
             interactive = role_key in interactive_roles or (
                 focusable and role_key not in ("document", "rootwebarea", "webarea"))
             backend_id = node.get("backendDOMNodeId")
-            ref = ""
-            if interactive and backend_id is not None:
-                ref = "b{}".format(len(self.agent_refs) + 1)
-                self.agent_refs[ref] = backend_id
+            referable = interactive and backend_id is not None
             meaningful = interactive or role_key in semantic_roles or (
                 bool(name or value) and role_key not in ("inlinetextbox", "none"))
             ignored = node.get("ignored") is True
             if meaningful and not ignored:
                 parts = []
-                if ref:
-                    parts.append("[{}]".format(ref))
+                if referable:
+                    # the ref is the element's for as long as its document
+                    # stands: assigned once it is shown, kept by later ones
+                    parts.append("[{}]".format(
+                        self.agent_ref_ids.get(backend_id) or
+                        "b{}".format(self.agent_ref_next)))
                 parts.append(role)
                 if name:
                     parts.append(json.dumps(name, ensure_ascii=False))
@@ -3048,12 +3188,12 @@ class Manager:
                         parts.append("{}={}".format(flag, flag_value))
                 line = "  " * min(depth, 12) + "- " + " ".join(parts)
                 if text_size + len(line) + 1 <= MAX_AX_TEXT:
+                    if referable:
+                        self._agent_ref_for(backend_id)
                     lines.append(line)
                     text_size += len(line) + 1
                     shown += 1
                 else:
-                    if ref:
-                        self.agent_refs.pop(ref, None)
                     return
             child_depth = depth if ignored or not meaningful else depth + 1
             for child_id in node.get("childIds") or []:
@@ -3170,37 +3310,53 @@ class Manager:
             raise BrowserError(
                 "combined navigation waits must not exceed {} ms".format(
                     MAX_AGENT_WAIT_BUDGET_MS))
-        before = await self._agent_page_state()
+        before = await self._agent_before()
         lifecycle = dict(self.agent_lifecycle)
-        self.agent_refs = {}
+        downloads = self.agent_download_events
         self._clear_agent_diagnostics()
         navigation = await self.call("Page.navigate", {"url": url}, session=self.page_session)
-        if navigation.get("errorText"):
-            raise BrowserError("navigation failed: " + str(navigation["errorText"])[:500])
-        if wait_until == "none":
+        error_text = str(navigation.get("errorText") or "")
+        if error_text == "net::ERR_ABORTED":
+            # What a URL that turns into a download answers: the page stays
+            # where it was and the file arrives in the downloads.
+            started = await self._agent_download_after(downloads)
+            if started:
+                await self._refresh_nav()
+                return await self._agent_extras({"text": self._agent_page_text(
+                    "Navigation to {} started a download instead of opening a page; "
+                    "the page did not change.\n{}".format(url, started))}, params)
+        if error_text:
+            raise BrowserError("navigation failed: " + error_text[:500])
+        if navigation.get("loaderId"):
+            self._agent_forget_refs()    # a new document is coming
+        within = not navigation.get("loaderId")
+        if within and wait_until != "none":
+            # Chromium names no loader for a navigation within the current
+            # document (a #fragment, the URL it already shows): no document
+            # will load, so there is nothing to wait for.
+            outcome = "Navigated within the current document; no new page was loaded."
+        elif wait_until == "none":
             outcome = "Navigation request was accepted; no document wait was requested."
         else:
-            _state, outcome = await self._agent_wait_condition(
-                {"load_state": wait_until, "timeout_ms": timeout_ms},
-                lifecycle_before=lifecycle, previous_url=before.get("url", ""))
+            try:
+                _state, outcome = await self._agent_wait_condition(
+                    {"load_state": wait_until, "timeout_ms": timeout_ms},
+                    lifecycle_before=lifecycle, previous_url=before.get("url", ""))
+            except WaitTimeout as exc:
+                outcome = ("Navigation started, but the document was not {} within "
+                           "{} ms; it may still be loading.".format(
+                               wait_until, exc.timeout_ms))
         if params.get("wait_for") is not None:
-            _state, extra = await self._agent_wait_condition(
-                params["wait_for"], lifecycle_before=lifecycle,
-                previous_url=before.get("url", ""))
-            outcome += " " + extra
+            outcome += " " + await self._agent_awaited(
+                params["wait_for"], lifecycle, before.get("url", ""))
         if wait_ms:
             await asyncio.sleep(wait_ms / 1000.0)
         await self._refresh_nav()
-        if wait_until == "none" and params.get("wait_for") is None:
+        if (wait_until == "none" or within) and params.get("wait_for") is None:
             await self._agent_refresh_identity()
-        payload = {"text": self._agent_page_text(
-            "Navigation requested for {}.\nOutcome: {}".format(url, outcome))}
-        if params.get("include_snapshot") is True:
-            snapshot = await self._agent_snapshot({}, refresh_identity=False)
-            payload["text"] += "\n\n" + snapshot.get("text", "")
-            if snapshot.get("image"):
-                payload["image"] = snapshot["image"]
-        return payload
+        return await self._agent_extras({"text": self._agent_page_text(
+            "Navigation requested for {}.\nOutcome: {}".format(url, outcome))}, params,
+            downloads)
 
     async def _agent_point(self, params: dict) -> tuple:
         ref = str(params.get("ref") or "").strip().lower()
@@ -3229,7 +3385,7 @@ class Manager:
         return x, y
 
     async def _agent_click(self, params: dict) -> dict:
-        before = await self._agent_page_state()
+        before = await self._agent_before()
         lifecycle = dict(self.agent_lifecycle)
         x, y = await self._agent_point(params)
         button = str(params.get("button") or "left")
@@ -3252,13 +3408,14 @@ class Manager:
     async def _agent_key_call(self, kind: str, key: str, modifiers: int = 0,
                               text: str = "") -> None:
         payload = self._key_payload({"kind": kind, "key": key,
+                                     "code": _agent_key_code(key),
                                      "modifiers": modifiers, "text": text})
         if payload is None:
             raise BrowserError("invalid key event")
         await self.call("Input.dispatchKeyEvent", payload, session=self.page_session)
 
     async def _agent_type(self, params: dict) -> dict:
-        before = await self._agent_page_state()
+        before = await self._agent_before()
         lifecycle = dict(self.agent_lifecycle)
         ref, backend_id = self._agent_backend_id(params.get("ref"))
         text = str(params.get("text") or "")
@@ -3318,7 +3475,7 @@ class Manager:
         if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or \
                 info.st_uid != os.geteuid() or identity != wanted_identity:
             raise BrowserError("the session upload changed; ask the user to attach it again")
-        before = await self._agent_page_state()
+        before = await self._agent_before()
         lifecycle = dict(self.agent_lifecycle)
         requested_ref = str(params.get("ref") or "").strip().lower()
         if requested_ref:
@@ -3365,7 +3522,7 @@ class Manager:
             params, before, lifecycle, verification, observe_ms=0)
 
     async def _agent_press(self, params: dict) -> dict:
-        before = await self._agent_page_state()
+        before = await self._agent_before()
         lifecycle = dict(self.agent_lifecycle)
         key = str(params.get("key") or "")[:32]
         if not key:
@@ -3377,14 +3534,15 @@ class Manager:
         if any(item not in bits for item in requested):
             raise BrowserError("unknown key modifier")
         modifiers = sum(bits[item] for item in set(requested))
-        await self._agent_key_call("down", key, modifiers=modifiers)
+        key, text = _agent_key_text(key, modifiers)
+        await self._agent_key_call("down", key, modifiers=modifiers, text=text)
         await self._agent_key_call("up", key, modifiers=modifiers)
-        label = "+".join(list(requested) + [key])
+        label = "+".join(list(requested) + ["Space" if key == " " else key])
         return await self._agent_finish_action(
             "Dispatched key {}.".format(label), params, before, lifecycle)
 
     async def _agent_hover(self, params: dict) -> dict:
-        before = await self._agent_page_state()
+        before = await self._agent_before()
         lifecycle = dict(self.agent_lifecycle)
         x, y = await self._agent_point(params)
         await self.call("Input.dispatchMouseEvent", {
@@ -3406,7 +3564,7 @@ class Manager:
             if has_value else None
         label = self._agent_text_argument(params.get("label"), "label", 300) \
             if has_label else None
-        before = await self._agent_page_state()
+        before = await self._agent_before()
         lifecycle = dict(self.agent_lifecycle)
         ref, backend_id = self._agent_backend_id(params.get("ref"))
         selected = await self._agent_call_on_backend(
@@ -3424,7 +3582,7 @@ class Manager:
     async def _agent_check(self, params: dict) -> dict:
         if not isinstance(params.get("checked"), bool):
             raise BrowserError("checked must be true or false")
-        before = await self._agent_page_state()
+        before = await self._agent_before()
         lifecycle = dict(self.agent_lifecycle)
         ref, backend_id = self._agent_backend_id(params.get("ref"))
         checked = await self._agent_call_on_backend(
@@ -3440,7 +3598,7 @@ class Manager:
             params, before, lifecycle, verification, observe_ms=0)
 
     async def _agent_scroll(self, params: dict) -> dict:
-        before = await self._agent_page_state()
+        before = await self._agent_before()
         lifecycle = dict(self.agent_lifecycle)
         dx = self._bounded_number(params.get("delta_x", 0), -2000, 2000, "delta_x")
         dy = self._bounded_number(params.get("delta_y"), -2000, 2000, "delta_y")
@@ -3662,6 +3820,56 @@ class Manager:
             })
         entries.sort(key=lambda item: (-item["mtime"], item["name"].casefold()))
         return entries
+
+    def _agent_download_began(self, params: dict) -> None:
+        guid = str(params.get("guid") or "")[:80]
+        if not guid:
+            return
+        self.agent_download_events += 1
+        self.agent_downloads[guid] = {
+            "name": str(params.get("suggestedFilename") or "")[:300],
+            "state": "inProgress", "received": 0, "total": 0,
+            "seq": self.agent_download_events,
+        }
+        while len(self.agent_downloads) > MAX_AGENT_DOWNLOADS:
+            self.agent_downloads.popitem(last=False)
+
+    def _agent_download_moved(self, params: dict) -> None:
+        item = self.agent_downloads.get(str(params.get("guid") or ""))
+        if item is None:
+            return
+        state = str(params.get("state") or "")
+        if state in ("inProgress", "completed", "canceled"):
+            item["state"] = state
+        for key, field in (("received", "receivedBytes"), ("total", "totalBytes")):
+            try:
+                item[key] = max(0, int(params.get(field) or 0))
+            except (TypeError, ValueError):
+                pass
+
+    def _agent_download_notice(self, since: int) -> str:
+        """The downloads that began after event ``since``, in one line each.
+        Their names come from the page."""
+        lines = []
+        for item in self.agent_downloads.values():
+            if item["seq"] <= since:
+                continue
+            state = {"inProgress": "in progress", "completed": "completed",
+                     "canceled": "canceled"}.get(item["state"], item["state"])
+            size = item["received"] if item["state"] == "completed" else item["total"]
+            lines.append("Download started: {} ({}{}); downloads lists it.".format(
+                json.dumps(item["name"] or "(unnamed)", ensure_ascii=False), state,
+                ", {} bytes".format(size) if size else ""))
+        return "\n".join(lines)
+
+    async def _agent_download_after(self, since: int) -> str:
+        """Wait briefly for a download to begin after event ``since``."""
+        deadline = time.monotonic() + DOWNLOAD_NOTICE_MS / 1000.0
+        while True:
+            notice = self._agent_download_notice(since)
+            if notice or time.monotonic() >= deadline:
+                return notice
+            await asyncio.sleep(0.05)
 
     def _agent_downloads(self) -> dict:
         entries = self._agent_download_entries()

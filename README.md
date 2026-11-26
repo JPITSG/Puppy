@@ -880,7 +880,13 @@ trackpad, or the mouse wheel, just like the chat chips and tab bar.
   toolset for the same browser: navigate, snapshot the accessibility tree,
   click, type, hover, press, scroll, select, check, screenshot, switch pages,
   read console messages and network failures, upload one of the session's own
-  attachments into a file input, and inspect downloads. A page the agent opens
+  attachments into a file input, and inspect downloads. An element keeps its
+  ref from one snapshot to the next until the page loads a new document, a
+  printable key types its character, text waits ignore case and spacing, and
+  each action can return a screenshot of its result. A condition an action
+  waits for that does not appear in time is reported in its result rather
+  than as a failed action, a move within the current page answers at once,
+  and a link or URL that turns into a download says so. A page the agent opens
   appears as a tab beside the chat without stealing focus, pages follow your
   light or dark theme, and an optional shared sign-in store carries cookies
   across all of a backend's browsers.

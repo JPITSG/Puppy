@@ -105,6 +105,10 @@ def record(name, payload):
 
 
 buffer = b""
+# Chromium names a loader for every navigation to a new document and none for
+# one within the current document; a busy page answers no script at all.
+LOADER = 0
+BUSY = False
 casting = False
 viewport_width, viewport_height = 1280, 800
 frame_session = 10
@@ -148,6 +152,8 @@ while True:
         response_error = None
         emit_frame = None
         emit_lifecycle = False
+        emit_loader = None
+        emit_events = []
         if method == "Browser.getVersion":
             result = {"product": "StubChrome/152"}
         elif method == "Target.getTargets":
@@ -245,6 +251,8 @@ while True:
         elif method == "Runtime.evaluate":
             expression = params.get("expression") or ""
             record("evaluate.jsonl", {"expression": expression})
+            if BUSY and ("readyState" in expression or "location.href" in expression):
+                continue
             current = POPUP if active_target == POPUP["targetId"] else PAGE
             if "puppyScrollState" in expression:
                 value = {"target": "document", "x": 0, "y": SCROLL_Y,
@@ -264,11 +272,15 @@ while True:
                 match = re.search(r"const wanted=(.*?), absent=(.*?);", expression, re.S)
                 wanted = json.loads(match.group(1)) if match else None
                 absent = json.loads(match.group(2)) if match else None
+                if "toLowerCase" in expression:
+                    fold = lambda text: " ".join(str(text).split()).lower()
+                else:
+                    fold = lambda text: text
                 value = {
                     "url": current["url"], "title": current["title"],
                     "readyState": "complete",
-                    "textPresent": None if wanted is None else wanted in PAGE_TEXT,
-                    "textAbsent": None if absent is None else absent not in PAGE_TEXT,
+                    "textPresent": None if wanted is None else fold(wanted) in fold(PAGE_TEXT),
+                    "textAbsent": None if absent is None else fold(absent) not in fold(PAGE_TEXT),
                 }
                 result = {"result": {"type": "object", "value": value}}
         elif method == "Emulation.setEmulatedMedia":
@@ -319,6 +331,31 @@ while True:
                 # proves the node's socket loop was never blocked on this.
                 continue
             current = POPUP if active_target == POPUP["targetId"] else PAGE
+            BUSY = url == "http://stub.invalid/busy"
+            if url == "http://stub.invalid/report.zip":
+                # a URL that is a download: the page stays, the file arrives
+                emit_events = [
+                    {"method": "Browser.downloadWillBegin", "params": {
+                        "frameId": "f1", "guid": "dl-1", "url": url,
+                        "suggestedFilename": "report.zip"}},
+                    {"method": "Browser.downloadProgress", "params": {
+                        "guid": "dl-1", "totalBytes": 2048, "receivedBytes": 2048,
+                        "state": "completed"}}]
+                send({"id": msg.get("id"), "result": {
+                    "frameId": "f1", "loaderId": "aborted",
+                    "errorText": "net::ERR_ABORTED"}})
+                for event in emit_events:
+                    send(event)
+                continue
+            if "#" in url and url.split("#")[0] == current["url"].split("#")[0]:
+                current["url"] = url
+                send({"method": "Target.targetInfoChanged",
+                      "params": {"targetInfo": dict(current)}})
+                send({"id": msg.get("id"), "result": {"frameId": "f1"}})
+                send({"method": "Page.navigatedWithinDocument",
+                      "sessionId": "stub-sess-2" if active_target == POPUP["targetId"]
+                      else "stub-sess-1", "params": {"frameId": "f1", "url": url}})
+                continue
             current["url"] = url
             current["title"] = "navigated"
             if url == "http://cookie.example.test/login":
@@ -331,7 +368,9 @@ while True:
                 del STUB_COOKIES[:]
             send({"method": "Target.targetInfoChanged",
                   "params": {"targetInfo": dict(current)}})
-            result = {"frameId": "f1"}
+            LOADER += 1
+            emit_loader = "loader-{}".format(LOADER)
+            result = {"frameId": "f1", "loaderId": emit_loader}
             emit_lifecycle = True
             if url == "http://stub.invalid/surface-reset":
                 emit_frame = (1280, 657, STALE_FRAME)
@@ -343,6 +382,8 @@ while True:
         elif method == "Page.stopLoading":
             record("loading-stops.jsonl", {"pid": os.getpid()})
         elif method in ("Page.reload", "Page.navigateToHistoryEntry"):
+            LOADER += 1
+            emit_loader = "loader-{}".format(LOADER)
             emit_lifecycle = True
             emit_frame = (viewport_width, viewport_height, FRAME)
         elif method == "Storage.getCookies":
@@ -388,6 +429,10 @@ while True:
                 else "stub-sess-1"
             send({"method": "Page.frameStartedLoading", "sessionId": session_id,
                   "params": {"frameId": "f1"}})
+            if emit_loader:
+                send({"method": "Page.frameNavigated", "sessionId": session_id,
+                      "params": {"frame": {"id": "f1", "loaderId": emit_loader},
+                                 "type": "Navigation"}})
             send({"method": "Page.domContentEventFired", "sessionId": session_id,
                   "params": {"timestamp": 1}})
             send({"method": "Page.loadEventFired", "sessionId": session_id,
@@ -6913,17 +6958,19 @@ async def main() -> None:
                 assert update_activity[0]["browser_id"] == agent_id
 
                 # Large pages can be searched or scoped without exposing raw
-                # CDP/JavaScript. Refs intentionally belong to the latest tree.
+                # CDP/JavaScript; an element keeps its ref across them.
                 searched = await mcp_request(mcp, 101, "tools/call", {
                     "name": "snapshot", "arguments": {"query": "Email"}})
                 searched_text = searched["result"]["content"][0]["text"]
                 assert "textbox \"Email\"" in searched_text and \
                     "button \"Continue\"" not in searched_text, searched_text
+                assert "[b2] textbox \"Email\"" in searched_text, \
+                    "the search keeps the ref the full tree gave"
                 scoped = await mcp_request(mcp, 102, "tools/call", {
-                    "name": "snapshot", "arguments": {"scope_ref": "b1"}})
+                    "name": "snapshot", "arguments": {"scope_ref": "b2"}})
                 scoped_text = scoped["result"]["content"][0]["text"]
-                assert "scoped to b1" in scoped_text and \
-                    "textbox \"Email\"" in scoped_text, scoped_text
+                assert "scoped to b2" in scoped_text and \
+                    "[b2] textbox \"Email\"" in scoped_text, scoped_text
                 fresh = await mcp_request(mcp, 103, "tools/call", {
                     "name": "snapshot", "arguments": {}})
                 fresh_text = fresh["result"]["content"][0]["text"]
@@ -7215,6 +7262,104 @@ async def main() -> None:
                     "name": "reload", "arguments": {}})
                 assert "Observed document domcontentloaded" in \
                     reloaded["result"]["content"][0]["text"]
+
+                async def call_text(number, name, arguments=None, error=False):
+                    answer = await mcp_request(mcp, number, "tools/call", {
+                        "name": name, "arguments": arguments or {}})
+                    assert answer["result"]["isError"] is error, answer
+                    return answer["result"]["content"][0]["text"], answer
+
+                # An element keeps its ref for as long as its document stands:
+                # a later snapshot, a narrower one, a new title and a move
+                # within the page keep it; a new document starts afresh.
+                whole, _ = await call_text(140, "snapshot")
+                assert "[b1] button \"Continue\"" in whole and \
+                    "[b5] button \"Upload file\"" in whole, whole
+                narrowed, _ = await call_text(141, "snapshot", {"query": "Upload"})
+                assert "[b5] button \"Upload file\"" in narrowed and \
+                    "[b1]" not in narrowed, narrowed
+                again, _ = await call_text(142, "snapshot")
+                assert "[b2] textbox \"Email\"" in again and \
+                    "[b5] button \"Upload file\"" in again, again
+                agent_instance._on_message({
+                    "method": "Target.targetInfoChanged", "params": {"targetInfo": {
+                        "targetId": agent_instance.page_target, "type": "page",
+                        "url": agent_instance.nav["url"], "title": "Renamed"}}})
+                await call_text(143, "click", {"ref": "b2"})
+                page_url = agent_instance.nav["url"].split("#")[0]
+                moved_at = time.monotonic()
+                within, _ = await call_text(144, "navigate", {"url": page_url + "#part"})
+                assert "Navigated within the current document" in within, within
+                assert time.monotonic() - moved_at < 2, "no load is waited for"
+                await call_text(145, "click", {"ref": "b5"})
+                await call_text(146, "navigate", {"url": "http://gateway.lan/other"})
+                stale, _ = await call_text(147, "click", {"ref": "b1"}, error=True)
+                assert "stale element ref" in stale, stale
+                restarted, _ = await call_text(148, "snapshot")
+                assert "[b1] button \"Continue\"" in restarted, restarted
+
+                # An action's wait that runs out is the action's outcome, not
+                # its failure; text is matched without case or spacing, a key
+                # a wait does not take is refused, and an action can bring
+                # its own screenshot.
+                missed, _ = await call_text(149, "click", {
+                    "ref": "b1", "wait_for": {"text": "Never present", "timeout_ms": 0}})
+                assert "Dispatched a left click" in missed and \
+                    "Not observed: text 'Never present' within 0 ms" in missed, missed
+                folded, _ = await call_text(150, "wait_for", {
+                    "text": "  stub   PAGE ready ", "timeout_ms": 100})
+                assert "Observed text" in folded, folded
+                unknown_key, _ = await call_text(151, "click", {
+                    "ref": "b1", "wait_for": {"text": "Ready", "timeout": 100}},
+                    error=True)
+                assert "wait_for does not take timeout" in unknown_key, unknown_key
+                pictured_text, pictured = await call_text(152, "click", {
+                    "ref": "b1", "include_screenshot": True})
+                assert "Screenshot: the " in pictured_text and any(
+                    item.get("type") == "image" and item.get("data") == base64_stub
+                    for item in pictured["result"]["content"]), pictured
+
+                # A printable key types its character as a keyboard's does;
+                # with Control it is a shortcut and types nothing.
+                def last_key_down():
+                    return [item["params"] for item in read_lines("input.jsonl")
+                            if item["method"] == "Input.dispatchKeyEvent" and
+                            item["params"].get("type") != "keyUp"][-1]
+                for arguments, expected in (
+                        ({"key": "a"}, {"type": "keyDown", "key": "a", "code": "KeyA",
+                                        "text": "a", "windowsVirtualKeyCode": 65}),
+                        ({"key": "a", "modifiers": ["Shift"]},
+                         {"type": "keyDown", "key": "A", "text": "A", "modifiers": 8}),
+                        ({"key": "Space"}, {"type": "keyDown", "key": " ",
+                                            "code": "Space", "text": " ",
+                                            "windowsVirtualKeyCode": 32}),
+                        ({"key": "7"}, {"type": "keyDown", "code": "Digit7", "text": "7"}),
+                        ({"key": "a", "modifiers": ["Control"]},
+                         {"type": "rawKeyDown", "key": "a", "modifiers": 2})):
+                    pressed_text, _ = await call_text(153, "press", arguments)
+                    down = last_key_down()
+                    assert all(down.get(key) == value for key, value in expected.items()), \
+                        (arguments, down)
+                    if down["type"] == "rawKeyDown":
+                        assert "text" not in down, down
+                assert "Dispatched key Control+a" in pressed_text, pressed_text
+
+                # A page busy in a script answers nothing: what came before an
+                # action is not waited for ten seconds.
+                await call_text(154, "navigate", {"url": "http://stub.invalid/busy",
+                                                  "wait_until": "none"})
+                left_at = time.monotonic()
+                left, _ = await call_text(155, "navigate", {"url": "http://gateway.lan/status"})
+                assert "Observed document domcontentloaded" in left, left
+                assert time.monotonic() - left_at < 5, time.monotonic() - left_at
+
+                # A URL that is a file downloads it: the page stays, and that
+                # is the result, not a failed navigation.
+                downloaded, _ = await call_text(156, "navigate", {
+                    "url": "http://stub.invalid/report.zip"})
+                assert "started a download instead of opening a page" in downloaded and \
+                    "Download started: \"report.zip\" (completed, 2048 bytes)" in \
+                    downloaded, downloaded
 
                 # Diagnostics are captured per attached page, bounded, clearly
                 # untrusted, and strip credentials/query/fragment from URLs.
