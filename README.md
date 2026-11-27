@@ -1364,7 +1364,18 @@ for yours. See [worker threads](docs/worker-pools.md).
   saved backup and import; any one file inside may be twice that and the
   unpacked contents four times, never less than 1 GiB and 2 GiB, in at most
   50,000 archive entries. A backup past the limit names its own size, so the
-  limit can be raised to fit. Restore requires the
+  limit can be raised to fit. A scratch workspace or task copy that is a Git
+  work tree goes in as a task copy is made: its repository, every file Git does
+  not ignore and its AGENTS.md/CLAUDE.md, while what the project's own
+  `.gitignore` excludes (a cache, build output, a chroot) is left out and named
+  in the result. Links inside working copies are kept exactly as written and
+  restored as links. What a backup cannot hold - a socket or pipe, one file past
+  the per-file bound, another filesystem mounted inside - is left out by name,
+  and a copy that alone would pass the entry or unpacked-size bound is left out
+  whole and restored as a missing copy. The backup is still made, and what was
+  left out follows "Backup saved" in the card's history (a warning when it was
+  more than what Git ignores) and "Backup ready" in **Export backup**'s notice.
+  Restore requires the
   current database, configuration and archive shapes; older shapes are refused
   without automatic migration.
   The same card can save compressed backups on the instance's machine, daily
@@ -1385,8 +1396,10 @@ for yours. See [worker threads](docs/worker-pools.md).
   See [Backup and restore](docs/backups.md) for scheduling, retention and coverage.
   The card measures approximate uncompressed file storage for this instance's
   backup-covered data when Settings opens, including the database's live sidecars.
-  It excludes remote data, ordinary projects, caches, logs, exported archives,
-  and browser-local tabs and drafts; the compressed download size will differ.
+  It counts working copies as a backup takes them and excludes remote data,
+  ordinary projects, caches (what Git ignores in a working copy included), logs,
+  exported archives, and browser-local tabs and drafts; the compressed download
+  size will differ.
 
 Long operations use a shared progress dialog with **Cancel** during preparation,
 including task review/apply, scratch and project moves, backend add/edit/test, engine refresh,
@@ -1680,7 +1693,7 @@ python3 tests/token_usage_test.py    # the token ledger: counts, day records, th
 node tests/host_panel_ui_test.js     # the host box: charts, disks, latency rows, process tree
 python3 tests/host_metrics_test.py   # CPU history, disk space, the process tree and backend latency
 python3 tests/backend_test.py        # headless package, auth, protocol, capabilities
-python3 tests/snapshot_test.py       # backup export/import and rollback
+python3 tests/snapshot_test.py       # backup export/import, rollback and working copies (what Git ignores, links, what is left out)
 python3 tests/backup_schedule_test.py # daily backups, rotation, downloads, recovery and the archive limit
 node tests/backup_schedule_ui_test.js # backup settings and the archive limit, status polling and edits
 python3 tests/search_test.py         # the search index, query language, limits, lanes and cancellation

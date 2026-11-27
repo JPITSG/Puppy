@@ -6,12 +6,14 @@ import asyncio
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
+import socket
 import sqlite3
 import sys
 import tarfile
 import time
+from unittest.mock import patch
 
 import aiohttp
 from aiohttp import web
@@ -199,6 +201,144 @@ async def exercise_http(archive_ui: dict, session_id: int, project: Path) -> Non
         await runner.cleanup()
 
 
+def working_copy(root: Path) -> None:
+    """What agents leave in a task copy: a chroot the project ignores, with
+    links out of it, ignored logs and notes, links of its own pointing
+    anywhere, a socket, and a repository cloned into it."""
+    (root / ".gitignore").write_text("cache/\n*.log\nAGENTS.md\n", encoding="utf-8")
+    rootfs = root / "cache" / "kicad" / "rootfs"
+    (rootfs / "var").mkdir(parents=True)
+    (rootfs / "bin").mkdir()
+    os.symlink("/run/lock", str(rootfs / "var" / "lock"))
+    os.symlink("/", str(rootfs / "host"))
+    for number in range(30):
+        (rootfs / "bin" / "tool{}".format(number)).write_bytes(b"x" * 100)
+    (root / "noise.log").write_text("ignored\n", encoding="utf-8")
+    (root / "AGENTS.md").write_text("ignored notes travel\n", encoding="utf-8")
+    os.symlink("/etc/hosts", str(root / "absolute-link"))
+    os.symlink("../../../outside", str(root / "escaping-link"))
+    nested = root / "vendor" / "lib"
+    nested.mkdir(parents=True)
+    from puppy import session_tasks
+    session_tasks._git(str(nested), "init", "--quiet")
+    (nested / "lib.txt").write_text("cloned\n", encoding="utf-8")
+    (nested / "build.log").write_text("its own ignored log goes with it\n", encoding="utf-8")
+    here = os.getcwd()
+    os.chdir(str(root))
+    try:
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind("dev.sock")
+        listener.close()
+    finally:
+        os.chdir(here)
+
+
+def check_working_copy_archive(result: dict, scratch_id: int) -> None:
+    prefix = "{}/scratch/{}/".format(snapshots.ARCHIVE_ROOT, scratch_id)
+    with tarfile.open(result["path"], "r:gz") as archive:
+        members = {member.name[len(prefix):]: member for member in archive.getmembers()
+                   if member.name.startswith(prefix)}
+    # the links a working copy holds go in as written
+    assert members["absolute-link"].issym() and members["absolute-link"].linkname == "/etc/hosts"
+    assert members["escaping-link"].linkname == "../../../outside"
+    # what the project ignores stays out; its notes and a nested repository go in
+    assert not any(name.startswith("cache") for name in members), sorted(members)
+    assert "noise.log" not in members and "AGENTS.md" in members and ".gitignore" in members
+    assert "vendor/lib/lib.txt" in members and "vendor/lib/build.log" in members
+    assert "vendor/lib/.git/HEAD" in members and ".git/HEAD" in members
+    assert "dev.sock" not in members
+    ignored = [item for item in result["ignored"] if item["session"] == scratch_id]
+    assert len(ignored) == 1 and set(ignored[0]["paths"]) == {"cache/", "noise.log"}, ignored
+    assert ignored[0]["files"] == 33 and ignored[0]["bytes"] == 3008, ignored
+    assert result["left_out"] == [{"session": scratch_id, "name": "scratch session",
+                                   "path": "dev.sock", "reason": "a socket"}], result["left_out"]
+    tone, notes = snapshots.outcome(result)
+    assert tone == "warn" and len(notes) == 2, notes
+    assert notes[0] == ("left out 33 files (2.9 KiB) Git ignores in 1 workspace copy "
+                        "(scratch session: cache/, noise.log)"), notes[0]
+    assert notes[1] == "1 item left out: scratch session: dev.sock (a socket)", notes[1]
+
+
+def check_restored_working_copy(root: Path) -> None:
+    assert os.readlink(str(root / "absolute-link")) == "/etc/hosts"
+    assert os.readlink(str(root / "escaping-link")) == "../../../outside"
+    assert not (root / "cache").exists() and not (root / "noise.log").exists()
+    assert (root / "AGENTS.md").read_text(encoding="utf-8") == "ignored notes travel\n"
+    assert (root / "vendor" / "lib" / "lib.txt").read_text(encoding="utf-8") == "cloned\n"
+    assert not (root / "dev.sock").exists()
+    for name in ("absolute-link", "escaping-link", "AGENTS.md", ".gitignore"):
+        (root / name).unlink()
+    shutil.rmtree(str(root / "vendor"))
+
+
+def scratch_copies() -> None:
+    """One scratch workspace, staged on its own: the backup's room, the
+    bound on one file, a repository Git cannot read, and a hostile archive
+    placing a file beneath a working copy's link."""
+    base = TEST_ROOT / "scratch-copies"
+    shutil.rmtree(str(base), ignore_errors=True)
+    source = base / "copy"
+    source.mkdir(parents=True)
+    for number in range(20):
+        (source / "f{}.txt".format(number)).write_bytes(b"y" * 50)
+    bounds = snapshots.limits(512)
+    # a copy alone past the room left is left out whole and nothing is staged
+    full = {"members": snapshots.MAX_MEMBERS - 8 - 5, "bytes": 0, "limits": bounds}
+    report = snapshots._copy_scratch(source, base / "staged-full", "scratch/1", full)
+    assert report == {"whole": "left out whole: past the 50,000 entries a backup holds"}, report
+    assert not (base / "staged-full").exists() and full["members"] == snapshots.MAX_MEMBERS - 13
+    tight = {"members": 0, "bytes": bounds["extracted"] - 100, "limits": bounds}
+    report = snapshots._copy_scratch(source, base / "staged-bytes", "scratch/1", tight)
+    assert report["whole"].startswith("left out whole: past the"), report
+    # one file past the bound on a file is left out by name, the rest kept
+    (source / "big.bin").write_bytes(b"z" * 300)
+    small = {"members": 0, "bytes": 0, "limits": dict(bounds, member=200)}
+    report = snapshots._copy_scratch(source, base / "staged-small", "scratch/1", small)
+    assert report["left_out"] == [("big.bin", "larger than the 1 MiB a backup holds of one file")], report
+    assert len(list((base / "staged-small").iterdir())) == 20 and small["members"] == 20
+    # something mounted inside a copy is never entered, only named
+    (source / "mnt").mkdir()
+    (source / "mnt" / "remote.txt").write_text("on another drive\n", encoding="utf-8")
+    from puppy import places
+    mount_point = str(source / "mnt")
+    with patch.object(places, "mounted", side_effect=lambda path: path == mount_point):
+        mounted = {"members": 0, "bytes": 0, "limits": dict(bounds, member=200)}
+        report = snapshots._copy_scratch(source, base / "staged-mounted", "scratch/1", mounted)
+    assert ("mnt", "another filesystem is mounted there") in report["left_out"], report
+    assert not (base / "staged-mounted" / "mnt").exists()
+    shutil.rmtree(str(source / "mnt"))
+    # a repository Git cannot read is taken whole
+    (source / ".git").write_text("gitdir: /nowhere\n", encoding="utf-8")
+    plain = {"members": 0, "bytes": 0, "limits": bounds}
+    report = snapshots._copy_scratch(source, base / "staged-plain", "scratch/1", plain)
+    assert report == {"left_out": [], "ignored": None}, report
+    assert (base / "staged-plain" / ".git").is_file() and (base / "staged-plain" / "big.bin").is_file()
+    # the storage estimate counts what a backup takes
+    assert snapshots._scratch_bytes(source, bounds) == 20 * 50 + 300 + len("gitdir: /nowhere\n")
+    # links are content in a working copy only, and nothing lands beneath one
+    snapshots._safe_link_target(PurePosixPath("scratch/4/var/lock"), "/run/lock")
+    expect_snapshot_error(lambda: snapshots._safe_link_target(
+        PurePosixPath("uploads/4/leak"), "/etc/passwd"), "unsafe symbolic link")
+    expect_snapshot_error(lambda: snapshots._safe_link_target(
+        PurePosixPath("scratch/4"), "/etc"), "root cannot be a symbolic link")
+    hostile = base / "beneath-link.tar.gz"
+    with tarfile.open(str(hostile), "w:gz") as archive:
+        for name, kind in (("", tarfile.DIRTYPE), ("/scratch", tarfile.DIRTYPE),
+                           ("/scratch/4", tarfile.DIRTYPE), ("/scratch/4/etc", tarfile.SYMTYPE),
+                           ("/scratch/4/etc/cron.d", tarfile.REGTYPE)):
+            item = tarfile.TarInfo(snapshots.ARCHIVE_ROOT + name)
+            item.type = kind
+            item.mode = 0o700
+            if kind == tarfile.SYMTYPE:
+                item.linkname = "/etc"
+            payload = b"* * * * * root true\n" if kind == tarfile.REGTYPE else b""
+            item.size = len(payload)
+            archive.addfile(item, io.BytesIO(payload) if payload else None)
+    expect_snapshot_error(lambda: snapshots.stage_import(str(hostile)), "beneath a symbolic link")
+    shutil.rmtree(str(base), ignore_errors=True)
+    print("scratch copies: room, per-file bound, unreadable repository, links and a hostile archive passed")
+
+
 async def main() -> None:
     project = TEST_ROOT / "ordinary-project"
     project.mkdir()
@@ -209,6 +349,7 @@ async def main() -> None:
     try:
         config.load()
         db.connect()
+        scratch_copies()
         auth.create_user("snapshot-user", "secret123")
         config.set_value("instance_name", "saved-instance")
         config.set_value("sessions.default_cwd", str(project))
@@ -705,9 +846,11 @@ async def main() -> None:
             expect_snapshot_error(lambda: snapshots._validate_database(invalid_tasks_db), "not current")
             assert invalid_tasks_db.read_bytes() == before
             invalid_tasks_db.unlink()
+        working_copy(original_scratch)
         direct_archive = snapshots.create_archive(ui)
         await session_tasks.set_enabled(linked_id, True)
         archive_path = Path(direct_archive["path"])
+        check_working_copy_archive(direct_archive, scratch_id)
         assert archive_path.stat().st_mode & 0o777 == 0o600
         with tarfile.open(str(archive_path), "r:gz") as archive:
             names = archive.getnames()
@@ -1045,6 +1188,7 @@ async def main() -> None:
             encoding="utf-8") == "scratch contents"
         assert (Path(restored_scratch["cwd"]) / "safe-link").read_text(
             encoding="utf-8") == "scratch contents"
+        check_restored_working_copy(Path(restored_scratch["cwd"]))
         assert not original_scratch.exists()
         restored_upload = (Path(config.DATA_DIR) / "uploads" / str(directory_id) /
                            "1700000000000-abcdef0123" / "image.png")
@@ -1100,8 +1244,15 @@ async def main() -> None:
 
         unsupported = Path(restored_scratch["cwd"]) / "named-pipe"
         os.mkfifo(str(unsupported))
-        expect_snapshot_error(
-            lambda: snapshots.create_archive(ui), "unsupported file type")
+        piped = snapshots.create_archive(ui)
+        try:
+            assert {"session": scratch_id, "name": "scratch session", "path": "named-pipe",
+                    "reason": "a named pipe"} in piped["left_out"], piped["left_out"]
+            tone, notes = snapshots.outcome(piped)
+            assert tone == "warn" and any("left out" in note and "named-pipe (a named pipe)" in note
+                                          for note in notes), notes
+        finally:
+            snapshots.discard_export(piped)
         unsupported.unlink()
 
         await exercise_http(ui, directory_id, project)

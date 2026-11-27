@@ -33388,7 +33388,11 @@ class SettingsView {
         document.body.appendChild(link);
         link.click();
         link.remove();
-        toast(`Backup ready · ${prepared.sessions} sessions · ${fmtBytes(prepared.size)}`, "ok");
+        /* what the archive left out follows, a warning when it was more
+           than what Git ignores */
+        const notes = Array.isArray(prepared.notes) ? prepared.notes.filter(note => typeof note === "string") : [];
+        toast([`Backup ready · ${prepared.sessions} sessions · ${fmtBytes(prepared.size)}`, ...notes].join(" · "),
+          prepared.tone === "warn" ? "warn" : "ok", notes.length ? TOAST_LONG : undefined);
       } catch (error) {
         if (!error.cancelled) showError(error.message);
       } finally {

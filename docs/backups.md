@@ -86,6 +86,39 @@ drafts. Scheduled backups and Run now have no browser-local state. Ordinary
 project directories, remote backend data, managed-browser profiles and shared
 sign-ins, and external engine credentials/native histories are excluded.
 
+### Scratch workspaces and task copies
+
+A scratch workspace (a task's copy, a temporary session's folder) is a working
+copy, so a backup takes it the way a task copy is made rather than byte for
+byte. Where it is the top of a Git work tree, the archive holds its `.git`, every
+file `git ls-files --cached --others --exclude-standard` lists, a repository
+nested inside it whole, and its root `AGENTS.md`/`CLAUDE.md` even when ignored.
+What the project's own ignore rules exclude - a cache, build output, a chroot an
+agent built to run a tool - is left out, and the result names it with its file
+count and size. Ignored content never reaches Main through Review and Apply
+either, so nothing a task can deliver is lost. A folder that is not a work tree,
+or one Git cannot read, is taken whole.
+
+A link inside a working copy is its own content (a chroot's `/var/lock ->
+/run/lock`, a Wine prefix's `z: -> /`) and is kept exactly as written, absolute or
+pointing out of the copy. A restore writes every link after every file and
+refuses an archive that places anything beneath a link, so nothing is ever
+written through one. Puppy's own stores - uploads, TLS identities, conflict
+copies - still hold only links that stay inside them.
+
+What a backup cannot hold is left out by name instead of failing everything: a
+socket, a named pipe or a device (Git lists none of them, so they are found in
+the folders it does not ignore), a file past the per-file bound, a name a backup
+cannot carry, a folder on another mounted filesystem, an entry that cannot be
+read. A copy that alone would take the backup past its 50,000 entries or its
+unpacked-size bound is left out whole and restored as a missing copy, as one
+whose folder had gone when the backup was made. The backup is still made, as a
+warning: a saved backup's history line reads "Backup saved · 1 item left out:
+<the session>: run/dev.sock (a socket)", after a clause for what Git ignored
+(which alone keeps the line ok), and **Export backup**'s notice carries the same
+clauses after "Backup ready". The archive's own format is unchanged; older
+archives restore as before.
+
 Import validates the entire archive and requires the instance to be idle. It
 then replaces live state atomically, rolling back if installation fails. Export
 preparation and import upload/validation can be cancelled; once restore starts

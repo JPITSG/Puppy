@@ -1600,10 +1600,11 @@ async def h_snapshot_export(request: web.Request):
         operations.commit()
         token = snapshots.register_export(result, str(request["user"]))
         asyncio.get_running_loop().call_later(snapshots.EXPORT_TTL, snapshots.expire_export, token)
+        tone, notes = snapshots.outcome(result)
         return web.json_response({
             "ok": True, "download": "/api/snapshot/download/" + token,
             "filename": result["filename"], "size": result["size"],
-            "sessions": result["sessions"],
+            "sessions": result["sessions"], "tone": tone, "notes": notes,
         })
     except operations.Cancelled:
         if result:

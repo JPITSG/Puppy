@@ -545,11 +545,14 @@ class Scheduler:
         result = None
         tone, message = "ok", "Backup saved"
         try:
+            # what the archive left out, said after "Backup saved"
+            tone, notes = "ok", []
             if not pending["file"]:
                 if len(current["files"]) >= FILES_MAX:
                     raise BackupError("Resolve the backup rotation failures before saving more copies")
                 await places.visit(cfg["directory"])    # before an archive is made for nothing
                 result = await self.exporter(self.app, {})
+                tone, notes = snapshots.outcome(result)
                 pending["file"] = await _save_copy(result, pending, cfg["directory"])
                 _save(current)
             await places.ask(pending["file"]["directory"], publish_archive, pending["file"],
@@ -557,7 +560,9 @@ class Scheduler:
             current["files"].append(pending["file"])
             current["files"], errors = await rotate(current["files"], cfg["keep"])
             if errors:
-                tone, message = "warn", "Backup saved · could not rotate older copies: " + "; ".join(errors)
+                tone = "warn"
+                notes.append("could not rotate older copies: " + "; ".join(errors))
+            message = " · ".join(["Backup saved"] + notes)
         except snapshots.SnapshotBusy as exc:
             self.waiting = str(exc)
             return

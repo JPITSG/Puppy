@@ -369,6 +369,28 @@ async def main():
             await request("POST", "backups/run", {}, 202)
             await scheduler.tick()
             assert backups._load()["history"][-1]["tone"] == "ok", "a raised limit saves it"
+            # what the archive left out follows "Backup saved": what Git
+            # ignores by design, anything else as a warning
+            real_archive = snapshots.create_archive
+
+            def leaving_out(ui_state):
+                result = real_archive(ui_state)
+                result["ignored"] = [{"session": 7, "name": "Robot arm task", "paths": ["cache/"],
+                                      "files": 61204, "bytes": 3 * snapshots.GIB // 2}]
+                result["left_out"] = [{"session": 7, "name": "Robot arm task", "path": "run/dev.sock",
+                                       "reason": "a socket"}]
+                return result
+            with patch.object(snapshots, "create_archive", side_effect=leaving_out):
+                await request("POST", "backups/run", {}, 202)
+                await scheduler.tick()
+            noted = backups._load()["history"][-1]
+            assert noted["tone"] == "warn" and noted["message"] == (
+                "Backup saved · left out 61,204 files (1.5 GiB) Git ignores in 1 workspace copy "
+                "(Robot arm task: cache/) · 1 item left out: Robot arm task: run/dev.sock (a socket)"), noted
+            await request("POST", "backups/run", {}, 202)
+            await scheduler.tick()
+            assert backups._load()["history"][-1] == dict(backups._load()["history"][-1],
+                                                          tone="ok", message="Backup saved")
             big = backups._load()["files"][-1]
             assert big["size"] > 16 * snapshots.MIB
             # lowering the limit again never turns the saved copy into an unreadable record

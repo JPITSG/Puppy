@@ -17,6 +17,7 @@ import secrets
 import shutil
 import sqlite3
 import stat
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -96,9 +97,16 @@ def storage_usage() -> dict:
     paths = [Path(config.CONFIG_PATH), Path(config.DB_PATH)]
     paths.extend(Path(config.DB_PATH + suffix) for suffix in ("-wal", "-shm"))
     paths.extend(root / name for name in ("uploads", "tls", "workspace/keeps"))
-    paths.extend(Path(session["cwd"]) for session in db.list_sessions(include_archived=True)
-                 if workspaces.is_temporary(session) and workspaces.is_available(session))
     total = 0
+    # scratch workspaces as a backup takes them: without what Git ignores
+    # or what it would leave out
+    bounds = limits()
+    for scratch in {Path(session["cwd"]) for session in db.list_sessions(include_archived=True)
+                    if workspaces.is_temporary(session) and workspaces.is_available(session)}:
+        try:
+            total += _scratch_bytes(scratch, bounds)
+        except OSError:
+            pass
     deadline = time.monotonic() + 10
 
     def size(path, dir_fd=None):
@@ -255,7 +263,32 @@ def validate_ui_state(value) -> dict:
     return cleaned
 
 
+def _link_target_kept(target: str) -> bool:
+    """Whether a working copy's link can be held as written."""
+    if not target or len(target) > 4096 or "\x00" in target:
+        return False
+    try:
+        target.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _safe_link_target(relative: PurePosixPath, target: str) -> None:
+    """A link Puppy may stage or restore. In a scratch workspace a link is the
+    working copy's own content - a chroot's /var/lock -> /run/lock, a Wine
+    prefix's z: -> / - kept and restored as written, never followed: the
+    restore writes every link after every file and refuses content beneath
+    one. Puppy's own stores (uploads, TLS, conflict keeps) only ever hold
+    links that stay inside them."""
+    if not relative.parts:
+        raise SnapshotError("unsafe symbolic link path")
+    if relative.parts[0] == "scratch":
+        if len(relative.parts) < 3:
+            raise SnapshotError("scratch workspace root cannot be a symbolic link")
+        if not _link_target_kept(target):
+            raise SnapshotError("unsafe symbolic link: {}".format(relative))
+        return
     link = PurePosixPath(target)
     if link.is_absolute() or not target or len(target) > 4096 or "\\" in target:
         raise SnapshotError("unsafe symbolic link: {} -> {}".format(relative, target))
@@ -269,13 +302,7 @@ def _safe_link_target(relative: PurePosixPath, target: str) -> None:
             parts.pop()
         else:
             parts.append(part)
-    if not relative.parts:
-        raise SnapshotError("unsafe symbolic link path")
-    if relative.parts[0] == "scratch":
-        if len(relative.parts) < 3:
-            raise SnapshotError("scratch workspace root cannot be a symbolic link")
-        boundary = relative.parts[:2]
-    elif relative.parts[0] in ("uploads", "tls", "keeps"):
+    if relative.parts[0] in ("uploads", "tls", "keeps"):
         boundary = relative.parts[:1]
     else:
         raise SnapshotError("symbolic links are not allowed in snapshot metadata")
@@ -395,6 +422,404 @@ def _copy_source_tree(source: Path, destination: Path, namespace: str,
     shutil.copytree(str(source), str(destination), symlinks=True, copy_function=operations.copy2)
 
 
+# ---- scratch workspaces ----
+# A scratch workspace (a task's copy, a temporary session's folder) is a
+# working copy, and backing one up whole made one cache fail every backup:
+# a chroot an agent built in a task copy held 50,000 files and links such as
+# /var/lock -> /run/lock. A copy that is a Git work tree is kept as a task
+# copy is made: its repository, every file Git does not ignore and the notes
+# at its root; what the project's own ignore rules exclude is left out and
+# named. Whatever cannot be held - a socket, a file past the per-file bound, a
+# name a backup cannot carry, another filesystem mounted inside - is left out
+# by name, and a copy that alone is past what the backup can still hold is
+# left out whole (restored like a missing one), so no workspace fails the
+# backup of everything else.
+
+SCRATCH_NOTES = ("AGENTS.md", "CLAUDE.md")
+GIT_LIST_SECONDS = 120
+_KIND_WORDS = ((stat.S_ISSOCK, "a socket"), (stat.S_ISFIFO, "a named pipe"),
+               (stat.S_ISCHR, "a device"), (stat.S_ISBLK, "a device"))
+
+
+class _ScratchFull(Exception):
+    """The copy alone is past what the backup can still hold."""
+
+
+def _git_listing(root: Path):
+    """What Git keeps of a scratch copy that is a work tree: (kept, ignored)
+    paths relative to it, the ignored ones collapsed to their folders - or
+    None where the copy is not the top of a work tree or Git cannot say, and
+    the copy is then taken whole."""
+    if not os.path.lexists(str(root / ".git")):
+        return None
+    from puppy import session_git
+
+    def run(*args):
+        argv, env = session_git._git_command(str(root), args)
+        result = operations.run_process(argv, env=env, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, timeout=GIT_LIST_SECONDS)
+        if result.returncode:
+            raise SnapshotError(result.stderr.decode("utf-8", "replace").strip()[:300] or
+                                "git refused")
+        return result.stdout
+
+    try:
+        top = os.fsdecode(run("rev-parse", "--show-toplevel").strip())
+        if os.path.realpath(top) != os.path.realpath(str(root)):
+            return None
+        kept = run("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+        ignored = run("ls-files", "-z", "--others", "--ignored", "--exclude-standard",
+                      "--directory")
+    except (SnapshotError, OSError, subprocess.SubprocessError) as exc:
+        log.warning("backing up scratch workspace %s whole: git could not list it: %s", root, exc)
+        return None
+    paths = lambda raw: [os.fsdecode(item) for item in raw.split(b"\0") if item]  # noqa: E731
+    # a folder Git ignores whole keeps its slash, for the report
+    return [path.rstrip("/") for path in paths(kept)], \
+        [path for path in paths(ignored) if path.rstrip("/") not in SCRATCH_NOTES]
+
+
+def _ignored_by_git(root: Path, paths) -> set:
+    """Which of these paths the work tree's own rules ignore; none where Git
+    cannot say."""
+    from puppy import session_git
+    argv, env = session_git._git_command(str(root), ("check-ignore", "-z", "--stdin"))
+    try:
+        result = operations.run_process(
+            argv, env=env, input=b"".join(os.fsencode(path) + b"\0" for path in paths),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_LIST_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if result.returncode not in (0, 1):
+        return set()
+    return {os.fsdecode(item) for item in result.stdout.split(b"\0") if item}
+
+
+def _name_problem(rel: str) -> str:
+    try:
+        encoded = rel.encode("utf-8")
+    except UnicodeEncodeError:
+        return "a name that is not UTF-8"
+    if len(encoded) > 4096 or "\\" in rel or "\x00" in rel or \
+            any(len(part.encode("utf-8")) > 255 for part in rel.split("/")):
+        return "a name a backup cannot hold"
+    return ""
+
+
+def _plan_scratch(source: Path, namespace: str, budget: dict, count_ignored: bool = True) -> dict:
+    """What one scratch workspace puts into the backup, without copying any
+    of it: the entries (dirs before what they hold), what is left out and
+    why, and what Git ignores there (counted only with ``count_ignored``).
+    Raises _ScratchFull when the copy alone is past the room the backup has
+    left."""
+    from puppy import places
+    limit = budget["limits"]["member"]
+    room_members = MAX_MEMBERS - 8 - budget["members"]
+    room_bytes = budget["limits"]["extracted"] - budget["bytes"]
+    plan = {"entries": [], "left_out": [], "ignored": None, "members": 0, "bytes": 0}
+    planned = set()
+    mounted_word = "another filesystem is mounted there"
+
+    def foreign(rel: str) -> bool:
+        """Something mounted right there, known from the kernel's table
+        without touching it: a drive that stopped answering inside a copy
+        must not hold the backup."""
+        return places.mounted(str(source / rel))
+
+    def add(rel: str, info) -> bool:
+        """Plan one entry; True for a directory whose contents follow."""
+        if rel in planned:
+            return False
+        reason = _name_problem(rel)
+        mode = info.st_mode
+        target = None
+        if not reason:
+            if stat.S_ISDIR(mode):
+                pass
+            elif stat.S_ISREG(mode):
+                if info.st_size > limit:
+                    reason = "larger than the {} a backup holds of one file".format(size_text(limit))
+            elif stat.S_ISLNK(mode):
+                try:
+                    target = os.readlink(str(source / rel))
+                except OSError:
+                    reason = "a link that could not be read"
+                else:
+                    if not _link_target_kept(target):
+                        reason = "a link a backup cannot hold"
+            else:
+                reason = next((word for test, word in _KIND_WORDS if test(mode)),
+                              "a kind of file a backup cannot hold")
+        if reason:
+            plan["left_out"].append((rel, reason))
+            return False
+        planned.add(rel)
+        kind = "dir" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "link"
+        plan["members"] += 1
+        if kind == "file":
+            plan["bytes"] += info.st_size
+        if plan["members"] > room_members:
+            raise _ScratchFull("left out whole: past the {:,} entries a backup holds".format(MAX_MEMBERS))
+        if plan["bytes"] > room_bytes:
+            raise _ScratchFull("left out whole: past the {} a backup unpacks to".format(
+                size_text(budget["limits"]["extracted"])))
+        plan["entries"].append((rel, kind, info, target))
+        return kind == "dir"
+
+    def walk(top: str) -> None:
+        stack = [top]
+        while stack:
+            operations.checkpoint()
+            current = stack.pop()
+            try:
+                with os.scandir(str(source / current) if current else str(source)) as children:
+                    found = sorted(children, key=lambda child: child.name)
+            except OSError:
+                plan["left_out"].append((current or ".", "a folder that could not be read"))
+                continue
+            for child in found:
+                rel = current + "/" + child.name if current else child.name
+                try:
+                    if child.is_dir(follow_symlinks=False) and foreign(rel):
+                        plan["left_out"].append((rel, mounted_word))
+                        continue
+                    info = child.stat(follow_symlinks=False)
+                except OSError:
+                    plan["left_out"].append((rel, "could not be read"))
+                    continue
+                if add(rel, info):
+                    stack.append(rel)
+
+    listing = _git_listing(source)
+    if listing is None:
+        walk("")
+        return plan
+    kept, ignored = listing
+    wanted = set(kept) | {".git"} | {name for name in SCRATCH_NOTES
+                                     if os.path.lexists(str(source / name))}
+    unreachable = set()
+    whole = {".git"}
+    for rel in sorted(wanted):
+        operations.checkpoint()
+        parts = rel.split("/")
+        reached = True
+        for depth in range(1, len(parts)):
+            parent = "/".join(parts[:depth])
+            if parent in planned:
+                continue
+            if parent in unreachable:
+                reached = False
+                break
+            if foreign(parent):
+                plan["left_out"].append((parent, mounted_word))
+                unreachable.add(parent)
+                reached = False
+                break
+            try:
+                info = source.joinpath(parent).lstat()
+            except OSError:
+                info = None
+            # a tracked path under a folder that is now a link or gone is
+            # not in the work tree; the link, if any, is listed itself
+            if info is None or not stat.S_ISDIR(info.st_mode) or not add(parent, info):
+                unreachable.add(parent)
+                reached = False
+                break
+        if not reached:
+            continue
+        if foreign(rel):
+            plan["left_out"].append((rel, mounted_word))
+            continue
+        try:
+            info = source.joinpath(rel).lstat()
+        except FileNotFoundError:
+            continue            # tracked, deleted from the work tree
+        except OSError:
+            plan["left_out"].append((rel, "could not be read"))
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            # the repository, or one nested in the copy (Git lists it as a
+            # folder and never looks inside), goes whole; another folder is
+            # in the listing through the files it holds
+            if rel == ".git" or os.path.lexists(str(source / rel / ".git")):
+                whole.add(rel)
+                if add(rel, info):
+                    walk(rel)
+            continue
+        add(rel, info)
+    # Git lists no socket, pipe or device at all: find those in the folders
+    # it does not ignore, and name the ones its rules do not ignore either
+    pruned = whole | {path.rstrip("/") for path in ignored if path.endswith("/")}
+    specials, stack = [], [""]
+    while stack:
+        operations.checkpoint()
+        current = stack.pop()
+        try:
+            with os.scandir(str(source / current) if current else str(source)) as children:
+                found = list(children)
+        except OSError:
+            continue
+        for child in found:
+            rel = current + "/" + child.name if current else child.name
+            try:
+                if child.is_dir(follow_symlinks=False):
+                    if rel not in pruned and not foreign(rel):
+                        stack.append(rel)
+                elif not child.is_file(follow_symlinks=False) and not child.is_symlink():
+                    specials.append(rel)
+            except OSError:
+                continue
+    if specials:
+        skipped = _ignored_by_git(source, specials)
+        for rel in sorted(specials):
+            if rel in skipped:
+                continue
+            try:
+                info = source.joinpath(rel).lstat()
+            except OSError:
+                continue
+            add(rel, info)
+    files = size = 0
+    for shown in ignored if count_ignored else ():
+        path = str(source / shown.rstrip("/"))
+        if places.mounted(path):
+            continue
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            files += 1
+            size += info.st_size if stat.S_ISREG(info.st_mode) else 0
+            continue
+        for directory, dirs, names in os.walk(path):
+            operations.checkpoint()
+            keep = []
+            for name in dirs:
+                inside = os.path.join(directory, name)
+                if places.mounted(inside):
+                    continue
+                try:
+                    entry = os.lstat(inside)
+                except OSError:
+                    continue
+                if stat.S_ISLNK(entry.st_mode):
+                    files += 1
+                else:
+                    keep.append(name)
+            dirs[:] = keep
+            for name in names:
+                try:
+                    entry = os.lstat(os.path.join(directory, name))
+                except OSError:
+                    continue
+                files += 1
+                size += entry.st_size if stat.S_ISREG(entry.st_mode) else 0
+    if ignored:
+        plan["ignored"] = {"paths": ignored, "files": files, "bytes": size}
+    return plan
+
+
+def _copy_scratch(source: Path, destination: Path, namespace: str, budget: dict) -> dict:
+    """Stage one scratch workspace as `_plan_scratch` says: answers the plan's
+    report, or {"whole": reason} when the copy is left out whole."""
+    try:
+        root_info = source.lstat()
+    except OSError as exc:
+        return {"whole": "left out whole: could not be read ({})".format(exc.strerror or exc)}
+    if not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode):
+        return {"whole": "left out whole: not a folder"}
+    try:
+        plan = _plan_scratch(source, namespace, budget)
+    except _ScratchFull as exc:
+        return {"whole": str(exc)}
+    destination.mkdir(mode=0o700)
+    directories = [("", root_info)]
+    gone = []
+    for rel, kind, info, target in plan["entries"]:
+        operations.checkpoint()
+        if gone and rel.startswith(tuple(gone)):
+            continue
+        path = destination / rel
+        try:
+            if kind == "dir":
+                path.mkdir(mode=0o700)
+                directories.append((rel, info))
+            elif kind == "link":
+                os.symlink(target, str(path))
+            else:
+                operations.copy2(str(source / rel), str(path))
+        except FileNotFoundError:
+            # gone since the plan was made (the copy is idle, so a rarity):
+            # a folder's contents go with it
+            plan["left_out"].append((rel, "gone while the backup was made"))
+            if kind == "dir":
+                gone.append(rel + "/")
+        except OSError as exc:
+            raise SnapshotError("cannot copy {}/{}: {}".format(namespace, rel, exc)) from exc
+    for rel, info in sorted(directories, key=lambda item: item[0].count("/"), reverse=True):
+        path = destination / rel if rel else destination
+        if path.is_dir():
+            os.chmod(str(path), stat.S_IMODE(info.st_mode))
+            os.utime(str(path), ns=(info.st_atime_ns, info.st_mtime_ns))
+    budget["members"] += plan["members"]
+    budget["bytes"] += plan["bytes"]
+    return {"left_out": plan["left_out"], "ignored": plan["ignored"]}
+
+
+def _scratch_bytes(source: Path, bounds: dict) -> int:
+    """The bytes a backup would take of this scratch workspace now: what
+    `_plan_scratch` keeps (nothing of a copy it would leave out whole)."""
+    try:
+        plan = _plan_scratch(source, "scratch", {"members": 0, "bytes": 0, "limits": bounds},
+                             count_ignored=False)
+    except _ScratchFull:
+        return 0
+    return plan["bytes"] + sum(info.st_size for _rel, kind, info, _target in plan["entries"]
+                               if kind == "link")
+
+
+def _bytes_text(count: int) -> str:
+    for unit, size in (("GiB", GIB), ("MiB", MIB), ("KiB", 1024)):
+        if count >= size:
+            value = count / size
+            return "{:.1f} {}".format(value, unit) if value < 10 else "{:,.0f} {}".format(value, unit)
+    return "{} bytes".format(count)
+
+
+def _short(text: str, limit: int = 40) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def outcome(result: dict) -> tuple:
+    """How a finished backup reads: its tone and the clauses that follow
+    "Backup saved" - what Git ignores and was left out (by design, so still
+    ok), and anything else left out (a warning)."""
+    clauses = []
+    ignored = (result or {}).get("ignored") or []
+    if ignored:
+        files = sum(item["files"] for item in ignored)
+        size = sum(item["bytes"] for item in ignored)
+        names = ["{}: {}".format(_short(item["name"], 32), ", ".join(
+            _short(path, 40) for path in item["paths"][:3]) +
+            (", …" if len(item["paths"]) > 3 else "")) for item in ignored[:3]]
+        clauses.append("left out {:,} file{} ({}) Git ignores in {} workspace cop{} ({}{})".format(
+            files, "" if files == 1 else "s", _bytes_text(size), len(ignored),
+            "y" if len(ignored) == 1 else "ies", "; ".join(names),
+            "; …" if len(ignored) > 3 else ""))
+    left = (result or {}).get("left_out") or []
+    if left:
+        shown = ["{}: {}".format(_short(item["name"], 32), item["reason"]) if not item["path"]
+                 else "{}: {} ({})".format(_short(item["name"], 32), _short(item["path"], 60),
+                                           item["reason"])
+                 for item in left[:4]]
+        clauses.append("{} left out: {}{}".format(
+            "1 item" if len(left) == 1 else "{:,} items".format(len(left)), "; ".join(shown),
+            "; and {:,} more".format(len(left) - 4) if len(left) > 4 else ""))
+    return ("warn" if left else "ok"), clauses
+
+
 def _tar_filter(info: tarfile.TarInfo) -> tarfile.TarInfo:
     operations.checkpoint()
     info.uid = 0
@@ -453,17 +878,29 @@ def create_archive(ui_state: dict) -> dict:
 
         scratch_saved = []
         scratch_missing = []
+        ignored, left_out = [], []
         sessions = db.list_sessions(include_archived=True)
         for session in sessions:
             if not workspaces.is_temporary(session):
                 continue
-            if workspaces.is_available(session):
-                _copy_source_tree(
-                    Path(session["cwd"]), stage / "scratch" / str(session["id"]),
-                    "scratch/{}".format(session["id"]), source_budget)
-                scratch_saved.append(session["id"])
-            else:
+            if not workspaces.is_available(session):
                 scratch_missing.append(session["id"])
+                continue
+            report = _copy_scratch(
+                Path(session["cwd"]), stage / "scratch" / str(session["id"]),
+                "scratch/{}".format(session["id"]), source_budget)
+            name = session.get("name") or "session {}".format(session["id"])
+            if "whole" in report:
+                # restored like a copy that was missing when the backup was made
+                scratch_missing.append(session["id"])
+                left_out.append({"session": session["id"], "name": name, "path": "",
+                                 "reason": report["whole"]})
+                continue
+            scratch_saved.append(session["id"])
+            left_out.extend({"session": session["id"], "name": name, "path": rel, "reason": reason}
+                            for rel, reason in report["left_out"])
+            if report["ignored"]:
+                ignored.append(dict(report["ignored"], session=session["id"], name=name))
 
         manifest = {
             "format": FORMAT_VERSION,
@@ -498,6 +935,8 @@ def create_archive(ui_state: dict) -> dict:
             "filename": "puppy-snapshot-{}.tar.gz".format(stamp),
             "size": size,
             "sessions": len(sessions),
+            "ignored": ignored,
+            "left_out": left_out,
         }
     except BaseException:
         for path in (archive_tmp, archive_path):
