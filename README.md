@@ -1393,7 +1393,10 @@ including task review/apply, scratch and project moves, backend add/edit/test, e
 listener verification and workspace sync. It appears only once the work has run
 for five seconds, so anything that answers sooner never interrupts, and shows how
 long the work has taken, counting each second, beside the step it is on where the
-backend names one. Saves, file
+backend names one. A task's review and apply name every step, a wait for another
+operation on the same project included, and end only at **Cancel** or their own
+bounds, never at a deadline of the console's; an interrupted one leaves nothing in
+the task's copy that refuses the next. Saves, file
 applies, remote-session creation and backend upgrade handoffs finish safely once
 their commit begins.
 **Stop update** can stop a running engine CLI updater and keeps its output and

@@ -47,6 +47,13 @@ FAILOVER_CONNECT_TIMEOUT = 2.5
 STATE_STREAM_HANDSHAKE_TIMEOUT = 5.0
 PROXY_TOTAL_TIMEOUT = 60.0
 PROXY_UPLOAD_TIMEOUT = 15 * 60.0
+# An audited operation (one carrying the operation header) answers only when
+# its work is over - a task's review, apply or creation on a large project, a
+# move - and has its own Cancel, relayed like any request; the backstop only
+# keeps a node that never answers from holding the request for ever. Until
+# v1.0.665 such a request was cut at PROXY_TOTAL_TIMEOUT and the node, still
+# working, was marked offline.
+PROXY_OPERATION_TIMEOUT = 6 * 3600.0
 MAX_BACKEND_URLS = 8
 UPLOAD_PROXY_PATH = re.compile(r"^sessions/\d+/upload$")
 # A file an agent shared (shared_files): relayed as a stream, never buffered,
@@ -2173,8 +2180,8 @@ async def proxy(request: web.Request):
         buffered = await request.read()
         body = buffered if buffered else None
         timeout = aiohttp.ClientTimeout(
-            total=PROXY_TOTAL_TIMEOUT, connect=FAILOVER_CONNECT_TIMEOUT,
-            sock_connect=FAILOVER_CONNECT_TIMEOUT)
+            total=PROXY_OPERATION_TIMEOUT if request.headers.get(operations.HEADER) else PROXY_TOTAL_TIMEOUT,
+            connect=FAILOVER_CONNECT_TIMEOUT, sock_connect=FAILOVER_CONNECT_TIMEOUT)
     safe_replay = request.method in ("GET", "HEAD", "OPTIONS")
     last_error = None
     for index, url in enumerate(urls):

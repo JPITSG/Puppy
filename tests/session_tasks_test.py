@@ -1127,10 +1127,113 @@ def snapshot_in_place():
           'leaves Main and the task repository as they were, and keeps the copy\'s refusals')
 
 
+def interrupted_indexes():
+    """What an interrupted review or snapshot leaves never refuses the next
+    one: each builds its private index in a folder of its own that goes with
+    it, and what an operation that never got to clean up left - the fixed
+    index and its lock of the releases before v1.0.665, a dead process's
+    folder, the scratch ref's lock - is cleared first. Git's own index.lock
+    and a folder still in use are never touched."""
+    import shutil
+    import subprocess
+    from puppy import operations
+    main = ROOT / 'locks-main'
+    task = ROOT / 'locks-task'
+    for path in (main, task):
+        shutil.rmtree(path, ignore_errors=True)
+    main.mkdir()
+    git = lambda *args: tasks._git(str(main), *args)  # noqa: E731
+    git('init', '--quiet')
+    (main / 'a.txt').write_text('one\n')
+    git('add', '-A')
+    git('commit', '-qm', 'Initial')
+    tasks._git(str(ROOT), 'clone', '--quiet', '--no-local', str(main), str(task))
+    cwd = str(task)
+    base = tasks._git(cwd, 'rev-parse', 'HEAD').decode().strip()
+    (task / 'a.txt').write_text('two\n')
+    (main / 'b.txt').write_text('main\n')
+    git_dir = task / '.git'
+    session, value = {'cwd': cwd}, {'base': base}
+
+    def leftovers():
+        return sorted(entry for entry in os.listdir(git_dir) if entry.startswith(tasks.PRIVATE_INDEXES))
+
+    def plant():
+        # the fixed indexes and the locks a killed command left: one such
+        # puppy-snapshot-index.lock refused every later apply of its task
+        for name in ('puppy-snapshot-index', 'puppy-review-index'):
+            (git_dir / name).write_bytes(b'stale')
+            (git_dir / (name + '.lock')).write_bytes(b'')
+        dead = git_dir / 'puppy-snapshot-index-deadbeef'
+        dead.mkdir()
+        (dead / 'index.lock').write_bytes(b'')
+        head_lock = git_dir / tasks.SNAPSHOT_HEAD
+        head_lock = head_lock.with_name(head_lock.name + '.lock')
+        head_lock.parent.mkdir(parents=True, exist_ok=True)
+        head_lock.write_bytes(b'')
+        return head_lock
+
+    with patch.object(tasks.workspaces, 'is_available', return_value=True):
+        head_lock = plant()
+        (git_dir / 'index.lock').write_bytes(b'')     # git's own: someone else's
+        patch_text, tree, files = tasks._changes(session, value)
+        assert b'+two' in patch_text and 'a.txt' in files, files
+        assert not leftovers(), leftovers()
+        head_lock = plant()
+        commit = tasks._snapshot_into(str(main), cwd, 'refs/puppy/locks/main')
+        listed = tasks._git(cwd, 'ls-tree', '--name-only', commit).decode().split()
+        assert listed == ['a.txt', 'b.txt'], listed
+        assert not leftovers() and not head_lock.exists()
+        assert (git_dir / 'index.lock').exists(), "git's own index.lock is never Puppy's to take"
+        os.unlink(git_dir / 'index.lock')
+        assert not tasks._git(cwd, 'for-each-ref', 'refs/puppy/snapshot')
+
+        # a command ended with its lock still held leaves nothing behind
+        real = tasks._git_run
+        def ended(word, error):
+            def run(where, *args, **kwargs):
+                if word in args:
+                    index = (kwargs.get('env') or {}).get('GIT_INDEX_FILE')
+                    assert index and os.path.dirname(index) != str(git_dir), index
+                    Path(index + '.lock').write_bytes(b'')
+                    raise error
+                return real(where, *args, **kwargs)
+            return run
+        for function, word, error in (
+                (lambda: tasks._snapshot_into(str(main), cwd), 'update-index', operations.Cancelled()),
+                (lambda: tasks._changes(session, value), 'add', subprocess.TimeoutExpired(['git'], 600))):
+            with patch.object(tasks, '_git_run', side_effect=ended(word, error)):
+                try:
+                    function()
+                except type(error):
+                    pass
+                else:
+                    raise AssertionError(word + ' was not interrupted')
+            assert not leftovers(), (word, leftovers())
+            assert not tasks._git(cwd, 'for-each-ref', 'refs/puppy/snapshot'), word
+        assert tasks._changes(session, value)[0] == patch_text
+        assert tasks._snapshot_into(str(main), cwd)
+
+        # a folder this process is using is never another operation's to clear
+        with tasks._private_index(str(git_dir), 'puppy-review-index') as held:
+            mine = os.path.dirname(held['GIT_INDEX_FILE'])
+            Path(held['GIT_INDEX_FILE']).write_bytes(b'in use')
+            with tasks._private_index(str(git_dir), 'puppy-review-index') as other:
+                assert os.path.dirname(other['GIT_INDEX_FILE']) != mine
+                assert Path(held['GIT_INDEX_FILE']).read_bytes() == b'in use'
+            assert os.path.isdir(mine)
+        assert not leftovers() and not tasks._private_live
+    for path in (main, task):
+        shutil.rmtree(path, ignore_errors=True)
+    print('PASS: an interrupted review or snapshot leaves no private index or lock behind, the '
+          'leftovers of earlier runs are cleared first, and git\'s own lock and a folder in use are kept')
+
+
 async def main():
     config.ensure_dirs()
     auto_titles()
     snapshot_in_place()
+    interrupted_indexes()
     await conflict_resolution()
     await creation_progress()
     await busy_main_creation()

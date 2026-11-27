@@ -20793,7 +20793,7 @@ async function refreshTask(bid, session) {
   if (view) view.syncTaskReviewMenu();
   try {
     const data = await api(bid, `sessions/${task.parent}/tasks/${session.id}/refresh`, {
-      method: "POST", body: {}, timeoutMs: 120000, operation: "Refreshing task from Main",
+      method: "POST", body: {}, operation: "Refreshing task from Main",
     });
     const count = Number(data.changed_files) || 0;
     toast(data.refreshed ? `Refreshed from Main · ${count} file${count === 1 ? "" : "s"} changed` :
@@ -21091,7 +21091,7 @@ async function confirmTaskRemoval(session) {
 /* Resolves to whether the conversation was folded into Main. */
 async function removeTaskSession(bid, session, choice) {
   const result = await api(bid, `sessions/${session.task.parent}/tasks/${session.id}/remove`,
-    { method: "POST", body: { fold: !!choice.fold }, timeoutMs: 120000, operation: "Removing task" });
+    { method: "POST", body: { fold: !!choice.fold }, operation: "Removing task" });
   return !!result.folded;
 }
 async function removeTask(bid, session) {
@@ -21750,7 +21750,7 @@ async function modalNewTask(workspace) {
     error.classList.add("hidden");
     try {
       submitted = true;
-      const data = await api(bid, `sessions/${sid}/tasks`, { method: "POST", timeoutMs: 180000, body, operation: "Preparing task", cancelClose: cancelCreation });
+      const data = await api(bid, `sessions/${sid}/tasks`, { method: "POST", body, operation: "Preparing task", cancelClose: cancelCreation });
       spellLearnSent(prompt);     // a created task's prompt is a sent message
       const list = sessionsFor(bid);
       if (!list.some(s => s.id === data.session.id)) list.push(data.session);
@@ -22012,7 +22012,7 @@ async function modalReviewTask(workspace, session) {
   m.querySelector("#tr-close").onclick = close;
   try {
     const base = `sessions/${workspace.tab.sid}/tasks/${session.id}`;
-    const data = await api(workspace.tab.bid, base + "/review", { method: "POST", body: {}, timeoutMs: 120000, operation: "Preparing task review", cancelClose: close });
+    const data = await api(workspace.tab.bid, base + "/review", { method: "POST", body: {}, operation: "Preparing task review", cancelClose: close });
     if (!m.isConnected) return;
     const list = String(data.files || "").trim();
     const count = list ? list.split("\n").length : 0;
@@ -22052,7 +22052,7 @@ async function modalReviewTask(workspace, session) {
       let result;
       try {
         result = applied ? { applied: true } : await api(workspace.tab.bid, base + "/apply", { method: "POST",
-          body: { token: data.token, ...(resolve && data.has_changes ? { resolve_conflicts: resolve.checked } : {}) }, timeoutMs: 180000, operation: "Applying task" });
+          body: { token: data.token, ...(resolve && data.has_changes ? { resolve_conflicts: resolve.checked } : {}) }, operation: "Applying task" });
         if (result.applied && !result.resolving && foldAfterApply) {
           applied = true;
           apply.textContent = "Folding…";

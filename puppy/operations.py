@@ -192,11 +192,42 @@ def copy2(source, destination, *, follow_symlinks=True):
     return destination
 
 
+TERM_GRACE = 2.0
+
+
+def end_group(process, grace=None):
+    """End the process group ``process`` leads, and reap its leader.
+
+    A leader still running is asked first, with SIGTERM: Git, for one, then
+    takes away the lock files it holds - ``index.lock`` and a private index's
+    alike - where a SIGKILL leaves them behind for good, refusing every later
+    command in that repository (until v1.0.665 a cancelled task apply did just
+    that). Whatever is left after ``grace`` seconds (TERM_GRACE unless
+    given), and any descendant still in the group, is killed."""
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        else:
+            try:
+                process.wait(timeout=TERM_GRACE if grace is None else grace)
+            except subprocess.TimeoutExpired:
+                pass
+    # Descendants may outlive their parent or hold its output pipes.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
 def run_process(argv, *, input=None, timeout=60, tick=None, **kwargs):
     """Bounded Git/build preparation with process-group cleanup on Cancel.
 
     ``tick`` is called about ten times a second while the process runs, to
-    report how far it has come."""
+    report how far it has come. A cancel or the deadline ends the process
+    through `end_group`, so that it can clean up after itself first."""
     checkpoint()
     deadline = time.monotonic() + timeout
     with subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
@@ -217,12 +248,7 @@ def run_process(argv, *, input=None, timeout=60, tick=None, **kwargs):
                     if tick is not None:
                         tick()
         finally:
-            # Descendants may outlive their parent or hold its output pipes.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
+            end_group(process)
 
 
 def _records(app):

@@ -390,6 +390,22 @@ the same rules as the copy a creation makes (relative symlinks within the
 project, no special files, the file and size limits). Main's files, index
 and refs are only read. A sync, a refresh and a conflict resolution all use
 it; only a creation clones Main.
+A review's diff and a snapshot each build their private index in a folder of
+their own inside the copy's git dir (`puppy-review-index-…`,
+`puppy-snapshot-index-…`, `_private_index`), removed with the operation
+whatever git left in it, so an interrupted one never leaves the next a lock to
+trip over. Before it starts, each clears what an operation that never got to
+clean up left under those names, and the scratch ref's lock
+(`refs/puppy/snapshot/head.lock`): before v1.0.665 the index had one fixed name
+per purpose, and the lock a killed command left on it (after a cancelled
+apply, say) refused every later review or apply of that task with git's
+"File exists". Git's own `index.lock` is never Puppy's to remove, and nothing a
+running operation of this process holds is touched. Hashing a copy's working
+files, diffing them and checking or applying the patch to Main have
+`TREE_SECONDS` (600) each. The review dialog names each step and each wait -
+for another task operation of the same Main, or for another operation on Main's
+project - and has no deadline of its own: until v1.0.665 the console cancelled a
+review still running after two minutes and an apply after three.
 A merge of Main into a task (a conflict round, or the task's own `sync_main`)
 keeps its inputs at `refs/puppy/sync/{base,task,main}` inside that copy, moves
 `refs/puppy/base` and the record's `base` to the Main snapshot, and appends an

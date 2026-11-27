@@ -7,7 +7,7 @@ travel together in backups. Only an explicit apply writes into the parent.
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import functools
 import hashlib
 import json
@@ -21,6 +21,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 
 from aiohttp import web
@@ -996,6 +997,54 @@ def _copy_project(root, destination, committed=False):
 
 
 SNAPSHOT_HEAD = "refs/puppy/snapshot/head"
+# Commands that read a whole working tree or a whole patch: hashing a large
+# copy or checking a 64 MiB patch is not a 60-second job on a busy disk.
+TREE_SECONDS = 600
+# The private indexes a task operation builds in the task's own git dir, each
+# in a folder of its own named after its purpose (``puppy-review-index-…``).
+PRIVATE_INDEXES = ("puppy-snapshot-index", "puppy-review-index")
+_private_lock = threading.Lock()
+_private_live = set()       # the folders operations of this process are using
+
+
+def _drop_entry(path):
+    """Remove a file, link or folder without following a link."""
+    try:
+        if stat.S_ISDIR(os.lstat(path).st_mode):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+@contextmanager
+def _private_index(git_dir, purpose):
+    """A private index for one operation in a task's repository: git's
+    environment naming an index in a folder of the operation's own inside the
+    git dir. The folder goes with the operation, whatever git left in it - the
+    index, and the lock of a command that ended before it could let go - so an
+    interrupted operation never leaves the next one a "File exists" refusal.
+    What an operation that never got to clean up left under these names is
+    cleared first: a Puppy that died mid-operation, or before v1.0.665 the one
+    fixed index per purpose and the lock a killed command left on it, which
+    refused every review or apply of that task from then on. Operations on one
+    task are serialized, and no folder this process is using is touched."""
+    with _private_lock:
+        for entry in os.listdir(git_dir):
+            path = os.path.join(git_dir, entry)
+            if entry.startswith(PRIVATE_INDEXES) and path not in _private_live:
+                _drop_entry(path)
+        folder = tempfile.mkdtemp(prefix=purpose + "-", dir=git_dir)
+        _private_live.add(folder)
+    try:
+        yield {"GIT_INDEX_FILE": os.path.join(folder, "index")}
+    finally:
+        try:
+            shutil.rmtree(folder, ignore_errors=True)
+        finally:
+            with _private_lock:
+                _private_live.discard(folder)
 
 
 def _snapshot_paths(root, paths):
@@ -1093,55 +1142,51 @@ def _snapshot_into(root, cwd, ref=None, committed=False):
     if any(entry.startswith(b"160000 ") for entry in stage.split(b"\0")):
         raise TaskError("Submodules need to be handled in their own session")
     task_git = os.fsdecode(_git(cwd, "rev-parse", "--absolute-git-dir").strip())
-    index = os.path.join(task_git, "puppy-snapshot-index")
-    env = {"GIT_INDEX_FILE": index}
     head = ""
-    try:
-        if os.path.lexists(index):
-            os.unlink(index)
-        if _git_run(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}").returncode == 0:
-            operations.report("Reading Main's new commits")
-            _git(cwd, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-                 "--no-recurse-submodules", "--", root, "+HEAD:" + SNAPSHOT_HEAD, timeout=120)
-            head = _git(cwd, "rev-parse", SNAPSHOT_HEAD + "^{commit}").decode().strip()
-        if committed:
-            if head:
-                _git(cwd, "read-tree", head, env=env, timeout=120)
-            _tree_bounds(cwd, head)
-            # A note the commit holds is already there; an ignored one is not.
-            paths = [name for name in NOTES if os.path.lexists(os.path.join(root, name)) and
-                     not (head and _git(cwd, "ls-tree", "--name-only", head, "--", name).strip())]
-        else:
-            tracked = _git(root, "ls-files", "-z", "--cached", "--others",
-                           "--exclude-standard").split(b"\0")
-            paths = list(dict.fromkeys(os.fsdecode(path) for path in tracked if path))
-            # Project conventions remain available even when the notes are gitignored.
-            for name in NOTES:
-                if os.path.lexists(os.path.join(root, name)) and name not in paths:
-                    paths.append(name)
-            if len(paths) > COPY_FILES:
-                raise TaskError("Project has too many files for a task copy")
-        selected = _snapshot_paths(root, paths)
-        if selected:
-            operations.report("Recording Main's working files", "{:,} files".format(len(selected)))
-            # Main's files hashed from where they stand into the task's store;
-            # update-index consults no ignore rules, as the copy's add --force
-            _git(root, "--git-dir=" + task_git, "--work-tree=" + root, "update-index",
-                 "--add", "-z", "--stdin", env=env, timeout=600,
-                 data=b"".join(os.fsencode(path) + b"\0" for path in selected))
-        tree = _git(cwd, "write-tree", env=env).decode().strip()
-        commit = _git(cwd, "commit-tree", tree, *(("-p", head) if head else ()),
-                      "-m", "Task starting point").decode().strip()
-        if ref:
-            _git(cwd, "update-ref", ref, commit)
-        return commit
-    finally:
+    with _private_index(task_git, "puppy-snapshot-index") as env:
         try:
-            os.unlink(index)
-        except FileNotFoundError:
-            pass
-        if head:
-            _git_run(cwd, "update-ref", "-d", SNAPSHOT_HEAD)
+            if _git_run(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}").returncode == 0:
+                operations.report("Reading Main's new commits")
+                # The scratch ref is Puppy's alone: a fetch that could not let
+                # go of its lock holds it for no one.
+                _drop_entry(os.path.join(task_git, SNAPSHOT_HEAD + ".lock"))
+                _git(cwd, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+                     "--no-recurse-submodules", "--", root, "+HEAD:" + SNAPSHOT_HEAD, timeout=120)
+                head = _git(cwd, "rev-parse", SNAPSHOT_HEAD + "^{commit}").decode().strip()
+            if committed:
+                if head:
+                    _git(cwd, "read-tree", head, env=env, timeout=120)
+                _tree_bounds(cwd, head)
+                # A note the commit holds is already there; an ignored one is not.
+                paths = [name for name in NOTES if os.path.lexists(os.path.join(root, name)) and
+                         not (head and _git(cwd, "ls-tree", "--name-only", head, "--", name).strip())]
+            else:
+                tracked = _git(root, "ls-files", "-z", "--cached", "--others",
+                               "--exclude-standard").split(b"\0")
+                paths = list(dict.fromkeys(os.fsdecode(path) for path in tracked if path))
+                # Project conventions remain available even when the notes are gitignored.
+                for name in NOTES:
+                    if os.path.lexists(os.path.join(root, name)) and name not in paths:
+                        paths.append(name)
+                if len(paths) > COPY_FILES:
+                    raise TaskError("Project has too many files for a task copy")
+            selected = _snapshot_paths(root, paths)
+            if selected:
+                operations.report("Recording Main's working files", "{:,} files".format(len(selected)))
+                # Main's files hashed from where they stand into the task's store;
+                # update-index consults no ignore rules, as the copy's add --force
+                _git(root, "--git-dir=" + task_git, "--work-tree=" + root, "update-index",
+                     "--add", "-z", "--stdin", env=env, timeout=TREE_SECONDS,
+                     data=b"".join(os.fsencode(path) + b"\0" for path in selected))
+            tree = _git(cwd, "write-tree", env=env).decode().strip()
+            commit = _git(cwd, "commit-tree", tree, *(("-p", head) if head else ()),
+                          "-m", "Task starting point").decode().strip()
+            if ref:
+                _git(cwd, "update-ref", ref, commit)
+            return commit
+        finally:
+            if head:
+                _git_run(cwd, "update-ref", "-d", SNAPSHOT_HEAD)
 
 
 def _changes(session, value):
@@ -1158,26 +1203,18 @@ def _changes(session, value):
     if _git(cwd, "ls-files", "--unmerged", "-z"):
         raise TaskError("This task still has unresolved Git conflicts; finish resolving them before reviewing it")
     git_dir = os.fsdecode(_git(cwd, "rev-parse", "--absolute-git-dir").strip())
-    index = os.path.join(git_dir, "puppy-review-index")
-    env = {"GIT_INDEX_FILE": index}
-    try:
-        if os.path.lexists(index):
-            os.unlink(index)
+    with _private_index(git_dir, "puppy-review-index") as env:
         real_index = os.path.join(git_dir, "index")
         if os.path.isfile(real_index):
-            shutil.copyfile(real_index, index)
-        _git(cwd, "add", "-A", env=env)
-        patch = _git(cwd, "diff", "--cached", "--binary", "--no-ext-diff", value["base"], env=env)
+            shutil.copyfile(real_index, env["GIT_INDEX_FILE"])
+        _git(cwd, "add", "-A", env=env, timeout=TREE_SECONDS)
+        patch = _git(cwd, "diff", "--cached", "--binary", "--no-ext-diff", value["base"], env=env,
+                     timeout=TREE_SECONDS)
         if len(patch) > MAX_PATCH:
             raise TaskError("Task changes exceed the {} MiB review limit; split the work into smaller tasks"
                             .format(MAX_PATCH >> 20))
         tree = _git(cwd, "write-tree", env=env).decode().strip()
         files = _git(cwd, "diff", "--cached", "--name-status", "--no-ext-diff", value["base"], env=env).decode("utf-8", "replace")
-    finally:
-        try:
-            os.unlink(index)
-        except FileNotFoundError:
-            pass
     return patch, tree, files
 
 
@@ -1386,6 +1423,7 @@ async def _resolve_conflicts(root, task, value, tree, token, conflict):
         raise TaskError("Puppy is shutting down; retry after the restart")
     hub = runner.hub(task["id"])
     _review_idle(hub)
+    operations.report("Preparing the conflict resolution")
     main, refs = await operations.to_thread(_resolution_snapshot, root, task, value, tree, token)
     prompt = (
         "Resolve conflicts for this task's Apply to Main attempt. The user enabled Resolve conflicts; "
@@ -1686,7 +1724,8 @@ async def changes(parent_id, sid, check=True):
         if check and patch:
             root = await _main_root(parent)
             # git apply --check reads Main's files and writes nothing
-            run = await operations.to_thread(_git_run, root, "apply", "--check", "--binary", "-", data=patch)
+            run = await operations.to_thread(_git_run, root, "apply", "--check", "--binary", "-", data=patch,
+                                             timeout=TREE_SECONDS)
             applies = run.returncode == 0
             reason = run.stderr.decode("utf-8", "replace")[:3000].strip()
         return {"unmerged": [], "patch": patch, "files": files, "applies": applies, "check": reason,
@@ -1970,7 +2009,8 @@ async def _auto_locked(parent_id, parent, sid, task, value, auto, root, resolve)
         # no file work to apply, or all of it applied already: fold it
         _note(sid, "")
         return "applied"
-    check = await operations.to_thread(_git_run, root, "apply", "--check", "--binary", "-", data=patch)
+    check = await operations.to_thread(_git_run, root, "apply", "--check", "--binary", "-", data=patch,
+                                       timeout=TREE_SECONDS)
     if check.returncode not in (0, 1):
         raise GitError(check.stderr.decode("utf-8", "replace")[:3000].strip() or "Git could not check the task's changes",
                        check.returncode)
@@ -1989,11 +2029,12 @@ async def _auto_locked(parent_id, parent, sid, task, value, auto, root, resolve)
             raise TaskError("Task changes exceed the {} MiB review limit; split the work into smaller tasks"
                             .format(MAX_PATCH >> 20))
         if patch:
-            await operations.to_thread(_git, root, "apply", "--check", "--binary", "-", data=patch)
+            await operations.to_thread(_git, root, "apply", "--check", "--binary", "-", data=patch,
+                                       timeout=TREE_SECONDS)
         merged_with_main = True
     operations.commit()
     if patch:
-        await operations.to_thread(_git, root, "apply", "--binary", "-", data=patch)
+        await operations.to_thread(_git, root, "apply", "--binary", "-", data=patch, timeout=TREE_SECONDS)
     await operations.to_thread(_git, task["cwd"], "update-ref", "refs/puppy/base", tree)
     value.update(base=tree, applied_at=time.time())
     _save(sid, value)
@@ -2229,10 +2270,18 @@ async def create(parent_id, args, caller=0):
             _busy_roots.discard(root)
 
 
+def _waiting(lock, phase):
+    """Name the wait in the operation's progress line when someone else holds
+    the lock it is about to take."""
+    if lock is not None and lock.locked():
+        operations.report(phase)
+
+
 async def review(parent_id, sid, expected=None, resolve_conflicts=False):
     from puppy import runner, workspace_sync
     if type(resolve_conflicts) is not bool:
         raise TaskError("resolve_conflicts must be true or false")
+    _waiting(_locks.get(parent_id), "Waiting for another task operation in this session")
     async with session_operation(parent_id):
         value = record(sid)
         if value is None or value["parent"] != parent_id:
@@ -2246,6 +2295,7 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
             raise TaskError("Task workspace is busy")
         _busy_roots.add(task_root)
         try:
+            operations.report("Reading the task's changes")
             patch, tree, files = await operations.to_thread(_changes, task, value)
             # Bind the token to both inputs, including an advanced resolution
             # baseline. A lost reply or second console cannot start the same
@@ -2255,11 +2305,14 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
                 if expected != token:
                     raise TaskError("Task changes have changed; review them again")
                 root = await _main_root(parent)
+                _waiting(_project_locks.get(root), "Waiting for another operation on Main's project")
                 async with workspace_operation(root):
                     _review_idle(hub)
                     if patch:
+                        operations.report("Checking the changes against Main")
                         try:
-                            await operations.to_thread(_git, root, "apply", "--check", "--binary", "-", data=patch)
+                            await operations.to_thread(_git, root, "apply", "--check", "--binary", "-", data=patch,
+                                                       timeout=TREE_SECONDS)
                         except GitError as exc:
                             # Only a conflicting check starts an agent. Stale
                             # reviews, busy sessions, invalid patches and I/O
@@ -2268,7 +2321,9 @@ async def review(parent_id, sid, expected=None, resolve_conflicts=False):
                                 raise
                             return await _resolve_conflicts(root, task, value, tree, token, exc)
                         operations.commit()
-                        await operations.to_thread(_git, root, "apply", "--binary", "-", data=patch)
+                        operations.report("Applying the changes to Main")
+                        await operations.to_thread(_git, root, "apply", "--binary", "-", data=patch,
+                                                   timeout=TREE_SECONDS)
                     operations.commit()
                     # The applied tree becomes the next baseline; naming it keeps
                     # it out of the copy's garbage collection.

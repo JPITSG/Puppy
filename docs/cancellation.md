@@ -51,12 +51,25 @@ or included in backups. Active records are never evicted.
 
 Cancellation is cooperative. Worker copies, Git processes and compressed
 archive streams check it; cancellation-safe asynchronous waits cancel and drain
-their child. Threads retain their owning operation and locks until cleanup
+their child. `run_process` ends a child that a cancel or its deadline stops
+through `end_group`: SIGTERM to its process group first, and SIGKILL to whatever
+is left `TERM_GRACE` (2 s) later. Git answers SIGTERM by taking away the lock
+files it holds, which a SIGKILL leaves behind for good: until v1.0.665 a
+cancelled task apply left its private index's lock, and every later review or
+apply of that task was refused with git's "File exists". Threads retain their owning operation and locks until cleanup
 finishes. `commit()` arbitrates cancellation under the same lock before an
 irreversible step. A refused cancellation is presented as Finishing with Close,
 not as success. Accepted cancellation keeps the dialog visible until the owner
 reports cleanup complete. Failed cancellation remains visible and retryable.
 A lost HTTP reply triggers best-effort cancellation without claiming rollback.
+A relayed operation (the controller's proxy sees its `X-Puppy-Operation`
+header) waits for its answer up to `PROXY_OPERATION_TIMEOUT` (six hours) rather
+than the 60 seconds of an ordinary relayed request: until v1.0.665 a task review
+or apply still working after a minute was cut off and its backend called
+offline. The task review, apply, refresh, removal and creation requests carry
+no deadline of their own in the console either: their dialog's clock and Cancel
+belong to the person, where a 120- or 180-second deadline used to cancel work
+that was still under way.
 Waiting for session, project or sync ownership is also cancellable, as is waiting
 to hear whether a [drive answers](silent-drives.md); a waiter
 never releases another operation's lock. When Puppy stops it waits for accepted

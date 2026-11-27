@@ -514,6 +514,113 @@ async def subprocesses():
     print("PASS: command/probe child cleanup, retained updater transcript and stale Stop guards")
 
 
+def git_locks():
+    """A cancel or a deadline asks a process to end before killing it: git
+    then takes away the lock it holds, which a SIGKILL left behind for good
+    and every later command in that repository refused."""
+    import subprocess
+    repo = ROOT / "locked-repo"
+    shutil.rmtree(repo, ignore_errors=True)
+    repo.mkdir()
+    git = lambda *args: subprocess.run(["git", "-C", str(repo), *args], check=True,  # noqa: E731
+                                       capture_output=True)
+    git("init", "--quiet")
+    (repo / "file.txt").write_text("one\n")
+    git("add", "file.txt")
+    lock = repo / ".git" / "index.lock"
+    # git commit -a holds index.lock while its editor runs: git's own example
+    # of "Another git process seems to be running in this repository"
+    argv = ["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "core.hooksPath=/dev/null", "commit", "-a"]
+    env = dict(os.environ, GIT_EDITOR="sleep 60 #")   # "#": git passes the message file after it
+
+    def committing(op, outcome):
+        with operations.owned_by(op):
+            try:
+                operations.run_process(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except BaseException as exc:      # noqa: B902 - the outcome is the test's
+                outcome.append(exc)
+    op, outcome = operations.Operation(), []
+    worker = threading.Thread(target=committing, args=(op, outcome))
+    worker.start()
+    deadline = time.monotonic() + 10
+    while not lock.exists():
+        assert time.monotonic() < deadline, "git never took its lock"
+        time.sleep(.01)
+    started = time.monotonic()
+    op.cancel()
+    worker.join(10)
+    assert not worker.is_alive() and isinstance(outcome[0], operations.Cancelled), outcome
+    assert time.monotonic() - started < operations.TERM_GRACE + 1, "git answered TERM at once"
+    assert not lock.exists(), "a cancelled git left index.lock"
+    assert subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c",
+                           "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "after"],
+                          capture_output=True).returncode == 0, "the repository refused the next commit"
+    # the deadline ends it the same way
+    (repo / "file.txt").write_text("two\n")
+    git("add", "file.txt")
+    try:
+        operations.run_process(argv, env=env, timeout=.5, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        raise AssertionError("the deadline was not kept")
+    assert not lock.exists(), "a timed-out git left index.lock"
+    # a program that ignores TERM is killed once the grace is spent
+    with patch.object(operations, "TERM_GRACE", .3):
+        started = time.monotonic()
+        try:
+            operations.run_process(["/bin/sh", "-c", "trap '' TERM; sleep 60 & wait"], timeout=.2,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            raise AssertionError("the deadline was not kept")
+        assert time.monotonic() - started < 3, "a program ignoring TERM outlived its grace"
+    shutil.rmtree(repo, ignore_errors=True)
+    print("PASS: a cancelled or timed-out git is asked to end and lets go of its lock; "
+          "a program ignoring TERM is killed after the grace")
+
+
+async def relayed_operation_deadline():
+    """A relayed operation is not cut at the proxy's ordinary deadline, nor is
+    the node that is still working on it called offline."""
+    async def slow(request):
+        await asyncio.sleep(.6)
+        return web.json_response({"ok": True, "operation": request.headers.get(operations.HEADER)})
+    node = web.Application()
+    node.router.add_post("/api/sessions/1/tasks/2/apply", slow)
+    server = TestServer(node); await server.start_server()
+    controller = web.Application()
+    controller.router.add_route("*", "/api/b/{bid}/{tail:.*}", backends.proxy)
+    be = {"id": 701, "name": "Demo", "token": "private-fixture", "tls_fingerprint": ""}
+    offline = []
+    try:
+        async with ClientSession() as session, TestClient(TestServer(controller)) as client:
+            with patch.object(backends, "client", return_value=session), \
+                    patch.object(backends, "get_backend", return_value=be), \
+                    patch.object(backends, "backend_is_online", return_value=True), \
+                    patch.object(backends, "_ordered_backend_urls", return_value=[str(server.make_url("/")).rstrip("/")]), \
+                    patch.object(backends, "_remember_active_url", return_value=False), \
+                    patch.object(backends, "_mark_backend_online", return_value=False), \
+                    patch.object(backends, "_mark_backend_offline", side_effect=lambda bid, why: offline.append(bid)), \
+                    patch.object(backends, "_advance_url_cursor"), \
+                    patch.object(backends, "close_proxy_websockets", AsyncMock()), \
+                    patch.object(backends, "PROXY_TOTAL_TIMEOUT", .2):
+                async with client.post("/api/b/701/sessions/1/tasks/2/apply", json={}) as response:
+                    assert response.status == 503 and offline == [701], "an ordinary request keeps its deadline"
+                offline.clear()
+                key = identity()
+                async with client.post("/api/b/701/sessions/1/tasks/2/apply", json={},
+                                       headers={operations.HEADER: key}) as response:
+                    assert response.status == 200, await response.text()
+                    assert (await response.json())["operation"] == key
+                assert not offline, "a node still working on an operation was called offline"
+    finally:
+        await server.close()
+    print("PASS: a relayed operation outlasts the proxy's ordinary deadline and its node stays online")
+
+
 async def attachment_cancellation():
     source = ROOT / "attachment.txt"; source.write_bytes(b"source attachment")
     entered = threading.Event()
@@ -644,8 +751,10 @@ async def main():
         await runtimes()
         await backup_cancellation()
         await subprocesses()
+        git_locks()
         await attachment_cancellation()
         await relayed_command()
+        await relayed_operation_deadline()
         await side_question()
     finally:
         db.connect().close()

@@ -269,6 +269,11 @@ still contain a value written before that release.
   agent's `sessions` listing marks them `selected` and says so in
   `selection`. `"[all]"` and `"[this]"`, the notation's spelling, read as
   those words. No stored format or wire capability changes.
+- Since v1.0.665 a controller relays a request carrying `X-Puppy-Operation`
+  with a six-hour backstop (`PROXY_OPERATION_TIMEOUT`) instead of the ordinary
+  60 seconds, so a node still working on a long operation is no longer cut
+  off and marked offline; the operation's own Cancel is relayed as before.
+  No stored format or wire capability changes.
 - Since v1.0.664 prompt recall also walks the questions put with Ask:
   `session-prompt-history-asks` lets `GET /api/sessions/{sid}/events` take
   `kind=side_question` beside `kind=user` (repeated `kind` parameters, one
